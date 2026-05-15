@@ -356,3 +356,33 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
     빈 답변, passed_verifications/suspicious_sentences 접근자
 - 남은 TODO: feature11[Pipeline](응답 포맷터) → feature5(Dual Embedding + Multi-Pool
   Vector Store, 다리) → feature9-B(노드 오케스트레이션) → feature11(그래프·API 조립)
+
+## 2026-05-15 — feature11-Pipeline: 응답 포맷터
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 테스트 우선(TDD)으로 응답 포맷터를 구현 (rag-pipeline-design.md §6 4.8, api-spec.md)
+  - `app/query/formatter.py` — `format_response(answer, sources, verification, intent,
+    used_llm, latency_ms) -> QueryResponse`: 생성·검증을 거친 답변을 QueryResponse로
+    변환하고 api-spec.md "표준 분기 응답" 규칙을 적용
+    - NOT_SUPPORTED 비율 > 0.5 → 답변 차단, `BLOCKED_ANSWER_MESSAGE`로 대체,
+      `feedback_enabled=False` (차단이 저신뢰보다 우선)
+    - Cross-Encoder 최고 점수 < 20(0~100 척도) 또는 출처 없음 → 저신뢰 분기,
+      `feedback_enabled=False` (답변은 '참고용'으로 유지)
+    - 출처·검증 결과는 어느 분기에서도 투명성 위해 그대로 응답에 담음
+    - 헬퍼: `_is_low_confidence`, `_not_supported_ratio` / 상수: `LOW_CONFIDENCE_SCORE`(20),
+      `VERIFICATION_BLOCK_RATIO`(0.5), `BLOCKED_ANSWER_MESSAGE`
+  - `app/query/__init__.py` — re-export 갱신
+- scoping 결정(코드·current-plan.md에 명시): feature9-A처럼 순수 변환 함수만 구현.
+  `Source` 객체 생성(Chunk + Cross-Encoder 점수 → Source)은 점수를 가진 feature9-B 책임 —
+  포맷터는 완성된 `Source`를 입력으로 받는다(`RagState.sources`가 이미 `list[Source]`).
+  검색 0건 early-exit·RagState→인자 추출 노드 래퍼는 Query 그래프 조립(feature11 통합) 몫
+- 수정 파일: `app/query/{formatter,__init__}.py` + `tests/query/test_formatter.py` +
+  `docs/ai/current-plan.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **166 passed** (기존 157 + feature11-Pipeline 9). ruff format·check 통과
+  - 테스트: 정상 응답(feedback_enabled=True), 저신뢰 분기·경계값(점수 20)·출처 없음,
+    검증 차단·경계값(정확히 50%)·검증 없음, 차단 우선순위, sources/verification 통과
+- 남은 TODO: feature5(Dual Embedding + Multi-Pool Vector Store, 다리) → feature9-B(검색·
+  재순위화 노드 오케스트레이션) → feature11 통합(Query 그래프 조립 + FastAPI 라우트,
+  Agent 노드 stub → 전달 후 교체). 본 담당자의 Query 순수 로직(7·9-A·10-Pipeline·
+  11-Pipeline)은 완료 — 이후는 feature5 다리부터
