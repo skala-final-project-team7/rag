@@ -181,22 +181,41 @@
 
 - [ ] Dense(e5-large) + Sparse(BM25) 임베딩, Qdrant title/content/label pool upsert
 
-### feature6: 문서 분석기 + 첨부 분석기 + Ingestion 그래프
+### feature6: 문서 분석기 + 첨부 분석기 + Ingestion 그래프 — ⚠ 담당 분리
 
-- 수정 대상: `app/ingestion/{document_analyzer,attachment_analyzer,sync,jobs}.py`, `app/pipeline/ingestion_graph.py`, `app/llm/*`
-- 테스트: mock LLM으로 doc_type 판별·캐싱·Fallback, Reconciliation 고스트 삭제, 그래프 흐름
-- 위험: 문서 분석기는 Agent — LLM 응답 mock 필수
+- **본 담당자 몫(Pipeline)**: 첨부 파일 분석기(`app/ingestion/attachment_analyzer.py`),
+  삭제 동기화(`app/ingestion/sync.py`), `ingestion_jobs` 기록 헬퍼(`app/ingestion/jobs.py`).
+- **Agent 담당자 몫**: 문서 분석기(`app/ingestion/document_analyzer.py` [Agent]).
+- **통합 지점**: Ingestion 그래프 조립(`app/pipeline/ingestion_graph.py`) — Agent 노드 stub →
+  전달 후 교체.
+- 테스트: 첨부 분석·Reconciliation 고스트 삭제·그래프 흐름(본 담당자, mock/stub),
+  mock LLM으로 doc_type 판별·캐싱·Fallback(Agent 담당자)
 
 작업 항목:
 
-- [ ] 문서 분석기 [Agent] + 첨부 분석기 [Pipeline] + 삭제 동기화 + Ingestion LangGraph 조립
+- [ ] (본 담당자) 첨부 분석기 [Pipeline] + 삭제 동기화 [Pipeline] + jobs 헬퍼 + Ingestion 그래프 조립
+- [ ] (Agent 담당자) 문서 분석기 [Agent]
 
 ## Milestone C — Query 파이프라인
 
-> **진행 메모 (2026-05-15)**: RAG 담당자의 기획서 범위는 Query 파이프라인이므로, Ingestion
-> (Milestone B)은 feature4-A까지 완료한 상태에서 Query(Milestone C)로 전환한다. Ingestion
-> 잔여(feature4-B-2 PDF, feature5·6)는 별도 담당/세션 몫. feature1·2(공통 기반)는 양 파이프라인
-> 공용이라 그대로 활용한다.
+> **진행 메모 (2026-05-15 갱신)**: RAG 담당자의 기획서 범위는 Query 파이프라인이며,
+> **Agent 컴포넌트는 별도 담당자 몫**이다 — Agent 코드·파일은 추후 전달받아 병합한다.
+> 따라서 본 담당자는 각 feature의 **[Pipeline]/[Storage] 부분만** 진행하고 **[Agent] 부분은
+> 건너뛴다.** Ingestion(Milestone B)은 feature4-A까지 완료, 이후 Query(Milestone C)로 전환.
+>
+> **Agent / Pipeline 경계와 병합 방식:**
+> - Agent 담당자 전달분: 질의 라우터·멀티턴 히스토리(feature8 전체), 답변 생성기·검증 2단계
+>   LLM 평가자(feature10 일부), 문서 분석기(feature6 일부), 그리고 `app/llm/`(Agent 인프라).
+> - Agent 노드와 Pipeline 노드는 **서로 직접 호출하지 않는다.** 공유 seam은 (1) `RagState`
+>   — feature1에서 동결된 상태 계약, 각 노드가 필드를 읽고 쓴다, (2) LangGraph 그래프(feature11)
+>   — 노드를 순서대로 배선, (3) 합의된 모듈 경로·노드 시그니처(각 feature에 명시).
+> - 본 담당자의 Pipeline 노드는 RagState 필드 계약만 지키면 Agent 코드와 독립적으로 구현·
+>   단위테스트된다. 그래프 조립 시 Agent 노드는 stub/fake로 대체했다가 실제 코드 전달 시
+>   교체한다 (app/CLAUDE.md §6).
+>
+> **진행 순서**: feature7(완료) → feature9-A → feature10[Pipeline] → feature11[Pipeline:
+> 포맷터] → feature5(다리) → feature9-B → feature11(그래프·API 조립) → feature6[Pipeline]
+> → feature4-B. feature1·2(공통 기반)는 양 파이프라인 공용이라 그대로 활용한다.
 
 ### feature7: ACL Pre-filtering + @enforce_acl  ✅ 완료 (2026-05-15)
 
@@ -238,42 +257,84 @@
 
 - [x] ACL 필터 생성 + `@enforce_acl` 데코레이터 + JWT 클레임 추출
 
-### feature8: 질의 라우터 + 멀티턴 히스토리 [Agent]
+### feature8: 질의 라우터 + 멀티턴 히스토리 [Agent] — ⏭ 별도 담당자 몫
 
-- 수정 대상: `app/query/router.py`, `app/query/history.py`, `app/llm/structured_output.py`
-- 테스트: mock LLM으로 4종 의도 분류·쿼리 확장·필터/가중치, 히스토리 보존·검색스킵, 타임아웃 Fallback
-
-작업 항목:
-
-- [ ] 질의 라우터(Intent+Rewrite+Filter 단일 호출) + 멀티턴 히스토리 관리자
-
-### feature9: Multi-Pool Hybrid Search + Cross-Encoder 재순위화
-
-- 수정 대상: `app/query/search.py`, `app/query/rerank.py`
-- 테스트: RRF 결합, Pool 가중 합산, Top-20→Top-5, 0건/저신뢰 분기
+- 질의 라우터·멀티턴 히스토리 관리자는 **둘 다 Agent 컴포넌트**이며 `app/llm/`(Agent 인프라)에
+  의존한다. 본 담당자(Pipeline) 범위 밖 — Agent 담당자가 구현해 전달한다.
+- 수정 대상(Agent 담당자): `app/query/router.py`, `app/query/history.py`, `app/llm/structured_output.py`
+- **병합 계약**: 노드 시그니처 `(state: RagState) -> RagState`. 라우터는 RagState의
+  `intent`/`rewritten_queries`/`metadata_filters`/`pool_weights`/`target_llm`를, 히스토리
+  관리자는 `history`/`needs_search`를 채운다. 본 담당자의 feature9는 이 필드들을 입력으로 받는다
+  (단위테스트에서는 픽스처로 주입).
 
 작업 항목:
 
-- [ ] Hybrid Search(RRF + Score Fusion) + Cross-Encoder 재순위화
+- [ ] (Agent 담당자) 질의 라우터 + 멀티턴 히스토리 관리자 — 전달 후 그래프(feature11)에 배선
 
-### feature10: 답변 생성기 + 답변 검증
+### feature9: Multi-Pool Hybrid Search + Cross-Encoder 재순위화 [Pipeline]
 
-- 수정 대상: `app/query/generator.py`, `app/query/verifier.py`
-- 테스트: 의도별 프롬프트 조립, citation 매핑, 1단계 규칙 매칭, 2단계 LLM 평가자 게이팅
+- **작업 목표**: 3개 Pool 검색 결과를 RRF로 융합·가중 합산해 Top-20을 뽑고, Cross-Encoder
+  재순위화로 Top-5를 선정한다 (rag-pipeline-design.md §6 4.5, §8). 전부 [Pipeline] — 본 담당자 몫.
+- **브랜치**: `feat/#1/rag-pipeline-skeleton` (기반 작업 연장)
+- **외부 의존성(임베딩 모델·Qdrant·Cross-Encoder 모델) 분리 위해 2개 마일스톤으로 분할**:
+
+  **feature9-A: 검색·재순위화 핵심 로직 (순수 함수)**  ✅ 완료 (2026-05-15)
+  - `app/query/search.py` — 순수 함수: `reciprocal_rank_fusion`(RRF k=60, Pool 내부
+    dense+sparse 융합), `merge_pools`(Pool 가중 합산), `select_top_candidates`(Top-20 선정,
+    동점 결정론 정렬), `fuse_and_rank`(세 단계 결합 엔트리)
+  - `app/query/rerank.py` — 순수 함수: `select_reranked`(Cross-Encoder 점수 → Top-5,
+    5위 < 0.30이면 Top-3 축소, 최고 < 0.20이면 저신뢰 플래그) + `RerankResult` 데이터클래스
+  - `app/query/__init__.py` — re-export 갱신
+  - 외부 의존성 0 — 임베딩·Qdrant·Cross-Encoder 모델 없이 완전히 단위테스트 가능. feature9의
+    회귀 보호 핵심 로직. RagState 통합·I/O 배선은 9-B 책임
+  - 테스트: RRF 점수·순위, Pool 가중 합산, Top-N 선정·동점 정렬, Top-5/Top-3 축소,
+    저신뢰 임계, 빈 입력(0건) 처리
+
+  **feature9-B: 검색·재순위화 노드 오케스트레이션**  ⏳ 보류 (feature5·모델 의존)
+  - 쿼리 임베딩 + Qdrant 3-pool 검색 + Cross-Encoder 추론을 9-A 로직에 연결하는 LangGraph
+    노드(`hybrid_search`/`cross_encoder_rerank`, `(state: RagState) -> RagState`).
+    `candidates`(Top-20)·`top_chunks`(Top-5)를 RagState에 채운다
+  - 착수 조건: feature5(Dual Embedding + Multi-Pool Vector Store)와 Cross-Encoder 모델
+    확보 후. 임베딩·Qdrant·Cross-Encoder는 어댑터/클라이언트 계층으로 분리(app/CLAUDE.md §8),
+    9-B 착수 시 그 계층 위치를 feature5와 함께 확정
+- **수정하지 않을 파일**: `app/schemas/*`(RagState가 이미 candidates·top_chunks 보유),
+  `app/llm/*`(Agent 인프라), `app/ingestion/*`, 다른 팀원 담당 영역
+- **완료 기준(9-A)**: 순수 함수 단위 테스트 전체 통과 / `verify` 통과 / `working-log.md` 갱신
 
 작업 항목:
 
-- [ ] 답변 생성기 [Agent] + 2단계 답변 검증 [Pipeline + Agent]
+- [x] feature9-A: 검색·재순위화 핵심 로직 (RRF / Pool 가중 합산 / Top-K 선정 / 저신뢰 분기)
+- [ ] feature9-B: 검색·재순위화 노드 오케스트레이션 (feature5·Cross-Encoder 모델 확보 후)
 
-### feature11: 응답 포맷터 + Query 그래프 + API
+### feature10: 답변 생성기 + 답변 검증 — ⚠ 담당 분리
 
+- **본 담당자 몫(Pipeline)**: 답변 검증 **1단계 규칙 매칭**(`app/query/verifier.py`의 규칙
+  기반 부분) — 엔티티/수치/코드 토큰 대조로 의심 문장을 FLAG. answer·top_chunks를 입력으로
+  RagState `verification`을 채운다. mock 없이 순수 로직으로 테스트 가능.
+- **Agent 담당자 몫**: 답변 생성기(`app/query/generator.py` [Agent]), 답변 검증 **2단계
+  LLM 평가자**(`SUPPORTED`/`NOT_SUPPORTED`).
+- 테스트: 1단계 규칙 매칭(본 담당자), 의도별 프롬프트·citation 매핑·2단계 게이팅(Agent 담당자)
+
+작업 항목:
+
+- [ ] (본 담당자) 답변 검증 1단계 규칙 매칭 [Pipeline]
+- [ ] (Agent 담당자) 답변 생성기 [Agent] + 검증 2단계 LLM 평가자 [Agent]
+
+### feature11: 응답 포맷터 + Query 그래프 + API — ⚠ 일부 통합 지점
+
+- **본 담당자 몫(Pipeline)**: 응답 포맷터(`app/query/formatter.py`) — 검증된 답변·출처·검증
+  결과를 UI JSON으로 변환(api-spec.md). 순수 로직, 완전 독립 구현·테스트 가능.
+- **통합 지점**: Query 그래프 조립(`app/pipeline/query_graph.py`)·FastAPI 라우트(`app/api/*`)는
+  Agent 노드 + Pipeline 노드를 배선한다. Agent 노드는 stub/fake로 두고 구현·end-to-end
+  테스트한 뒤, Agent 코드 전달 시 교체. 그래프 조립은 feature5·9-B 이후가 적절.
 - 수정 대상: `app/query/formatter.py`, `app/pipeline/query_graph.py`, `app/api/*`
-- 테스트: 응답 JSON 스키마, SSE 이벤트 순서, end-to-end(전 단계 mock), 에러 응답 코드
+- 테스트: 응답 JSON 스키마(포맷터), SSE 이벤트 순서·end-to-end(전 단계 mock/stub), 에러 응답 코드
 - 문서 수정: API 변경 시 `docs/api-spec.md`
 
 작업 항목:
 
-- [ ] 응답 포맷터 + Query LangGraph 조립 + FastAPI 라우트(SSE)
+- [ ] (본 담당자) 응답 포맷터 [Pipeline]
+- [ ] Query LangGraph 조립 + FastAPI 라우트(SSE) — Agent 노드 stub → 전달 후 교체
 
 ---
 
