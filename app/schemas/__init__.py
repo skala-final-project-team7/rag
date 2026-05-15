@@ -1,11 +1,51 @@
 """app.schemas — 계층 간 데이터 계약 [Pipeline].
 
 파이프라인 단계 간에 dict를 그대로 전달하지 않고 Pydantic 모델로 정의한다.
+주요 모델·열거형·헬퍼를 본 패키지에서 re-export 한다.
 
-계획 모듈:
-- page_object.py   PageObject, Attachment (Ingestion 입력, 백엔드와 동결 — 설계서 §7.1)
-- chunk.py         Chunk, ChunkMetadata (메타데이터 공통 13 + 첨부 5 + token_count)
-- rag_state.py     RagState (Query LangGraph 노드 상태), IngestionState (Ingestion 노드 상태)
-- response.py      QueryResponse, Source, Verification (API 응답 — docs/api-spec.md)
-- enums.py         DocType(6종), AttachmentType, Intent(4종), SourceType, VerificationStatus
+- enums.py        DocType / AttachmentType / SourceType / ExtractedFormat / Intent /
+                  VerificationStatus / IngestionStage / IngestionStatus / LlmModel
+- page_object.py  PageObject, Attachment (Ingestion 입력 — 설계서 §7.1)
+- chunk.py        Chunk, ChunkMetadata, make_chunk_id (chunking-strategy.md §6)
+- rag_state.py    RagState, IngestionState, HistoryTurn (LangGraph 노드 상태)
+- response.py     QueryResponse, Source, Verification (docs/api-spec.md)
 """
+
+from app.schemas.chunk import Chunk, ChunkMetadata, make_chunk_id
+from app.schemas.enums import (
+    AttachmentType,
+    DocType,
+    ExtractedFormat,
+    IngestionStage,
+    IngestionStatus,
+    Intent,
+    LlmModel,
+    SourceType,
+    VerificationStatus,
+)
+from app.schemas.page_object import Attachment, PageObject
+from app.schemas.rag_state import HistoryTurn, IngestionState, RagState
+from app.schemas.response import QueryResponse, Source, Verification
+
+__all__ = [
+    "Attachment",
+    "AttachmentType",
+    "Chunk",
+    "ChunkMetadata",
+    "DocType",
+    "ExtractedFormat",
+    "HistoryTurn",
+    "IngestionStage",
+    "IngestionState",
+    "IngestionStatus",
+    "Intent",
+    "LlmModel",
+    "PageObject",
+    "QueryResponse",
+    "RagState",
+    "Source",
+    "SourceType",
+    "Verification",
+    "VerificationStatus",
+    "make_chunk_id",
+]

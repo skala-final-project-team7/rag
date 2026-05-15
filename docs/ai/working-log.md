@@ -76,3 +76,26 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 - 실행 명령: `ruff format --check` / `ruff check` / `pytest`
 - 테스트 결과: 통과 (골격 스모크)
 - 남은 TODO: **ACL 필드 모델 팀 결정** + `access_token` 전달 방식 확정 → Plan Mode로 feature1 상세 Plan 확정 → 구현 착수
+
+## 2026-05-15 — feature1: schemas + config 구현
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 결정 사항:
+  - ACL 모델 = `allowed_groups`/`allowed_users` 청크 Payload 채택 (기획서 §6.6·설계서 원안)
+  - 미정(TBD) 기록: PoC 샘플 데이터의 ACL 출처, `access_token`/`cloudid` 전달 경로
+    → `current-plan.md` 선행 의존성에 기록, RAG 코어 코드는 무관하게 선행
+- 변경 사항: feature1 상세 Plan 확정 후 테스트 우선(TDD)으로 구현
+  - `app/schemas/enums.py` — 열거형 9종 (DocType·AttachmentType·SourceType·ExtractedFormat·
+    Intent·VerificationStatus·IngestionStage·IngestionStatus·LlmModel), `enum.StrEnum` 기반
+  - `app/schemas/page_object.py` — `PageObject`·`Attachment` + `is_acl_missing` 식별 (설계서 §7.1)
+  - `app/schemas/chunk.py` — `Chunk`·`ChunkMetadata`(19종) + `make_chunk_id` 결정론 헬퍼
+  - `app/schemas/rag_state.py` — `RagState`·`IngestionState`·`HistoryTurn` (LangGraph 노드 상태)
+  - `app/schemas/response.py` — `QueryResponse`·`Source`·`Verification` (api-spec.md 정합)
+  - `app/schemas/__init__.py` — 주요 모델 re-export
+  - `app/config.py` — pydantic-settings `Settings` (무인자 인스턴스화 가능, 시크릿은 SecretStr+env)
+- 수정 파일: 위 신규 파일 + `tests/schemas/*`(4) + `tests/test_config.py` + `docs/ai/current-plan.md`
+- 실행 명령: `ruff format --check` / `ruff check` / `pytest`
+- 테스트 결과: **35 passed** (스키마·config·스모크). ruff format·check 통과
+- 비고: 샌드박스 Python 3.10 한계로 `enum.StrEnum`(3.11+) 직접 실행 불가 → 검증 전용 shim으로
+  pytest 통과 확인(코드는 3.11 기준 그대로 유지). mypy는 샌드박스 환경 버그로 미검증
+- 남은 TODO: feature2(Document Source Adapter) — 단, `access_token` 전달 경로 확정 선행 권장

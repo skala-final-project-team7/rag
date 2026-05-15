@@ -24,26 +24,48 @@
 - [x] **첨부 파일 원본 4건** — 확보 완료, `samples/attachments/`에 위치 (feature4 픽스처)
 - [x] **샘플 데이터** — `samples/`에 confluence(57p)·datadog(35p) JSON 배치 완료
 - [x] **Atlassian API 명세** — 확보. `docs/atlassian-api.md`로 정리. 데이터 수집은 ML 파이프라인(본 저장소) 책임
-- [ ] **⚠ ACL 필드 모델 결정 (최우선)** — 설계서는 청크별 `allowed_groups`/`allowed_users`를 정의하나, Atlassian API 명세에는 Space 단위 권한(`DATA-03`)만 있고 샘플 데이터에 ACL 필드가 없음. (A) `space_key` 기반 vs (B) content restrictions API 추가 도입 중 팀 결정 필요. **feature1·feature7의 선행 조건.** 상세: `docs/db-schema.md` §1.4
-- [ ] **`access_token`/`cloudid` 전달 방식** — Authorization Server(Spring)가 발급한 토큰을 ML 파이프라인이 받는 경로(요청 헤더 / 내부 호출)를 백엔드와 확정 (feature2 선행)
+- [x] **ACL 필드 모델 결정** — `allowed_groups`/`allowed_users` 청크 Payload 모델 채택(기획서 §6.6·설계서 원안). `app/query/acl.py`의 필터 생성 로직은 추후 교체 가능하도록 분리. → 결정 완료
+
+### 미정 (TBD) — 기록 후 후속 단계에서 해소
+
+- [ ] **PoC 샘플 데이터의 ACL 출처** — `samples/confluence_sample_data.json`에 `allowed_groups`/`allowed_users` 필드가 없음. PoC에서 어댑터가 ACL을 어떻게 채울지(스페이스 멤버십 기반 합성 / 별도 mock 주입 등) 미정. feature2(어댑터) 착수 시 결정. **feature1 스키마는 ACL 필드를 필수로 두되 빈 배열 허용 + `is_acl_missing` 식별로 진행** → 차단 없음
+- [ ] **`access_token`/`cloudid` 전달 경로** — Authorization Server(Spring) → ML 파이프라인 전달 방식(요청 헤더 / 내부 호출) 미정. feature2(`AtlassianSourceAdapter`) 착수 전 백엔드와 확정. RAG 코어 코드(feature1·3·4 등)는 이 결정과 무관하게 선행 진행
 - [ ] **PageObject 계약 동결** — `attachments[]` 등 스펙 동결 (`docs/rag-pipeline-design.md` §7.1)
 
 ---
 
 ## Milestone A — 공통 기반
 
-### feature1: schemas + config
+### feature1: schemas + config  ✅ 완료 (2026-05-15, 35 tests passed)
 
-- 요구사항: 파이프라인 전 단계가 공유하는 데이터 계약과 설정 정의
-- 수정 대상: `app/schemas/*`(page_object, chunk, rag_state, response, enums), `app/config.py`
-- 테스트: Pydantic 모델 검증(필수 필드, ACL 누락 거부), 설정 로딩
-- 문서 수정: 없음 (스키마는 `docs/db-schema.md`·`docs/api-spec.md`와 정합 확인만)
-- 위험: PageObject 계약 미동결 시 재작업 — 선행 확인 항목 참조
+- **작업 목표**: 파이프라인 전 단계가 공유하는 Pydantic 데이터 계약과 환경 설정 정의
+- **브랜치**: `feat/#1/rag-pipeline-skeleton` (골격과 동일 change-set 연장 — 기반 작업)
+- **수정 대상 파일**:
+  - `app/schemas/enums.py` — DocType(6) / AttachmentType(4) / SourceType / ExtractedFormat / Intent(4) / VerificationStatus / IngestionStage / IngestionStatus / LlmModel
+  - `app/schemas/page_object.py` — `PageObject`, `Attachment` (Ingestion 입력, 설계서 §7.1)
+  - `app/schemas/chunk.py` — `Chunk`, `ChunkMetadata` (19종, chunking-strategy §6) + `make_chunk_id()` 결정론 헬퍼
+  - `app/schemas/rag_state.py` — `RagState`(Query 그래프 상태), `IngestionState`(Ingestion 그래프 상태)
+  - `app/schemas/response.py` — `QueryResponse`, `Source`, `Verification` (api-spec.md)
+  - `app/schemas/__init__.py` — 주요 모델 re-export
+  - `app/config.py` — `Settings` (pydantic-settings): source.type, Qdrant/Mongo/MySQL/OpenAI, 모델명
+  - `tests/schemas/*`, `tests/test_config.py`
+- **수정하지 않을 파일**: `app/` 그 외, 다른 팀원 담당 영역
+- **구현 단계** (테스트 우선): ① 테스트 케이스 작성 → ② `app/schemas` 구현 → ③ `app/config.py` 구현 → ④ `./scripts/verify.sh`
+- **테스트 계획**:
+  - enums 값이 설계 문서와 정합 (DocType=incident/operation/faq/meeting/adr/troubleshoot 등)
+  - `PageObject` 필수 필드 검증, `is_acl_missing` 식별(둘 다 빈 배열 → True), `Attachment` 검증
+  - `ChunkMetadata` 19종 필드, `make_chunk_id` 멱등성(동일 입력 → 동일 id, UUID 미사용)
+  - `QueryResponse` round-trip(직렬화/역직렬화), 첨부 전용 필드 Optional 동작
+  - `Settings` 환경 변수 없이 기본값 인스턴스화 + env override 동작
+- **문서 수정 필요 여부**: 없음 (스키마는 `docs/db-schema.md`·`docs/api-spec.md`·`docs/rag-pipeline-design.md` §7과 정합 확인만)
+- **위험 요소**: PageObject 계약 미동결 시 재작업 가능 — 변경 시 영향은 어댑터(feature2)·청커(feature3·4)에 국한
+- **완료 기준**: 모든 스키마 모델이 설계 문서와 정합 / 단위 테스트 전체 통과 / `Settings()` 무인자 인스턴스화 가능 / `verify` 통과 / `working-log.md` 갱신
 
 작업 항목:
 
-- [ ] PageObject / Attachment / Chunk / ChunkMetadata / 응답 스키마 / enums 정의
-- [ ] `app/config.py` — 환경 변수 설정 (source.type, Qdrant/Mongo/MySQL/OpenAI)
+- [x] enums / PageObject·Attachment / Chunk·ChunkMetadata·make_chunk_id / RagState·IngestionState / 응답 스키마 정의
+- [x] `app/config.py` — pydantic-settings 환경 설정
+- [x] feature1 단위 테스트 통과 (35 passed)
 
 ### feature2: Document Source Adapter
 
