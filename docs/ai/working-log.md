@@ -386,3 +386,37 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
   재순위화 노드 오케스트레이션) → feature11 통합(Query 그래프 조립 + FastAPI 라우트,
   Agent 노드 stub → 전달 후 교체). 본 담당자의 Query 순수 로직(7·9-A·10-Pipeline·
   11-Pipeline)은 완료 — 이후는 feature5 다리부터
+
+## 2026-05-15 — feature5-A: 임베딩 입력·payload·멱등성 순수 로직
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 테스트 우선(TDD)으로 Dual Embedding + Multi-Pool Vector Store의 결정론적
+  순수 로직을 구현 (rag-pipeline-design.md §5, db-schema.md §1·§2.4, app/CLAUDE.md §4)
+  - `app/ingestion/vector_store.py` [Storage] — Pool 이름 상수(`TITLE_POOL`/`CONTENT_POOL`/
+    `LABEL_POOL`/`POOL_NAMES`, config.py 기본값과 정합) + `build_point_payload(chunk,
+    version_number)`: `Chunk` → Qdrant Point payload dict(db-schema.md §1.2의 19필드).
+    datetime·enum 값은 JSON 직렬화 가능 문자열로 변환, text_preview는 본문 첫 200자
+  - `app/ingestion/embedding.py` [Pipeline] — `pool_embedding_texts(chunk)`: Pool별 임베딩
+    입력 텍스트 구성(title=page_title+section_header / 첨부는 attachment_filename+
+    section_header, content=청크 본문, label=labels+space_key+doc_type) +
+    `should_skip_embedding(version_number, cached_version)`: 멱등성 판정
+- 결정 사항·구현 해석:
+  - feature5를 5-A(순수 로직 — 외부 의존성 0)/5-B(실제 e5-large·Qdrant·MongoDB 클라이언트
+    연동, 무거운 의존성)로 분할. 5-A만 이번 진행 — 5-B 착수 시 가짜/경량 임베더 + Qdrant
+    `:memory:` 등 방향을 별도로 정한다 (PDF의 pymupdf 상황과 동일 패턴)
+  - **ChunkMetadata에 `version_number` 없음** — version_number는 페이지 단위 값이라
+    ChunkMetadata(feature1)에 없다. db-schema.md §1.2 payload·embedding_cache는
+    version_number를 요구하므로 `build_point_payload`가 부모 PageObject에서 받아 별도
+    인자로 주입한다. ChunkMetadata 스키마는 변경하지 않음(feature1 영역·페이지 단위 값)
+  - e5의 `passage:` 프리픽스 등 모델별 처리는 feature5-B(실제 임베더) 책임 —
+    `pool_embedding_texts`는 모델 비종속 원문 텍스트만 산출
+- 수정 파일: `app/ingestion/{embedding,vector_store}.py`(신규) +
+  `tests/ingestion/{test_embedding,test_vector_store}.py`(신규) + `docs/ai/current-plan.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **178 passed** (기존 166 + feature5-A 12). ruff format·check 통과
+  - 테스트: payload 19필드 매핑·page/attachment 분기·null 첨부필드·text_preview 200자
+    절단·version_number 주입, Pool별 텍스트 구성(page/attachment), 멱등성 판정
+    (동일 버전 skip / 버전 불일치 / 캐시 없음)
+- 남은 TODO: feature5-B(실제 임베딩·Qdrant·MongoDB 클라이언트 — 무거운 의존성 방향 확정 후)
+  → feature9-B(검색·재순위화 노드 오케스트레이션) → feature11 통합(Query 그래프 + API).
+  본 담당자의 순수 로직(7·9-A·10-P·11-P·5-A) 완료 — 이후는 실제 클라이언트 연동 단계

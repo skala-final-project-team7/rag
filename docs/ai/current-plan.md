@@ -171,15 +171,45 @@
 - [x] feature4-A: docx / xlsx 첨부 분할기 + 첨부 메타데이터 + chunk_attachment
 - [ ] feature4-B: PDF / CSV 첨부 분할기 (픽스처·`pymupdf` 확보 후 별도 세션)
 
-### feature5: Dual Embedding + Multi-Pool Vector Store
+### feature5: Dual Embedding + Multi-Pool Vector Store [Pipeline + Storage]
 
-- 수정 대상: `app/ingestion/embedding.py`, `app/ingestion/vector_store.py`
-- 테스트: fake Qdrant로 3 Pool upsert, ACL Payload 부착, `embedding_cache` 멱등성
-- 문서 수정: Pool/스키마 변경 시 `docs/db-schema.md`
+- **작업 목표**: 청크를 Pool별 임베딩 입력으로 변환하고, Qdrant Multi-Pool에 적재할 Point
+  payload를 구성하며, embedding_cache 기반 멱등성을 확보한다 (rag-pipeline-design.md §5,
+  db-schema.md §1·§2.4). 청커 산출물(`Chunk`)을 실제 검색 가능한 색인으로 잇는 "다리".
+- **브랜치**: `feat/#1/rag-pipeline-skeleton` (기반 작업 연장)
+- **외부 의존성(e5-large 모델·Qdrant·MongoDB) 분리 위해 2개 마일스톤으로 분할**:
+
+  **feature5-A: 임베딩 입력·payload·멱등성 순수 로직**  ✅ 완료 (2026-05-15)
+  - `app/ingestion/vector_store.py` [Storage] — Pool 이름 상수(`TITLE_POOL`/`CONTENT_POOL`/
+    `LABEL_POOL`, config.py 기본값과 정합) + `build_point_payload(chunk, version_number)`:
+    `Chunk` → Qdrant Point payload dict(db-schema.md §1.2의 19필드). `version_number`는
+    ChunkMetadata에 없으므로(페이지 단위 값) 부모 PageObject에서 별도 인자로 주입.
+    Point id는 chunk_id(feature1 `make_chunk_id`)
+  - `app/ingestion/embedding.py` [Pipeline] — `pool_embedding_texts(chunk)`: Pool별 임베딩
+    입력 텍스트 구성(title=page_title+section_header / 첨부는 attachment_filename+
+    section_header, content=청크 본문, label=labels+space_key+doc_type) +
+    `should_skip_embedding(version_number, cached_version)`: 멱등성 판정(app/CLAUDE.md §4)
+  - 외부 의존성 0 — e5-large·Qdrant·MongoDB 없이 완전히 단위테스트 가능
+  - 테스트: payload 19필드 매핑·page/attachment 분기·text_preview 200자·version_number
+    주입, pool별 텍스트 구성, 멱등성 판정(동일 버전 skip / 캐시 없음 / 버전 불일치)
+
+  **feature5-B: 실제 임베딩·Qdrant·MongoDB 클라이언트 연동**  ⏳ 보류 (무거운 의존성)
+  - Dense(`intfloat/multilingual-e5-large`, 1024d)·Sparse(BM25) 실제 임베딩, Qdrant 3 Pool
+    Collection 생성·Named Vector upsert, MongoDB `embedding_cache` I/O. e5의 `passage:`
+    프리픽스 등 모델별 처리도 여기서.
+  - 착수 조건: 무거운 의존성(`sentence-transformers`/torch·`qdrant-client`·`pymongo`) 방향
+    확정 후 — PoC 단계는 가짜/경량 임베더 + Qdrant `:memory:` 또는 fake로 진행 검토.
+    임베딩·Qdrant·Mongo는 어댑터/클라이언트 계층으로 분리(app/CLAUDE.md §8)
+- **수정하지 않을 파일**: `app/schemas/*`(ChunkMetadata에 version_number 부재 — payload
+  빌더가 별도 인자로 받아 해소, 스키마 변경 안 함), `app/llm/*`, 다른 팀원 담당 영역
+- **문서 수정**: feature5-A는 db-schema.md §1.2 payload 스키마를 구현만 — 변경 없음(정합 확인).
+  Pool/스키마를 바꾸게 되면 `docs/db-schema.md` 함께 수정
+- **완료 기준(5-A)**: 단위 테스트 전체 통과 / `verify` 통과 / `working-log.md` 갱신
 
 작업 항목:
 
-- [ ] Dense(e5-large) + Sparse(BM25) 임베딩, Qdrant title/content/label pool upsert
+- [x] feature5-A: 임베딩 입력·payload·멱등성 순수 로직
+- [ ] feature5-B: 실제 임베딩·Qdrant·MongoDB 클라이언트 연동 (무거운 의존성 방향 확정 후)
 
 ### feature6: 문서 분석기 + 첨부 분석기 + Ingestion 그래프 — ⚠ 담당 분리
 
