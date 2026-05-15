@@ -18,6 +18,8 @@
 - search.py     reciprocal_rank_fusion / merge_pools / select_top_candidates /
                 fuse_and_rank — Hybrid Search 핵심 로직 [feature9-A]
 - rerank.py     select_reranked / RerankResult — Cross-Encoder 재순위화 선정 로직 [feature9-A]
+- verifier.py   verify_answer_rules / RuleVerificationResult — 답변 검증 1단계 규칙 매칭
+                [feature10-Pipeline] (2단계 LLM 평가자 [Agent]는 별도 담당자 추가)
 """
 
 from app.query.acl import (
@@ -35,12 +37,15 @@ from app.query.search import (
     reciprocal_rank_fusion,
     select_top_candidates,
 )
+from app.query.verifier import RuleVerificationResult, SentenceCheck, verify_answer_rules
 
 __all__ = [
     "ACLViolationError",
     "Principal",
     "PrincipalExtractionError",
     "RerankResult",
+    "RuleVerificationResult",
+    "SentenceCheck",
     "build_acl_filter",
     "enforce_acl",
     "extract_principal",
@@ -49,4 +54,5 @@ __all__ = [
     "reciprocal_rank_fusion",
     "select_reranked",
     "select_top_candidates",
+    "verify_answer_rules",
 ]
