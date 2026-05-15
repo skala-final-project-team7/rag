@@ -1,0 +1,47 @@
+[project]
+name = "lina-rag-pipeline"
+version = "0.1.0"
+description = "LINA 사내 지식 검색 서비스의 RAG Pipeline"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "langgraph>=0.2,<0.3",
+    "langchain>=0.3,<0.4",
+    "langchain-openai>=0.2,<0.3",
+    "openai>=1.30",
+    "qdrant-client>=1.9",
+    "pymongo>=4.7",
+    "pydantic>=2.7",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, UP: pyupgrade
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
