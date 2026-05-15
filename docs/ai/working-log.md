@@ -239,3 +239,47 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
     프로젝트 코드는 3.11 기준 그대로. Python 3.10 샌드박스에서 재검증 시 동일 파일 재생성 필요
 - 남은 TODO: feature4-B(PDF/CSV 첨부 분할기 — PDF 픽스처·`pymupdf`/`pdfplumber` 확보 후
   별도 세션) 또는 feature5(Dual Embedding + Multi-Pool Vector Store)
+
+## 2026-05-15 — 담당 범위 재확인 → Query 파이프라인 전환 (Milestone C 착수)
+
+- 결정 사항: RAG 담당자의 기획서 범위는 **Query 파이프라인**이다. current-plan.md의 feature
+  분해는 Ingestion(Milestone B)을 앞에 두지만, current-plan.md 자체가 "제안 초안 — 순서·범위는
+  팀 리뷰 후 조정"이라 명시하고 rag-pipeline-design.md도 "기획서가 Source of Truth"라 둔다.
+  → Ingestion은 feature4-A까지 완료한 상태에서 Query(Milestone C)로 전환
+- 진행 메모:
+  - 시작하던 feature4-B-1(CSV 첨부 분할기)은 테스트·문서 편집까지만 진행한 뒤 미커밋 상태로
+    되돌렸다(`git restore`). Ingestion 잔여(feature4-B-2 PDF, feature5·6)는 별도 담당/세션 몫
+  - Ingestion 작업물(feature3·4-A)은 `app/ingestion/` 하위 트리에 격리돼 있어 인계 용이.
+    feature1·2(공통 기반: schemas/config·Document Source Adapter)는 양 파이프라인 공용
+  - current-plan.md Milestone C 상단에 전환 메모 추가, feature7 상세 Plan 확정
+
+## 2026-05-15 — feature7: ACL Pre-filtering + @enforce_acl (Query 파이프라인 시작)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 테스트 우선(TDD)으로 ACL Pre-filtering 구현 (rag-pipeline-design.md §6 4.2,
+  app/CLAUDE.md §3, db-schema.md §1.4)
+  - `app/query/acl.py` (신규)
+    - `Principal` — JWT에서 추출한 검색 주체(user_id/groups) Pydantic 모델
+    - `extract_principal(jwt)` — JWT payload를 stdlib base64+json으로 디코드해 `sub`·`groups`
+      추출. **서명은 검증하지 않는다** — 인증·서명 검증·토큰 발급은 BFF 책임(api-spec.md),
+      config에도 JWT 키가 없음. 형식 오류·payload 디코드 실패·`sub` 누락 시
+      `PrincipalExtractionError`(API의 `UNAUTHORIZED`에 대응)
+    - `build_acl_filter(user_id, groups)` — `allowed_groups` any-match OR `allowed_users`
+      any-match 의 Qdrant `should` 필터 dict 생성. `RagState.acl_filter`(`dict[str, Any]`)
+      계약과 정합. ACL 모델 변경 시 이 함수만 교체하도록 격리(app/CLAUDE.md §3)
+    - `ACLViolationError` + `@enforce_acl` — 데코레이션 시점에 대상 함수의 `acl_filter`
+      파라미터 존재를 강제(없으면 `TypeError`), 호출 시점에 필터 누락·무효를
+      `ACLViolationError`로 거부. ACL 검사가 호출 전이라 sync/async 함수 모두 적용 가능
+  - `app/query/__init__.py` — re-export 갱신 (adapters/·chunker/와 동일 패턴)
+- 결정 사항: JWT 서명 미검증(클레임 추출만) — 사용자 선택. BFF가 서명 검증을 담당하므로
+  RAG 파이프라인은 클레임만 추출하며, `pyjwt` 등 새 의존성을 추가하지 않는다
+- 수정 파일: `app/query/{acl,__init__}.py` + `tests/query/{__init__,test_acl}.py` +
+  `docs/ai/current-plan.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **130 passed** (기존 116 + feature7 14). ruff format·check 통과
+  - 테스트: `extract_principal`(정상/groups 기본값/형식 오류/payload 디코드 실패/sub 누락),
+    `build_acl_filter`(should OR 구조/빈 groups/원본 비-aliasing),
+    `@enforce_acl`(유효 필터 허용/누락·무효 거부/위치 인자/파라미터 없는 함수 TypeError),
+    JWT→Principal→필터→@enforce_acl 통합
+- 남은 TODO: feature8(질의 라우터 + 멀티턴 히스토리 — Agent, mock LLM 필수) →
+  feature9(Hybrid Search + 재순위화) → feature10(생성 + 검증) → feature11(포맷터 + 그래프 + API)
