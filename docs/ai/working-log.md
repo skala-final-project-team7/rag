@@ -283,3 +283,41 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
     JWT→Principal→필터→@enforce_acl 통합
 - 남은 TODO: feature8(질의 라우터 + 멀티턴 히스토리 — Agent, mock LLM 필수) →
   feature9(Hybrid Search + 재순위화) → feature10(생성 + 검증) → feature11(포맷터 + 그래프 + API)
+
+## 2026-05-15 — Agent 컴포넌트 담당 분리 반영 + feature9-A 착수
+
+- 결정 사항: **Agent 컴포넌트는 별도 담당자 몫**이다 — Agent 코드·파일은 추후 전달받아 병합한다.
+  본 담당자(RAG)는 각 feature의 [Pipeline]/[Storage] 부분만 진행한다.
+  - Agent 담당자 전달분: 질의 라우터·멀티턴 히스토리(feature8 전체), 답변 생성기·검증 2단계
+    LLM 평가자(feature10 일부), 문서 분석기(feature6 일부), `app/llm/`(Agent 인프라)
+  - 병합 seam: (1) `RagState`(feature1 동결 상태 계약) — Agent·Pipeline 노드가 필드를 읽고 쓴다,
+    (2) LangGraph 그래프(feature11) — 노드 배선, (3) 합의된 모듈 경로·노드 시그니처
+    `(state: RagState) -> RagState`. Agent·Pipeline 노드는 서로 직접 호출하지 않는다.
+    그래프 조립 시 Agent 노드는 stub/fake로 대체했다가 실제 코드 전달 시 교체
+  - feature8은 전부 Agent(라우터·히스토리)라 본 담당자는 건너뛴다 → 다음 진행은 feature9부터
+  - `current-plan.md` Milestone C 메모·feature8/9/10/11/6 담당 분리 주석 갱신
+- 진행 순서(본 담당자): feature7(완료) → feature9-A → feature10[Pipeline] → feature11[Pipeline:
+  포맷터] → feature5(다리) → feature9-B → feature11(그래프·API 조립) → feature6[Pipeline] → feature4-B
+
+## 2026-05-15 — feature9-A: 검색·재순위화 핵심 로직 (순수 함수)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 테스트 우선(TDD)으로 Multi-Pool Hybrid Search·Cross-Encoder 재순위화의
+  결정론적 핵심 로직 구현 (rag-pipeline-design.md §6 4.5, §8)
+  - `app/query/search.py` — `reciprocal_rank_fusion`(Pool 내부 dense+sparse RRF, k=60),
+    `merge_pools`(Pool 가중 합산), `select_top_candidates`(Top-20 선정, 동점은 item id
+    오름차순 결정론 정렬), `fuse_and_rank`(세 단계 결합 엔트리)
+  - `app/query/rerank.py` — `select_reranked`(Cross-Encoder 점수 → Top-5, 5위 < 0.30이면
+    Top-3 축소, 최고 < 0.20이면 저신뢰 분기) + `RerankResult` 데이터클래스
+  - `app/query/__init__.py` — re-export 갱신
+- 범위: 외부 의존성 0인 순수 함수만. 쿼리 임베딩·Qdrant 3-pool 검색·Cross-Encoder 추론·
+  RagState 배선은 feature9-B(노드 오케스트레이션, feature5·모델 확보 후) 책임
+- 수정 파일: `app/query/{search,rerank,__init__}.py` + `tests/query/{test_search,test_rerank}.py`
+  + `docs/ai/current-plan.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **146 passed** (기존 130 + feature9-A 16). ruff format·check 통과
+  - 테스트: RRF 점수·순위 누적, Pool 가중 합산·미지정 가중치 0 처리, Top-N 선정·동점
+    결정론 정렬, fuse_and_rank 결합, Top-5 유지/Top-3 축소(5위<0.30)/임계 경계,
+    저신뢰 분기(최고<0.20)·빈 입력
+- 남은 TODO: feature10[Pipeline](답변 검증 1단계 규칙 매칭) → feature11[Pipeline](응답 포맷터)
+  → feature5(Dual Embedding + Multi-Pool Vector Store, 다리) → feature9-B(노드 오케스트레이션)

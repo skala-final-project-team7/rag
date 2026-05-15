@@ -15,6 +15,9 @@
 
 구현 상태:
 - acl.py        extract_principal / build_acl_filter / @enforce_acl [feature7]
+- search.py     reciprocal_rank_fusion / merge_pools / select_top_candidates /
+                fuse_and_rank — Hybrid Search 핵심 로직 [feature9-A]
+- rerank.py     select_reranked / RerankResult — Cross-Encoder 재순위화 선정 로직 [feature9-A]
 """
 
 from app.query.acl import (
@@ -25,12 +28,25 @@ from app.query.acl import (
     enforce_acl,
     extract_principal,
 )
+from app.query.rerank import RerankResult, select_reranked
+from app.query.search import (
+    fuse_and_rank,
+    merge_pools,
+    reciprocal_rank_fusion,
+    select_top_candidates,
+)
 
 __all__ = [
     "ACLViolationError",
     "Principal",
     "PrincipalExtractionError",
+    "RerankResult",
     "build_acl_filter",
     "enforce_acl",
     "extract_principal",
+    "fuse_and_rank",
+    "merge_pools",
+    "reciprocal_rank_fusion",
+    "select_reranked",
+    "select_top_candidates",
 ]
