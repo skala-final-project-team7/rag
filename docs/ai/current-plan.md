@@ -28,8 +28,8 @@
 
 ### 미정 (TBD) — 기록 후 후속 단계에서 해소
 
-- [ ] **PoC 샘플 데이터의 ACL 출처** — `samples/confluence_sample_data.json`에 `allowed_groups`/`allowed_users` 필드가 없음. PoC에서 어댑터가 ACL을 어떻게 채울지(스페이스 멤버십 기반 합성 / 별도 mock 주입 등) 미정. feature2(어댑터) 착수 시 결정. **feature1 스키마는 ACL 필드를 필수로 두되 빈 배열 허용 + `is_acl_missing` 식별로 진행** → 차단 없음
-- [ ] **`access_token`/`cloudid` 전달 경로** — Authorization Server(Spring) → ML 파이프라인 전달 방식(요청 헤더 / 내부 호출) 미정. feature2(`AtlassianSourceAdapter`) 착수 전 백엔드와 확정. RAG 코어 코드(feature1·3·4 등)는 이 결정과 무관하게 선행 진행
+- [~] **PoC 샘플 데이터의 ACL 출처** — `JsonFixtureSourceAdapter`는 PoC 임시 방편으로 `space_key` 기반 ACL을 합성한다(`allowed_groups = ["space:{space_key}"]`, `_synthesize_acl`). 실제 ACL 연동(Confluence content restrictions 또는 별도 mock 주입) 방식은 여전히 미정 — `AtlassianSourceAdapter` 구현 시 또는 백엔드 협의 후 `_synthesize_acl`만 교체
+- [ ] **`access_token`/`cloudid` 전달 경로** — Authorization Server(Spring) → ML 파이프라인 전달 방식(요청 헤더 / 내부 호출) 미정. `AtlassianSourceAdapter` 착수 전 백엔드와 확정. RAG 코어 코드(feature1·2 일부·3·4 등)는 이 결정과 무관하게 선행 진행
 - [ ] **PageObject 계약 동결** — `attachments[]` 등 스펙 동결 (`docs/rag-pipeline-design.md` §7.1)
 
 ---
@@ -67,7 +67,7 @@
 - [x] `app/config.py` — pydantic-settings 환경 설정
 - [x] feature1 단위 테스트 통과 (35 passed)
 
-### feature2: Document Source Adapter
+### feature2: Document Source Adapter  ⏳ 진행 중 (데이터 계층 완료, Atlassian 어댑터 보류)
 
 - 요구사항: 데이터 공급원 추상화. JSON 픽스처 어댑터 + Atlassian 직접 호출 어댑터
 - 수정 대상: `app/adapters/{base,json_fixture,atlassian}.py`
@@ -76,9 +76,9 @@
 
 작업 항목:
 
-- [ ] `DocumentSourceAdapter` 인터페이스
-- [ ] `JsonFixtureSourceAdapter` — `samples/confluence_sample_data.json` / `datadog_docs.json` → PageObject 변환
-- [ ] `AtlassianSourceAdapter` — `atlassian-python-api`로 `DATA-01`(Full Crawl) / `DATA-02`(CQL Delta Sync) / `DATA-03`(Space 목록) 호출 (`docs/atlassian-api.md`)
+- [x] `DocumentSourceAdapter` 인터페이스 + `ActiveIds`/`ChangeEvent` (`app/adapters/base.py`)
+- [x] `JsonFixtureSourceAdapter` — `samples/*.json` → PageObject 변환 (92p 로드 검증, PoC ACL 합성)
+- [ ] `AtlassianSourceAdapter` — `atlassian-python-api`로 `DATA-01`(Full Crawl) / `DATA-02`(CQL Delta Sync) / `DATA-03`(Space 목록) 호출 (`docs/atlassian-api.md`). **`access_token`/`cloudid` 전달 경로 확정 후 착수**
 
 ## Milestone B — Ingestion 파이프라인
 
