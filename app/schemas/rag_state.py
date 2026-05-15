@@ -7,6 +7,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature1 schemas — Query/Ingestion 상태 정의
+  - 2026-05-15, feature8 통합, HistoryDecision 모델 + RagState.history_decision 추가
+    (vendoring한 history-manager-agent의 히스토리 판단 출력을 RagState로 전달)
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -30,6 +32,22 @@ class HistoryTurn(BaseModel):
     content: str
 
 
+class HistoryDecision(BaseModel):
+    """멀티턴 히스토리 관리자(History Manager Agent)의 히스토리 판단 결과.
+
+    vendoring한 ``history_manager_agent`` 패키지가 산출한 판단을 RagState로 전달하는
+    어댑터 모델이다. ``app/query/history.py``의 ``manage_history`` 노드가 채운다.
+    """
+
+    decision: str  # follow_up | new_topic | ambiguous (unknown-safe 문자열)
+    contextualized_question: str
+    preserved_context: dict[str, Any] = Field(default_factory=dict)  # summary/entities/turn_refs
+    reset_required: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+    warnings: list[str] = Field(default_factory=list)
+
+
 class RagState(BaseModel):
     """Query 파이프라인 LangGraph 상태. 단계가 진행되며 필드가 채워진다."""
 
@@ -43,6 +61,7 @@ class RagState(BaseModel):
     # 멀티턴 히스토리 (§4.3)
     history: list[HistoryTurn] = Field(default_factory=list)
     needs_search: bool = True
+    history_decision: HistoryDecision | None = None  # 멀티턴 히스토리 관리자 판단 결과
     # 질의 라우터 (§4.4)
     intent: Intent | None = None
     rewritten_queries: list[str] = Field(default_factory=list)

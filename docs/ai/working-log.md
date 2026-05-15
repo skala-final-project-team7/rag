@@ -450,3 +450,38 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 - 남은 TODO: feature8 어댑터 — `app/query/history.py`(`manage_history` 노드) + `RagState`에
   `HistoryDecision` 모델·`history_decision` 필드 확장(제안 매핑은 current-plan.md feature8).
   사용자에게 RagState 확장 매핑 확인 후 진행
+
+## 2026-05-15 — feature8: 히스토리 어댑터 노드 + RagState 확장 (Agent 코드 통합 2단계)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 결정 사항: RagState 확장 매핑을 사용자가 승인("제안대로 진행") — 비파괴 매핑
+- 변경 사항: 테스트 우선(TDD)으로 vendoring한 history-manager-agent를 RagState에 연결
+  - `app/schemas/rag_state.py` — `HistoryDecision` Pydantic 모델 신설(`decision`/
+    `contextualized_question`/`preserved_context`/`reset_required`/`confidence`/`reason`/
+    `warnings`) + `RagState.history_decision: HistoryDecision | None` 필드 추가.
+    `app/schemas/__init__.py` re-export 갱신
+  - `app/query/history.py` — `manage_history(state, *, provider=None) -> RagState` 어댑터 노드.
+    파일 기반 워크플로 대신 agent의 조립 가능한 로직 함수(`normalize_history_input_payload`
+    → `classify_history` → `apply_context_policy` → `build_question_result`)를 in-process로
+    호출하고, `ContextualizedQuestionResult`를 `RagState.history_decision`으로 매핑
+  - `app/query/__init__.py` — re-export 갱신
+- 매핑 원칙 (current-plan.md feature8 정합):
+  - `RagState.query`는 원문 비파괴 — `contextualized_question`은 `history_decision`에 담음
+  - `RagState.needs_search`는 기본 `True` 유지 — agent MVP가 검색스킵 신호를 내지 않음
+  - `conversation_id` 없으면 agent 호출 없이 new_topic 단축. 빈 history도 LLM 호출 없이
+    new_topic (agent 워크플로와 동일)
+  - RagState.HistoryTurn에 turn_id·created_at이 없어, turn_id는 순번 합성, created_at은
+    agent의 결정론적 fallback(목록 순서=시간 순서)에 위임
+- LLM provider: 기본 `FakeHistoryLLMProvider`(PoC·테스트), 실제 `OpenAIHistoryLLMProvider`
+  주입 가능. `app/query/history.py`는 [Agent] 컴포넌트이나 어댑터 자체는 결정론적이라
+  fake provider로 단위테스트
+- 수정 파일: `app/query/history.py`(신규) + `tests/query/test_history.py`(신규) +
+  `app/schemas/{rag_state,__init__}.py` + `app/query/__init__.py` +
+  `docs/ai/{current-plan,working-log}.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **262 passed** (기존 254 + 어댑터 8). ruff format·check 통과
+  - 테스트: conversation_id 없음 단축, 빈 history new_topic, follow_up/new_topic/ambiguous
+    분류별 RagState 매핑, query 비파괴·needs_search 유지, HistoryTurn→ConversationTurn 변환
+- 남은 TODO: feature5-B(실제 임베딩·Qdrant·MongoDB) → feature9-B(검색·재순위화 노드
+  오케스트레이션) → feature11 통합(Query 그래프 조립 + API — 히스토리 어댑터·검색·검증·
+  포맷터·라우터(Agent 전달 후) 배선). 질의 라우터는 Agent 담당자 전달 시 동일 방식으로 통합

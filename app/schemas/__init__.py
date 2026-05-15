@@ -7,7 +7,7 @@
                   VerificationStatus / IngestionStage / IngestionStatus / LlmModel
 - page_object.py  PageObject, Attachment (Ingestion 입력 — 설계서 §7.1)
 - chunk.py        Chunk, ChunkMetadata, make_chunk_id (chunking-strategy.md §6)
-- rag_state.py    RagState, IngestionState, HistoryTurn (LangGraph 노드 상태)
+- rag_state.py    RagState, IngestionState, HistoryTurn, HistoryDecision (LangGraph 노드 상태)
 - response.py     QueryResponse, Source, Verification (docs/api-spec.md)
 """
 
@@ -24,7 +24,7 @@ from app.schemas.enums import (
     VerificationStatus,
 )
 from app.schemas.page_object import Attachment, PageObject
-from app.schemas.rag_state import HistoryTurn, IngestionState, RagState
+from app.schemas.rag_state import HistoryDecision, HistoryTurn, IngestionState, RagState
 from app.schemas.response import QueryResponse, Source, Verification
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "ChunkMetadata",
     "DocType",
     "ExtractedFormat",
+    "HistoryDecision",
     "HistoryTurn",
     "IngestionStage",
     "IngestionState",
