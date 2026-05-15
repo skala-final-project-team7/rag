@@ -120,14 +120,56 @@
 
 ### feature4: Adaptive Chunker (첨부 3유형)
 
-- 수정 대상: `app/ingestion/chunker/attachment.py`
-- 테스트 픽스처: `samples/attachments/` — docx 2건(Heading 계층 + 표), xlsx 2건(멀티시트 헤더 / 순수 수치 92행)
-- 테스트: PDF/Word 섹션 분할, Excel/CSV 자연어 직렬화(컬럼명 동봉), 헤더 누락 fallback, 50행 그룹 분할
-- 비고: PDF 픽스처는 미확보 — Word/Excel 우선 구현, PDF는 별도 픽스처 확보 후
+- **작업 목표**: `samples/attachments/`의 첨부 파일을 `attachment_type`별 청킹 전략으로
+  분할하여 `Chunk` 목록을 산출. 첨부 → 청크 단계 검증 (chunking-strategy.md §5).
+- **브랜치**: `feat/#1/rag-pipeline-skeleton` (기반 작업 연장)
+- **픽스처 가용성 기준 2개 마일스톤으로 분할**:
+
+  **feature4-A: docx / xlsx 첨부 분할기**  ✅ 완료 (2026-05-15)
+  - `app/ingestion/chunker/attachment.py` — 첨부 청킹
+    - `infer_attachment_type(attachment)` — mime/확장자 기반 PoC 추정기
+      (실제 분류는 첨부 분석기 [Pipeline]=feature6 책임)
+    - docx: python-docx로 본문 블록(문단·표)을 문서 순서로 순회 → Heading 1/2/3
+      경계 1차 분할(없으면 단락 fallback), 표는 마크다운 변환, 첫 헤딩 이전 preamble은
+      첫 섹션에 부착. 원자성 없음 → `apply_size_rules`(2차 재분할·하한선 병합) 적용.
+      `extracted_format=raw_text`, section_header=Heading 텍스트
+    - xlsx: openpyxl로 시트 단위 1차 분할 → 시트 내 N행 그룹(기본 50행, 직렬화 결과
+      800토큰 초과 시 25→10행 축소). 각 행을 `[<시트명>] <컬럼>: <값> | ...` 자연어
+      직렬화, 컬럼명 헤더 매 청크 반복 부착, 빈 셀 생략, 헤더 누락 시 `col_1,col_2,...`
+      부여. `extracted_format=sheet_serialized`, section_header=`[시트명] 행 N~M`
+    - `build_attachment_metadata` — 첨부 청크 메타데이터 19종(`source_type=attachment`,
+      `attachment_*`/`extracted_format` 채움, `doc_type`=attachment_type 값,
+      `chunk_id`=make_chunk_id(parent_page_id, chunk_index, attachment_id), ACL·
+      space_key·labels·webui_link·last_modified는 부모 페이지 상속)
+    - `chunk_attachment(attachment, page, attachment_type=None) -> list[Chunk]` 엔트리
+  - 재사용(feature3 자산): `ChunkDraft`/`apply_size_rules`/`count_tokens`/`make_chunk_id`
+  - **버그 수정(`app/ingestion/chunker/base.py`)**: `merge_undersized`가 하한선을 채운
+    직전 청크를 '봉인'하지 않아 작은 청크가 무한 누적 → 문서 전체가 한 청크로 붕괴하던
+    버그를 수정. docx 첨부(Heading 섹션 다수가 200토큰 미만)에서 발견. 재현 테스트 선작성
+    후 수정 — 본문 청킹도 함께 개선됨(`working-log.md` 참조)
+  - 테스트: `infer_attachment_type`, docx Heading 계층 분할·표 마크다운·preamble 부착·
+    헤딩 없는 fallback, xlsx 시트 분할·행 직렬화 형식·컬럼명 동봉·빈 셀 생략·50행 그룹
+    분할·헤더 누락 fallback, 첨부 메타데이터 19종·결정론 chunk_id·ACL 상속,
+    `samples/attachments/` 4건 통합 청킹, `merge_undersized` 봉인 회귀 테스트
+
+  **feature4-B: PDF / CSV 첨부 분할기**  ⏳ 보류 (픽스처·의존성 대기)
+  - PDF: PyMuPDF(fitz) → pdfplumber fallback, 섹션 휴리스틱(폰트 크기·굵기·짧은 행),
+    미검출 시 800토큰 슬라이딩 윈도우. **PDF 픽스처 미확보 + `pymupdf` 미설치** → 보류
+  - CSV: pandas(인코딩 자동감지), xlsx와 직렬화 로직 공유. 별도 픽스처 없음 → 보류
+  - 착수 조건: PDF 픽스처 확보 + `pymupdf`/`pdfplumber` 설치 후 별도 세션
+- **수정하지 않을 파일**: `app/schemas/*`(ChunkMetadata 19종은 첨부 5종 이미 포함),
+  `app/ingestion/chunker/{body,metadata,storage_format,tokenizer}.py`(feature3 완료분 — 재사용만),
+  `app/adapters/*`, 다른 팀원 담당 영역
+  (`base.py`는 당초 재사용만 예정이었으나 `merge_undersized` 붕괴 버그 발견으로 수정 — 위 참조)
+- **문서 수정**: DB 스키마·청킹 규칙 변경 없음(db-schema.md §1.2·chunking-strategy.md §5 정합).
+  구현 해석(docx 섹션 비원자성, xlsx 자체 oversize 처리)은 `working-log.md`에 기록
+- **완료 기준**: docx Heading 분할·xlsx 행 직렬화·헤더 fallback·메타데이터 무결성 단위
+  테스트 통과 / `samples/attachments/` 4건 통합 청킹 오류 0건 / `verify` 통과
 
 작업 항목:
 
-- [ ] PDF / Word / Excel·CSV 청킹 + Excel 직렬화
+- [x] feature4-A: docx / xlsx 첨부 분할기 + 첨부 메타데이터 + chunk_attachment
+- [ ] feature4-B: PDF / CSV 첨부 분할기 (픽스처·`pymupdf` 확보 후 별도 세션)
 
 ### feature5: Dual Embedding + Multi-Pool Vector Store
 
