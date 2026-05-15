@@ -125,3 +125,36 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
   shim 사용. 코드는 3.11 기준 그대로. mypy는 샌드박스 환경 버그로 미검증
 - 남은 TODO: `AtlassianSourceAdapter` — `access_token`/`cloudid` 전달 경로 확정 후 착수.
   또는 feature3(Adaptive Chunker 본문)로 진행 — 외부 의존성 없음
+
+## 2026-05-15 — 데이터 계층 로컬 데모 + feature3 Plan 확정
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- `examples/demo_data_layer.py` — 팀원 시연용 데모. `python -m examples.demo_data_layer`로
+  samples 92페이지를 PageObject로 로드해 콘솔 요약 출력. 최소 의존성(pydantic만)으로 동작
+- `docs/ai/current-plan.md` — feature3 상세 Plan 확정, 규모상 A(기반)/B(6유형 분할기) 마일스톤 분할
+
+## 2026-05-15 — feature3-A: 청킹 기반 (tokenizer / storage_format / base)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 테스트 우선(TDD)으로 청킹 기반 3개 모듈 구현
+  - `app/ingestion/chunker/tokenizer.py` — `count_tokens` PoC 휴리스틱(CJK 글자 단위 + 공백
+    토큰). 실제 SentencePiece 토크나이저는 품질 튜닝 시 교체
+  - `app/ingestion/chunker/storage_format.py` — `clean_storage_format`: Confluence Storage
+    Format(HTML) → 정규화 텍스트. code 매크로/인라인 code는 플레이스홀더로 보호 후 ``` 펜스/백틱
+    복원(코드 내 `<env>` 등이 태그로 파싱되는 것 방지), 표→markdown, ac:task-list→체크박스,
+    헤딩→`##/###/####`, 스마트 따옴표 정규화, 파싱 실패 시 plain text 폴백
+  - `app/ingestion/chunker/base.py` — `ChunkDraft` + `split_oversized`(800토큰 초과 시
+    100토큰 오버랩 슬라이딩 윈도우) + `merge_undersized`(200토큰 미만 직전 청크 병합) +
+    `apply_size_rules`(2차 재분할→하한선 병합, 원자성 유형 제외)
+  - `app/ingestion/chunker/__init__.py` — re-export 갱신
+- 수정 파일: `app/ingestion/chunker/{tokenizer,storage_format,base,__init__}.py` +
+  `tests/ingestion/chunker/*`(3) + `docs/ai/current-plan.md`
+- 실행 명령: `ruff format --check` / `ruff check` / `pytest`
+- 검증 결과: **77 passed** (feature1·2 53 + feature3-A 24). ruff format·check 통과
+  - **실제 데이터 검증** — `samples/` 92개 본문을 `clean_storage_format`으로 전처리: 오류 0건,
+    정제 텍스트 총 240K자 / 추정 105K토큰. 가장 긴 본문(19,203자 → 5,014토큰)이
+    `split_oversized`로 8개 윈도우 분할 확인
+- 비고: `storage_format`은 `beautifulsoup4` 필요(`ingestion` extras). 전체 테스트 실행은
+  `pip install -e ".[dev]"` + `beautifulsoup4`(또는 `[ingestion]`) 필요.
+  datadog 본문의 Hugo 숏코드(`{{< >}}`) 잔재는 텍스트로 통과 — 무해, 추후 정리 검토
+- 남은 TODO: feature3-B — 본문 6유형 1차 분할기 + 메타데이터 부착 + samples 통합 테스트

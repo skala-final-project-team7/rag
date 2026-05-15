@@ -115,7 +115,7 @@
 
 작업 항목:
 
-- [ ] feature3-A: tokenizer + storage_format(HTML 전처리) + chunker base(2단계 분할/하한선)
+- [x] feature3-A: tokenizer + storage_format(HTML 전처리) + chunker base(2단계 분할/하한선) — 24 tests, samples 92개 본문 전처리 오류 0건
 - [ ] feature3-B: 본문 6유형 분할기 + 메타데이터 부착 + samples 통합 테스트
 
 ### feature4: Adaptive Chunker (첨부 3유형)
