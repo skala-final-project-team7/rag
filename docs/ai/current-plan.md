@@ -82,15 +82,41 @@
 
 ## Milestone B — Ingestion 파이프라인
 
-### feature3: Adaptive Chunker (본문 6유형)
+### feature3: Adaptive Chunker (본문 6유형)  — 상세 Plan 확정
 
-- 수정 대상: `app/ingestion/chunker/{base,storage_format,body,metadata,tokenizer}.py`
-- 테스트: 유형별 1차 분할 / 2차 재분할(800·100) / 하한선(200) / 원자성 / `chunk_id` 멱등성
-- 문서 수정: 청킹 규칙 변경 시 `docs/chunking-strategy.md`
+- **작업 목표**: `samples/`의 92개 PageObject 본문(`body_html`)을 doc_type별 논리 단위로
+  분할하여 `Chunk` 목록을 산출. 데이터 → 청크 단계 검증.
+- **브랜치**: `feat/#1/rag-pipeline-skeleton` (기반 작업 연장)
+- **규모상 2개 마일스톤으로 분할**:
+
+  **feature3-A: 청킹 기반 (foundation)**
+  - `app/ingestion/chunker/tokenizer.py` — `count_tokens()` 토큰 카운터.
+    PoC 임시 구현(공백+CJK 휴리스틱, 의존성 없음). 실제 임베딩 모델 SentencePiece는
+    품질 튜닝 단계에서 교체 — `docs/chunking-strategy.md` §7 정합
+  - `app/ingestion/chunker/storage_format.py` — Confluence Storage Format(HTML) 공통 전처리
+    (BeautifulSoup/lxml): 매크로 정규화, 코드블록 ``` 펜스 보존, `<table>` → 마크다운,
+    이미지 alt/caption만 보존, 스마트 따옴표 정규화. 파싱 실패 시 plain text fallback
+  - `app/ingestion/chunker/base.py` — 2단계 하이브리드 분할 공통 로직:
+    2차 재분할(800토큰 초과 → 100토큰 오버랩), 하한선 병합(200토큰 미만),
+    원자성 유지 유형 제외 처리, `make_chunk_id` 연동
+  - 테스트: 토큰 카운터, HTML 전처리(매크로/코드블록/표/이미지), 2차 분할·하한선·원자성
+
+  **feature3-B: 본문 6유형 분할기**
+  - `app/ingestion/chunker/body.py` — doc_type별 1차 논리 단위 파서
+    (incident 4블록 / operation H2 / faq Q&A쌍 / meeting 안건 / adr 전체1청크 / troubleshoot 케이스)
+  - `app/ingestion/chunker/metadata.py` — 청크 메타데이터 19종 부착 + 무결성 규칙
+  - `app/ingestion/chunker/__init__.py` — `chunk_page(page, doc_type) -> list[Chunk]` 엔트리
+  - 테스트: 유형별 1차 분할, 원자성(FAQ·ADR·회의록), `samples/` 실제 본문 청킹 통합 테스트
+- **doc_type 입력**: feature3은 `doc_type`을 입력으로 받는다(문서 분석기 Agent는 feature6).
+  테스트·데모에서는 doc_type을 명시 주입하거나 라벨/제목 휴리스틱으로 임시 부여
+- **문서 수정**: 청킹 규칙이 설계서와 달라지면 `docs/chunking-strategy.md` 함께 수정
+- **완료 기준**: 6유형 분할·2단계 분할·원자성·메타데이터 무결성 단위 테스트 통과 /
+  `samples/` 본문이 청크로 분할되는 통합 테스트 통과 / `verify` 통과
 
 작업 항목:
 
-- [ ] Storage Format 공통 전처리 + 본문 6유형 분할 + 메타데이터 19종 부착
+- [ ] feature3-A: tokenizer + storage_format(HTML 전처리) + chunker base(2단계 분할/하한선)
+- [ ] feature3-B: 본문 6유형 분할기 + 메타데이터 부착 + samples 통합 테스트
 
 ### feature4: Adaptive Chunker (첨부 3유형)
 
