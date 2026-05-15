@@ -287,19 +287,45 @@
 
 - [x] ACL 필터 생성 + `@enforce_acl` 데코레이터 + JWT 클레임 추출
 
-### feature8: 질의 라우터 + 멀티턴 히스토리 [Agent] — ⏭ 별도 담당자 몫
+### feature8: 질의 라우터 + 멀티턴 히스토리 [Agent] — ⚙ 통합 진행 중
 
-- 질의 라우터·멀티턴 히스토리 관리자는 **둘 다 Agent 컴포넌트**이며 `app/llm/`(Agent 인프라)에
-  의존한다. 본 담당자(Pipeline) 범위 밖 — Agent 담당자가 구현해 전달한다.
-- 수정 대상(Agent 담당자): `app/query/router.py`, `app/query/history.py`, `app/llm/structured_output.py`
+- 질의 라우터·멀티턴 히스토리 관리자는 **둘 다 Agent 컴포넌트**이며 Agent 담당자가 구현해
+  전달한다. 본 담당자(Pipeline/통합)는 전달받은 Agent 코드를 vendoring하고 RagState 어댑터
+  노드로 통합한다.
 - **병합 계약**: 노드 시그니처 `(state: RagState) -> RagState`. 라우터는 RagState의
-  `intent`/`rewritten_queries`/`metadata_filters`/`pool_weights`/`target_llm`를, 히스토리
-  관리자는 `history`/`needs_search`를 채운다. 본 담당자의 feature9는 이 필드들을 입력으로 받는다
-  (단위테스트에서는 픽스처로 주입).
+  `intent`/`rewritten_queries`/`metadata_filters`/`pool_weights`/`target_llm`를 채운다.
+
+  **feature8-멀티턴 히스토리: history-manager-agent 통합**  ⚙ vendoring 완료, 어댑터 진행 예정
+  - **전달분**: `ai-agent` 저장소의 `history-manager-agent` — 자체 pyproject·`src/` 레이아웃·
+    스키마(dataclass)·테스트를 가진 독립 패키지. 작성자 Codex.
+  - **vendoring (완료, 2026-05-15)**: `src/history_manager_agent/**` → 저장소 루트
+    `history_manager_agent/`(무수정), `tests/**` → `tests/history_manager_agent/**`(무수정 +
+    pytest 패키지 마커 `__init__.py`만 추가), `history-manager-agent.md` → `docs/`.
+    `pyproject.toml` — `packages.find`에 `history_manager_agent*` 추가, `[tool.ruff]
+    extend-exclude`로 벤더 코드를 RAG lint/format 대상에서 제외(원본 무수정 보존). 벤더
+    테스트 76개는 RAG `pytest`로 함께 실행되어 통과
+  - **어댑터 노드 (진행 예정)**: `app/query/history.py` — `manage_history(state: RagState,
+    *, provider=None) -> RagState`. 파일 기반 워크플로 대신 agent의 조립 가능한 로직 함수
+    (`normalize_history_input_payload`/`classify_history`/`apply_context_policy`/
+    `build_question_result`/`build_history_decision`)를 in-process로 호출. 기본 provider는
+    `FakeHistoryLLMProvider`(PoC·테스트), 실제 `OpenAIHistoryLLMProvider` 주입 가능
+  - **RagState 확장 (제안)**: agent 출력(`history_decision`/`contextualized_question`/
+    `preserved_context`/`reset_required`/`confidence`/`reason`/`warnings`)은 RagState의
+    `history`/`needs_search`에 1:1로 안 맞음. → `app/schemas/rag_state.py`에 `HistoryDecision`
+    Pydantic 모델 추가하고 `RagState.history_decision: HistoryDecision | None` 필드 신설.
+    매핑: `RagState.query`는 원문 유지(비파괴), `contextualized_question`은
+    `history_decision`에 담아 다운스트림이 선택 사용. `needs_search`는 agent MVP가 검색스킵
+    신호를 내지 않으므로 기본 `True` 유지. `conversation_id` 없으면 어댑터가 new_topic으로
+    단축 처리
+  - **테스트**: `tests/query/test_history.py` — RagState→agent 입력 변환(HistoryTurn→
+    ConversationTurn, turn_id/created_at 합성), 분류 결과별 RagState 매핑, conversation_id
+    없는 경우 단축, FakeHistoryLLMProvider 주입
 
 작업 항목:
 
-- [ ] (Agent 담당자) 질의 라우터 + 멀티턴 히스토리 관리자 — 전달 후 그래프(feature11)에 배선
+- [x] history-manager-agent vendoring (패키지·테스트·스펙 문서, pyproject 갱신)
+- [ ] `app/query/history.py` 어댑터 노드 + `RagState.history_decision` 확장 + 테스트
+- [ ] (Agent 담당자) 질의 라우터 — 전달 후 동일 방식으로 통합
 
 ### feature9: Multi-Pool Hybrid Search + Cross-Encoder 재순위화 [Pipeline]
 
