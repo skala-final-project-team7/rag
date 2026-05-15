@@ -321,3 +321,38 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
     저신뢰 분기(최고<0.20)·빈 입력
 - 남은 TODO: feature10[Pipeline](답변 검증 1단계 규칙 매칭) → feature11[Pipeline](응답 포맷터)
   → feature5(Dual Embedding + Multi-Pool Vector Store, 다리) → feature9-B(노드 오케스트레이션)
+
+## 2026-05-15 — feature10-Pipeline: 답변 검증 1단계 규칙 매칭
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 테스트 우선(TDD)으로 답변 검증 1단계(규칙 기반)를 구현 (rag-pipeline-design.md
+  §6 4.7, conventions.md §5.5)
+  - `app/query/verifier.py` — `verify_answer_rules(answer, top_chunks)`: 답변을 문장 단위로
+    분해해 각 문장의 검증 토큰(수치·구조적 식별자)이 인용한 청크 텍스트에 나타나는지 대조.
+    확인 안 된 토큰이 있으면 의심(suspicious) FLAG → 2단계 LLM 평가자로 넘김, 그 외 PASS
+    - `SentenceCheck`(문장별 결과·`is_suspicious`) + `RuleVerificationResult`
+      (`suspicious_sentences`/`has_suspicious_sentences`/`passed_verifications` 접근자)
+    - 헬퍼: `_split_sentences`(PoC 휴리스틱 — 줄바꿈·종결부호+공백), `_extract_citations`
+      (`[#n]` → 1-based 청크 번호), `_gather_cited_text`(범위 밖 인용 스킵),
+      `_extract_checkable_tokens`(수치·구조적 식별자 — ASCII 클래스만 써서 한글 조사 분리),
+      `_token_grounded`(대소문자 무시 부분 문자열)
+  - `app/query/__init__.py` — re-export 갱신
+- 결정 사항·구현 해석:
+  - 검증 토큰은 수치·구조적 식별자만 — 일반 단어는 패러프레이즈 노이즈가 커 제외.
+    Mecab 형태소 분석은 쓰지 않음(PoC 휴리스틱) — 정밀 엔티티 추출은 품질 튜닝 단계 교체
+  - 인용 없이 검증 토큰이 있는 문장은 대조 근거가 없으므로 suspicious가 된다(출처 없는 주장)
+  - **버그 수정(구현 중 발견)**: `_STRUCTURED_TOKEN` 정규식이 `\w`를 써서 한글 조사가
+    식별자에 붙던 문제(`prod-main-eks는`) → ASCII 문자 클래스로 교체. 재현 테스트가
+    먼저 실패 → 수정 후 통과
+  - 병합 계약: `passed_verifications()`가 PASS 문장의 최종 `Verification`을 주고,
+    `suspicious_sentences`는 2단계 평가자(Agent)가 받아 SUPPORTED/NOT_SUPPORTED 판정.
+    두 결과 병합·NOT_SUPPORTED 비율 차단은 feature11 통합 지점
+- 수정 파일: `app/query/{verifier,__init__}.py` + `tests/query/test_verifier.py` +
+  `docs/ai/current-plan.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **157 passed** (기존 146 + feature10-Pipeline 11). ruff format·check 통과
+  - 테스트: 근거 있는 문장 PASS, 환각 수치·미인용 claim·범위 밖 인용 suspicious,
+    필러 문장 PASS, 다문장 분리·인덱싱, 다중 인용, 버전번호 비분리, 종결부호+공백 분리,
+    빈 답변, passed_verifications/suspicious_sentences 접근자
+- 남은 TODO: feature11[Pipeline](응답 포맷터) → feature5(Dual Embedding + Multi-Pool
+  Vector Store, 다리) → feature9-B(노드 오케스트레이션) → feature11(그래프·API 조립)

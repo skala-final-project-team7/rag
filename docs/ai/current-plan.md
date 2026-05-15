@@ -308,16 +308,34 @@
 
 ### feature10: 답변 생성기 + 답변 검증 — ⚠ 담당 분리
 
-- **본 담당자 몫(Pipeline)**: 답변 검증 **1단계 규칙 매칭**(`app/query/verifier.py`의 규칙
-  기반 부분) — 엔티티/수치/코드 토큰 대조로 의심 문장을 FLAG. answer·top_chunks를 입력으로
-  RagState `verification`을 채운다. mock 없이 순수 로직으로 테스트 가능.
+- **본 담당자 몫(Pipeline)**: 답변 검증 **1단계 규칙 매칭** — `app/query/verifier.py`.
+  - **작업 목표**: 생성된 답변을 문장 단위로 분해해, 각 문장의 검증 토큰(수치·구조적 식별자)이
+    인용한 청크 텍스트에 나타나는지 규칙으로 대조한다. 확인되지 않은 토큰이 있는 문장은
+    의심(suspicious)으로 FLAG해 2단계 LLM 평가자로 넘기고, 그 외는 PASS로 확정한다
+    (rag-pipeline-design.md §6 4.7, conventions.md §5.5).
+  - **수정 대상**: `app/query/verifier.py`(신규, 1단계 부분), `app/query/__init__.py`,
+    `tests/query/test_verifier.py`(신규)
+  - **구현**: `verify_answer_rules(answer, top_chunks) -> RuleVerificationResult`.
+    헬퍼 — 문장 분리(PoC 휴리스틱), `[#n]` 인용 추출, 인용 청크 텍스트 수집, 검증 토큰
+    추출(수치·구조적 식별자 — Mecab 미사용 PoC 휴리스틱), 토큰 근거 대조.
+    `SentenceCheck`(문장별 결과) + `RuleVerificationResult`(`suspicious_sentences`/
+    `has_suspicious_sentences`/`passed_verifications` 접근자).
+  - **병합 계약**: `RuleVerificationResult.passed_verifications()`는 PASS 문장의 최종
+    `Verification`(status=PASS)을 준다. `suspicious_sentences`는 2단계 평가자(Agent)가
+    받아 `SUPPORTED`/`NOT_SUPPORTED`를 판정하고, 두 결과를 병합해 RagState.verification을
+    만든다(병합·`NOT_SUPPORTED` 비율 차단은 feature11 통합 지점).
+  - **수정하지 않을 파일**: `app/schemas/*`(Verification 스키마 기존 활용), `app/llm/*`,
+    `app/query/generator.py`(Agent), 다른 팀원 담당 영역
+  - **테스트**: 문장 분리, 인용 추출, 검증 토큰 근거 대조, 근거 있는 문장 PASS / 미검증
+    토큰·미인용 claim 문장 suspicious, 필러 문장(검증 토큰 없음) PASS, 빈 답변,
+    `passed_verifications`/`suspicious_sentences` 접근자
+  - **완료 기준**: 단위 테스트 전체 통과 / `verify` 통과 / `working-log.md` 갱신
 - **Agent 담당자 몫**: 답변 생성기(`app/query/generator.py` [Agent]), 답변 검증 **2단계
-  LLM 평가자**(`SUPPORTED`/`NOT_SUPPORTED`).
-- 테스트: 1단계 규칙 매칭(본 담당자), 의도별 프롬프트·citation 매핑·2단계 게이팅(Agent 담당자)
+  LLM 평가자**(`SUPPORTED`/`NOT_SUPPORTED`, `app/query/verifier.py`에 2단계 섹션 추가).
 
 작업 항목:
 
-- [ ] (본 담당자) 답변 검증 1단계 규칙 매칭 [Pipeline]
+- [x] (본 담당자) 답변 검증 1단계 규칙 매칭 [Pipeline]
 - [ ] (Agent 담당자) 답변 생성기 [Agent] + 검증 2단계 LLM 평가자 [Agent]
 
 ### feature11: 응답 포맷터 + Query 그래프 + API — ⚠ 일부 통합 지점
