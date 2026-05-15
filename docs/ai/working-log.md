@@ -158,3 +158,26 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
   `pip install -e ".[dev]"` + `beautifulsoup4`(또는 `[ingestion]`) 필요.
   datadog 본문의 Hugo 숏코드(`{{< >}}`) 잔재는 텍스트로 통과 — 무해, 추후 정리 검토
 - 남은 TODO: feature3-B — 본문 6유형 1차 분할기 + 메타데이터 부착 + samples 통합 테스트
+
+## 2026-05-15 — feature3-B: 본문 6유형 분할기 + chunk_page (feature3 완료)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 테스트 우선(TDD)으로 본문 청킹 완성
+  - `app/ingestion/chunker/body.py` — 본문 6유형 1차 분할기(operation/incident/troubleshoot/
+    adr/faq/meeting), `split_body`(1차 분할), `chunk_page`(1차 분할 → 크기 규칙 → 메타데이터),
+    `infer_doc_type`(라벨 기반 doc_type 추정 — PoC 휴리스틱, 실제는 문서 분석기 Agent=feature6)
+  - `app/ingestion/chunker/metadata.py` — `build_metadata`: 청크 메타데이터 19종 부착 +
+    무결성 규칙(section_header 빈 문자열 금지, chunk_id 결정론, source_type=page)
+  - `app/ingestion/chunker/__init__.py` — re-export 갱신
+- 원자성: incident/troubleshoot/adr/faq/meeting 블록은 is_atomic=True로 2차 분할·하한선 병합 제외
+- 수정 파일: `app/ingestion/chunker/{body,metadata,__init__}.py` + `tests/ingestion/chunker/`
+  `{test_body,test_metadata,test_chunk_page}.py` + `docs/ai/current-plan.md`
+- 실행 명령: `ruff format --check` / `ruff check` / `pytest`
+- 검증 결과: **95 passed** (feature1·2·3-A 77 + feature3-B 18). ruff 통과
+  - **실제 데이터 검증** — `samples/` 92페이지 → `chunk_page` → **289개 청크, 오류 0건**.
+    페이지당 평균 3.1개(1~12), 청크 토큰 평균 379(4~964), 200~800 구간 70%.
+    doc_type 추정 분포: operation 73 / incident 10 / troubleshoot 4 / adr 3 / faq 1 / meeting 1
+  - 메모: 하한선 병합이 직전 큰 청크에 작은 청크를 붙이며 일부(최대 964) 800 초과 — 설계상
+    하한선 처리는 2차 재분할 이후라 허용 범위. 품질 튜닝(PoC 6주차) 시 조정 대상
+- 남은 TODO: feature4(첨부 3유형 청킹 — `samples/attachments/` 픽스처 활용) 또는
+  feature5(Dual Embedding + Multi-Pool Vector Store)
