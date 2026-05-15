@@ -304,12 +304,12 @@
     `pyproject.toml` — `packages.find`에 `history_manager_agent*` 추가, `[tool.ruff]
     extend-exclude`로 벤더 코드를 RAG lint/format 대상에서 제외(원본 무수정 보존). 벤더
     테스트 76개는 RAG `pytest`로 함께 실행되어 통과
-  - **어댑터 노드 (진행 예정)**: `app/query/history.py` — `manage_history(state: RagState,
-    *, provider=None) -> RagState`. 파일 기반 워크플로 대신 agent의 조립 가능한 로직 함수
-    (`normalize_history_input_payload`/`classify_history`/`apply_context_policy`/
-    `build_question_result`/`build_history_decision`)를 in-process로 호출. 기본 provider는
-    `FakeHistoryLLMProvider`(PoC·테스트), 실제 `OpenAIHistoryLLMProvider` 주입 가능
-  - **RagState 확장 (제안)**: agent 출력(`history_decision`/`contextualized_question`/
+  - **어댑터 노드 (완료, 2026-05-15)**: `app/query/history.py` — `manage_history(state:
+    RagState, *, provider=None) -> RagState`. 파일 기반 워크플로 대신 agent의 조립 가능한
+    로직 함수(`normalize_history_input_payload`/`classify_history`/`apply_context_policy`/
+    `build_question_result`)를 in-process로 호출. 기본 provider는 `FakeHistoryLLMProvider`
+    (PoC·테스트), 실제 `OpenAIHistoryLLMProvider` 주입 가능
+  - **RagState 확장 (완료)**: agent 출력(`history_decision`/`contextualized_question`/
     `preserved_context`/`reset_required`/`confidence`/`reason`/`warnings`)은 RagState의
     `history`/`needs_search`에 1:1로 안 맞음. → `app/schemas/rag_state.py`에 `HistoryDecision`
     Pydantic 모델 추가하고 `RagState.history_decision: HistoryDecision | None` 필드 신설.
@@ -324,7 +324,7 @@
 작업 항목:
 
 - [x] history-manager-agent vendoring (패키지·테스트·스펙 문서, pyproject 갱신)
-- [ ] `app/query/history.py` 어댑터 노드 + `RagState.history_decision` 확장 + 테스트
+- [x] `app/query/history.py` 어댑터 노드 + `RagState.history_decision` 확장 + 테스트
 - [ ] (Agent 담당자) 질의 라우터 — 전달 후 동일 방식으로 통합
 
 ### feature9: Multi-Pool Hybrid Search + Cross-Encoder 재순위화 [Pipeline]
