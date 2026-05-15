@@ -181,3 +181,61 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
     하한선 처리는 2차 재분할 이후라 허용 범위. 품질 튜닝(PoC 6주차) 시 조정 대상
 - 남은 TODO: feature4(첨부 3유형 청킹 — `samples/attachments/` 픽스처 활용) 또는
   feature5(Dual Embedding + Multi-Pool Vector Store)
+
+## 2026-05-15 — feature4-A: docx / xlsx 첨부 분할기 + base.py 하한선 병합 버그 수정
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 범위 결정: feature4를 픽스처 가용성 기준으로 4-A(docx/xlsx — 픽스처 보유)와
+  4-B(PDF/CSV — 픽스처·`pymupdf` 미확보, 보류)로 분할. 이번 세션은 4-A만 진행
+  (`current-plan.md` feature4 갱신)
+- 변경 사항: 테스트 우선(TDD)으로 첨부 docx/xlsx 청킹 구현
+  - `app/ingestion/chunker/attachment.py` — 첨부 청킹 (chunking-strategy.md §5)
+    - `infer_attachment_type` — mime/확장자 기반 PoC 추정기 (실제 분류는 첨부 분석기
+      [Pipeline]=feature6 책임)
+    - docx: python-docx로 본문 블록(문단·표)을 문서 순서로 순회(`_iter_block_items`) →
+      Heading 1/2/3 경계 1차 분할(없으면 단일 draft fallback, section_header=파일명),
+      표는 markdown 변환, 첫 헤딩 이전 preamble은 첫 섹션 도입부에 부착
+    - xlsx: openpyxl로 시트 단위 → 시트 내 N행 그룹(기본 50, 직렬화 800토큰 초과 시
+      25→10행 축소). 각 행 `[<시트명>] <컬럼>: <값> | ...` 직렬화, 빈 셀 생략,
+      첫 행이 수치면 헤더 누락으로 보고 `col_1..` 부여(ATTACH_NO_HEADER)
+    - `build_attachment_metadata` — 첨부 메타데이터 19종(`source_type=attachment`,
+      `attachment_*`/`extracted_format` 채움, `doc_type`=attachment_type 값,
+      `chunk_id`=make_chunk_id(page_id, idx, attachment_id), ACL·메타는 부모 페이지 상속)
+    - `chunk_attachment` 엔트리 — 1차 분할 → (docx만)`apply_size_rules` → 메타데이터
+  - `app/ingestion/chunker/__init__.py` — re-export·docstring 갱신
+- 구현 해석(설계서 충돌 없음, 기록 목적):
+  - docx 섹션은 원자성 없음 → `apply_size_rules`(2차 재분할·하한선 병합) 적용.
+    xlsx는 행 그룹 분할이 크기 처리를 겸하므로 `apply_size_rules` 미적용
+  - `section_path`는 첨부의 경우 `ancestors > 첨부파일명 > section_header`로 구성(맥락 동봉)
+  - xlsx `클러스터 메트릭` 시트는 단일 행이 ~163토큰이라 10행 그룹도 800 초과 →
+    더 줄일 단계가 없어 수용(설계서 §5 "25→10행 축소" 한계 — 허용 범위)
+- **버그 수정 — `app/ingestion/chunker/base.py` `merge_undersized`** (Option A, 사용자 승인):
+  - 증상: 하한선 병합이 직전 청크를 '봉인'하지 않아 200토큰 미만 청크가 무한 누적.
+    docx 첨부(Heading 섹션 다수가 200토큰 미만)에서 EKS 매뉴얼 44섹션이 한 청크(4091토큰)로
+    붕괴, 온보딩 14섹션이 1135토큰 한 청크로 붕괴
+  - 원인: `can_merge` 조건이 `result[-1]`의 원자성만 검사하고 누적 크기를 검사하지 않음
+  - 수정: `can_merge`에 `count_tokens(result[-1].text) < min_tokens` 조건 추가 — 하한선을
+    채운 직전 청크는 봉인. 설계서 §3 "직전/직후 1회 병합" 의도와 정합
+  - 재현 테스트 선작성: `test_merge_undersized_seals_chunk_at_min_tokens`(회귀 보호) +
+    버그 동작을 인코딩하던 기존 `test_merge_undersized_merges_small_adjacent` 정정
+- 수정 파일: `app/ingestion/chunker/{attachment,base,__init__}.py` +
+  `tests/ingestion/chunker/{test_attachment,test_base}.py` +
+  `docs/ai/{current-plan,working-log}.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **116 passed** (기존 95 + feature4-A 20 + base.py 회귀 1). ruff format·check 통과
+  - **실제 데이터 검증** — `samples/attachments/` 4건 → `chunk_attachment` → **35 청크, 오류 0건**:
+    EKS 매뉴얼 15청크(177~373토큰), 모니터링 메트릭 6청크(199~1556), EKS 노드 통계
+    10청크(300~768, 전부 200~800), 온보딩 4청크(236~315)
+  - **feature3 본문 회귀(개선)** — 버그 수정으로 본문 청킹도 개선: 92페이지 289→**379청크**,
+    최대 토큰 964→**800**(이전 메모의 "800 초과" 문제 해소). feature3 테스트는 정확 개수를
+    단언하지 않아 전부 통과
+- 비고 — Python 3.10 검증 shim:
+  - 기존 세션은 `enum.StrEnum`/`datetime.UTC` 백포트를 임시 shim으로 처리. 이번에 저장소 내
+    `conftest.py`로 시도했으나 ruff(target-version=py311)와 충돌: `if sys.version_info`
+    블록은 UP036, `class(str, Enum)`은 UP042로 거부되고, `ruff check --fix`가
+    `datetime.timezone.utc`를 `datetime.UTC`로 재작성해 shim 자체를 깨뜨림
+  - 해결: shim을 **저장소 밖** `~/.local/lib/python3.10/site-packages/usercustomize.py`로
+    이동(인터프리터 기동 시 자동 로드, ruff 검사 대상 아님). 저장소에는 shim 파일이 없으며
+    프로젝트 코드는 3.11 기준 그대로. Python 3.10 샌드박스에서 재검증 시 동일 파일 재생성 필요
+- 남은 TODO: feature4-B(PDF/CSV 첨부 분할기 — PDF 픽스처·`pymupdf`/`pdfplumber` 확보 후
+  별도 세션) 또는 feature5(Dual Embedding + Multi-Pool Vector Store)

@@ -8,6 +8,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature3-A — ChunkDraft / split_oversized / merge_undersized
+  - 2026-05-15, 하한선 병합 붕괴 버그 수정, merge_undersized가 하한선을 채운 직전 청크를
+    '봉인'하도록 변경 — 작은 청크가 한 청크로 무한 누적되던 문제 해결 (feature4-A 중 발견)
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -113,11 +115,17 @@ def merge_undersized(
 
     원자성 청크(is_atomic)는 작아도 병합되지 않으며, 직전 청크가 원자성이거나
     없으면 작은 청크라도 그대로 유지한다.
+
+    직전 청크가 이미 하한선(min_tokens)을 채웠으면 '봉인'되어 더 이상 병합 대상이
+    되지 않는다. 이 봉인이 없으면 작은 청크가 직전 청크에 무한 누적되어 문서 전체가
+    한 청크로 붕괴한다 (chunking-strategy.md §3 — 하한선 처리는 '직전/직후' 1회 병합 의도).
     """
     result: list[ChunkDraft] = []
     for draft in drafts:
         too_small = not draft.is_atomic and count_tokens(draft.text) < min_tokens
-        can_merge = bool(result) and not result[-1].is_atomic
+        can_merge = (
+            bool(result) and not result[-1].is_atomic and count_tokens(result[-1].text) < min_tokens
+        )
         if too_small and can_merge:
             previous = result[-1]
             result[-1] = ChunkDraft(

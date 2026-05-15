@@ -44,12 +44,25 @@ def test_split_oversized_has_overlap() -> None:
 
 def test_merge_undersized_merges_small_adjacent() -> None:
     drafts = [
-        ChunkDraft(text="가 " * 250, section_header="A"),  # 큰 비원자 청크 (prev)
+        ChunkDraft(text="작은 비원자 청크", section_header="A"),  # < 200 토큰 (prev, 미봉인)
         ChunkDraft(text="짧음", section_header="B"),  # < 200 토큰 → 직전과 병합
     ]
     merged = merge_undersized(drafts, min_tokens=200)
     assert len(merged) == 1
     assert "짧음" in merged[0].text
+
+
+def test_merge_undersized_seals_chunk_at_min_tokens() -> None:
+    # 회귀(LINA 버그): 작은 청크가 직전 청크에 무한 누적되어 한 청크로 붕괴하면 안 된다.
+    # 직전 청크가 하한선(min_tokens)을 채우면 '봉인'되어 이후 작은 청크는 새 청크가 된다
+    # (chunking-strategy.md §3 — 하한선 처리는 '직전/직후' 1회 병합 의도).
+    drafts = [ChunkDraft(text="가 나 다 라 마", section_header=f"S{i}") for i in range(20)]
+    merged = merge_undersized(drafts, min_tokens=12)
+    # 20개 작은 청크가 한 청크로 붕괴하지 않는다
+    assert len(merged) > 1
+    # 봉인된 청크(마지막 꼬리 제외)는 모두 하한선 이상
+    for chunk in merged[:-1]:
+        assert count_tokens(chunk.text) >= 12
 
 
 def test_merge_undersized_keeps_atomic() -> None:
