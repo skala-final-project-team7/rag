@@ -32,8 +32,9 @@ embedding = [
     "fastembed>=0.3",              # BM25 Sparse 벡터 (대안)
     "kiwipiepy>=0.17",             # 한국어 형태소 분석 (KoNLPy Mecab 대안, JDK 불필요)
 ]
-# 첨부 파일 텍스트 추출 / 본문 파싱
+# 데이터 수집 / 첨부 파일 텍스트 추출 / 본문 파싱
 ingestion = [
+    "atlassian-python-api>=3.41",  # Confluence REST 직접 호출 (AtlassianSourceAdapter)
     "pymupdf>=1.24",               # PDF 텍스트 추출 (1순위)
     "pdfplumber>=0.11",            # PDF fallback (복잡 레이아웃)
     "python-docx>=1.1",            # Word 첨부

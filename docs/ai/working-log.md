@@ -53,3 +53,26 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 - 실행 명령: `ruff format --check` / `ruff check` / `pytest`
 - 테스트 결과: 통과 (스모크 — 9개 패키지 import 검증)
 - 남은 TODO: 선행 의존성 해소(기획서·mock ACL·첨부 원본 확보) → Plan Mode로 feature1 상세 Plan 확정 → 구현 착수
+
+## 2026-05-15 — 기획서·Atlassian API·첨부 원본 반영 (정합성 보정)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 기획서 v2.1.6(Source of Truth), Atlassian API 명세서, 첨부 원본 4건 정독 후 골격 정합성 보정
+  - `samples/` 신설 — confluence(57p)·datadog(35p) JSON + 첨부 원본 4건(`samples/attachments/`) + README.
+    PoC 목 데이터이자 테스트 픽스처
+  - `docs/atlassian-api.md` 신설 — 데이터 수집은 ML 파이프라인(본 저장소)이 `atlassian-python-api`로
+    직접 호출. 인증·토큰은 Authorization Server 책임. 페이지 객체 → PageObject 매핑 정리
+  - Document Source Adapter 재정의 — 백엔드 미구축 반영: `JsonFixtureSourceAdapter` +
+    `AtlassianSourceAdapter` (기존 `MongoSourceAdapter` 가정 폐기). `docs/rag-pipeline-design.md` §4,
+    `app/adapters/__init__.py`, `docs/ai/current-plan.md` feature2 갱신
+  - **ACL 불일치 발견·명시** — 설계서는 청크별 `allowed_groups`/`allowed_users`를 정의하나
+    Atlassian API 명세는 Space 단위 권한(`DATA-03`)만 제공, 샘플 데이터에 ACL 필드 없음.
+    `docs/db-schema.md` §1.4·`docs/rag-pipeline-design.md` §7·`docs/atlassian-api.md`·`app/CLAUDE.md`에
+    미해결 사항으로 명시, `current-plan.md` 선행 의존성 최우선 항목으로 등재
+  - `docs/rag-pipeline-design.md` §10 KPI를 기획서 §10 기준 최소/목표로 갱신
+  - `pyproject.toml` — `atlassian-python-api` 추가 (ingestion extras)
+- 수정 파일: `samples/*`, `docs/atlassian-api.md`, `docs/rag-pipeline-design.md`, `docs/db-schema.md`,
+  `app/adapters/__init__.py`, `app/CLAUDE.md`, `pyproject.toml`, `docs/ai/current-plan.md`
+- 실행 명령: `ruff format --check` / `ruff check` / `pytest`
+- 테스트 결과: 통과 (골격 스모크)
+- 남은 TODO: **ACL 필드 모델 팀 결정** + `access_token` 전달 방식 확정 → Plan Mode로 feature1 상세 Plan 확정 → 구현 착수

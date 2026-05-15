@@ -33,14 +33,23 @@ Source of Truth이며, 충돌 시 원본을 우선한다. 설계 변경 시 이 
 ## 4. Document Source Adapter (파이프라인 경계)
 
 RAG 파이프라인은 데이터 공급원에 직접 결합하지 않는다. 입구에 `DocumentSourceAdapter`
-인터페이스를 두고, PoC에서는 백엔드가 MongoDB(`rag_mock.pages` / `rag_mock.attachments`)에
-적재한 mock을 읽고, 운영 전환 시 `ConfluenceSourceAdapter`로 교체한다.
+인터페이스를 두고, 공급원이 무엇이든 동일한 표준 `PageObject` 스트림을 반환하도록 강제한다.
 전환 시 바뀌는 것은 **어댑터 1개 클래스 + `source.type` 설정 1줄**뿐이다.
 
 인터페이스 메서드: `fetch_pages()` (전체/증분, 첨부 텍스트 포함), `list_active_ids()`
 (Reconciliation용 페이지·첨부 ID 집합), `watch_changes()` (실시간 변경 스트림).
-어댑터 구현·외부 호출(Confluence REST, 첨부 다운로드/텍스트 추출)은 **백엔드 책임**이며,
-본 저장소는 표준 `PageObject`를 수신한 시점 이후를 담당한다.
+
+PoC 어댑터 (본 저장소 구현 대상):
+
+- `JsonFixtureSourceAdapter` — `samples/*.json`(Atlassian-Python-API 응답 포맷)을 읽는다. 로컬 개발·테스트용.
+- `AtlassianSourceAdapter` — `atlassian-python-api`로 Confluence REST를 직접 호출한다. 상세는 `docs/atlassian-api.md`.
+
+> **백엔드 미구축 반영** — 원 설계서는 PoC에서 백엔드가 Atlassian → MongoDB로 적재한 mock을
+> RAG가 읽는 구조였으나, 백엔드(BFF)가 아직 없어 **ML 파이프라인(본 저장소)이 Atlassian REST API를
+> 직접 호출**한다(Atlassian API 명세서·기획서 §6.6 정합). OAuth 인증·`access_token` 관리는
+> Authorization Server(Spring)가 담당하며, 본 저장소는 발급된 토큰·`cloudid`를 전달받아 사용한다.
+> 첨부 파일 다운로드·텍스트 추출(PDF→PyMuPDF, Word→python-docx, Excel→openpyxl/pandas)도
+> 본 저장소(`AtlassianSourceAdapter` 또는 첨부 분석기 단계)가 담당한다.
 
 ## 5. Ingestion 파이프라인
 
@@ -91,6 +100,11 @@ RAG 파이프라인은 데이터 공급원에 직접 결합하지 않는다. 입
 > `allowed_groups`·`allowed_users`가 모두 비면 '공개 문서'가 아닌 **ACL 누락 오류**로 간주,
 > `INVALID_ACL`로 색인 스킵(보안 안전 측 정책). 첨부는 부모 페이지 ACL 상속.
 
+> **⚠ ACL 미해결 사항** — 설계서는 ACL을 청크별 `allowed_groups`/`allowed_users` Payload로
+> 정의하지만, 제공된 Atlassian API 명세에는 페이지 단위 권한 API가 없고 Space 단위 권한(`DATA-03`)만
+> 있다. 샘플 데이터에도 ACL 필드가 없다. PoC ACL을 `space_key` 기반으로 할지, content restrictions
+> API를 추가 도입할지 **팀 결정 필요**. 상세: `docs/atlassian-api.md`, `docs/db-schema.md`.
+
 ### 7.2 Chunk 메타데이터
 
 청크 메타데이터·청크 분할 규칙은 `docs/chunking-strategy.md`, Qdrant Payload 스키마는
@@ -118,12 +132,19 @@ FastAPI + SSE · Dense: `intfloat/multilingual-e5-large`(1차 후보) · Sparse:
 Cross-Encoder: `cross-encoder/ms-marco-MiniLM-L-12` · LLM: GPT-4o(생성) / GPT-4o-mini(라우터·검증·히스토리·문서분석기) ·
 첨부 추출: PyMuPDF·pdfplumber / python-docx / openpyxl·pandas · 토큰: tiktoken `cl100k_base`.
 
-## 10. KPI
+## 10. KPI (기획서 §10)
 
-검색 소요 30초 이내 · Precision@3 75%↑ · 환각 비율 15%↓ · 응답 P95 5초 이내 · 사용자 만족도 긍정 80%↑.
+| 항목 | 최소 기준 | 목표 기준 |
+|---|---|---|
+| 정보 검색 소요 시간 | 3분 이내 | 30초 이내 |
+| 검색 정확도 Precision@3 | 60% 이상 | 75% 이상 |
+| 환각 비율 | 25% 이하 | 15% 이하 |
+| 응답 시간 P95 | 8초 이내 | 5초 이내 |
+| 사용자 만족도 (피드백) | 긍정 60% 이상 | 긍정 80% 이상 |
+| 서비스 가용성 | 95% 이상 | 99% 이상 |
 
 ## 11. PoC 범위 / 향후 확장
 
 PoC 포함: 본문 텍스트 + 첨부 파일(PDF/Word/Excel) 텍스트 색인.
-PoC 제외(향후 확장): 이미지·도형·다이어그램 등 비텍스트 콘텐츠(멀티모달), Confluence REST/OAuth
-직접 호출(백엔드), API Gateway/BFF/인증, 인프라 구성, 관리자 UI.
+PoC 제외(향후 확장): 이미지·도형·다이어그램 등 비텍스트 콘텐츠(멀티모달), API Gateway/BFF/인증
+플로우, 인프라 구성, 관리자 UI, Valkey 캐시 계층.
