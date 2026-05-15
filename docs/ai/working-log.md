@@ -420,3 +420,33 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 - 남은 TODO: feature5-B(실제 임베딩·Qdrant·MongoDB 클라이언트 — 무거운 의존성 방향 확정 후)
   → feature9-B(검색·재순위화 노드 오케스트레이션) → feature11 통합(Query 그래프 + API).
   본 담당자의 순수 로직(7·9-A·10-P·11-P·5-A) 완료 — 이후는 실제 클라이언트 연동 단계
+
+## 2026-05-15 — feature8: history-manager-agent vendoring (Agent 코드 통합 1단계)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: Agent 담당자가 멀티턴 히스토리 관리자(`history-manager-agent`)를 전달. 단일 파일이
+  아니라 자체 pyproject·`src/` 레이아웃·dataclass 스키마·테스트를 가진 독립 패키지
+  (`ai-agent` 저장소 소속, 작성자 Codex)였음. 출력 스키마(`history_decision`/
+  `contextualized_question`/`preserved_context` 등)가 RagState의 `history`/`needs_search`
+  계약과 1:1로 안 맞음 → 통합 방식을 사용자와 확정
+- 결정 사항: **vendoring + 어댑터 노드** 방식 (사용자 선택)
+  - agent 코드는 무수정 보존, RAG 저장소 어댑터(`app/query/history.py`)로 RagState와 연결
+- 변경 사항 (이번 change-set = vendoring):
+  - `src/history_manager_agent/**` → 저장소 루트 `history_manager_agent/`(무수정 — 패키지
+    내부 절대 임포트 `from history_manager_agent...`를 그대로 살리려면 루트 패키지여야 함)
+  - `tests/**` → `tests/history_manager_agent/**`(테스트 파일 무수정. RAG 저장소 pytest가
+    패키지 모드라 빈 `__init__.py` 3개만 추가 — 마커 파일이며 agent 테스트 코드는 무수정)
+  - `history-manager-agent.md` → `docs/history-manager-agent.md`(스펙 참조용)
+  - `pyproject.toml`: `[tool.setuptools.packages.find]`에 `history_manager_agent*` 추가,
+    `[tool.ruff] extend-exclude`로 벤더 코드(`history_manager_agent`,
+    `tests/history_manager_agent`)를 RAG lint/format 대상에서 제외 — 원본 무수정 보존.
+    통합 어댑터(`app/query/history.py`)는 RAG ruff로 정상 검사
+  - agent의 자체 `pyproject.toml`·top-level `scripts/`·`data/`·`.env.example`은 미반입
+- 수정 파일: `history_manager_agent/**`(신규 20), `tests/history_manager_agent/**`(신규 18) +
+  `docs/history-manager-agent.md`(신규) + `pyproject.toml` + `docs/ai/current-plan.md`
+- 실행 명령: `./scripts/verify.sh` (ruff format → ruff check → pytest)
+- 검증 결과: **254 passed** (RAG 178 + 벤더 history-manager-agent 76). 벤더 패키지 import
+  정상, 벤더 테스트가 3.10 샌드박스(usercustomize shim)에서 전부 통과. ruff는 벤더 코드 제외
+- 남은 TODO: feature8 어댑터 — `app/query/history.py`(`manage_history` 노드) + `RagState`에
+  `HistoryDecision` 모델·`history_decision` 필드 확장(제안 매핑은 current-plan.md feature8).
+  사용자에게 RagState 확장 매핑 확인 후 진행

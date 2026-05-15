@@ -55,11 +55,15 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+# history_manager_agent: ai-agent 저장소에서 vendoring한 History Manager Agent 패키지
+include = ["app*", "history_manager_agent*"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# vendoring한 외부 코드(History Manager Agent)는 RAG 저장소 lint/format 대상에서 제외 —
+# 원본을 무수정 보존한다. 통합 어댑터(app/query/history.py)는 정상적으로 검사된다.
+extend-exclude = ["history_manager_agent", "tests/history_manager_agent"]
 
 [tool.ruff.lint]
 # E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, UP: pyupgrade
