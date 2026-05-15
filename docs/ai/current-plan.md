@@ -82,7 +82,7 @@
 
 ## Milestone B — Ingestion 파이프라인
 
-### feature3: Adaptive Chunker (본문 6유형)  — 상세 Plan 확정
+### feature3: Adaptive Chunker (본문 6유형)  ✅ 완료 (2026-05-15)
 
 - **작업 목표**: `samples/`의 92개 PageObject 본문(`body_html`)을 doc_type별 논리 단위로
   분할하여 `Chunk` 목록을 산출. 데이터 → 청크 단계 검증.
@@ -116,7 +116,7 @@
 작업 항목:
 
 - [x] feature3-A: tokenizer + storage_format(HTML 전처리) + chunker base(2단계 분할/하한선) — 24 tests, samples 92개 본문 전처리 오류 0건
-- [ ] feature3-B: 본문 6유형 분할기 + 메타데이터 부착 + samples 통합 테스트
+- [x] feature3-B: 본문 6유형 분할기 + 메타데이터 부착 + chunk_page — 18 tests, samples 92p → 289 청크 오류 0건
 
 ### feature4: Adaptive Chunker (첨부 3유형)
 
