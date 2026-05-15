@@ -29,12 +29,13 @@
 
 ## 3. 보안·정확성 (절대 규칙)
 
-- **ACL Pre-filtering을 우회하지 않는다.** Qdrant 검색 호출은 `@enforce_acl` 데코레이터를 통과해야 하며, `allowed_groups`/`allowed_users` 필터가 없는 호출은 `ACLViolationError`로 거부한다.
+- **ACL Pre-filtering을 우회하지 않는다.** Qdrant 검색 호출은 `@enforce_acl` 데코레이터를 통과해야 하며, ACL 필터가 없는 호출은 `ACLViolationError`로 거부한다.
 - ACL 필터링을 LLM 프롬프트에 위임하지 않는다 (Prompt Injection 우회 방지).
+- ACL 필드 모델(`space_key` 기반 vs `allowed_groups`/`allowed_users` 기반)은 팀 결정 대기 중이다 (`docs/db-schema.md` §1.4 참조). 결정 전까지 `app/query/acl.py`의 필터 생성 로직만 교체 가능하도록 분리하고, `@enforce_acl` 강제 원칙 자체는 어떤 모델에서도 유지한다.
 - 출처 없는 답변을 생성하는 방향으로 수정하지 않는다. 검색 결과 0건이면 LLM을 호출하지 않고 표준 분기 응답을 반환한다.
 - 답변 검증(1단계 규칙 + 2단계 LLM 평가자)을 우회하거나 비활성화하지 않는다.
-- `allowed_groups`/`allowed_users`가 모두 빈 PageObject·청크는 색인하지 않는다 (`INVALID_ACL`).
-- Secret·API Key·토큰은 코드·로그·테스트 픽스처에 포함하지 않는다. 설정은 `app/config.py`에서 환경 변수로 주입한다.
+- ACL 정보가 전혀 없는 PageObject·청크는 색인하지 않는다 (`INVALID_ACL`).
+- Secret·API Key·`access_token`은 코드·로그·테스트 픽스처에 포함하지 않는다. 설정은 `app/config.py`에서 환경 변수로 주입한다.
 
 ## 4. 결정론·멱등성
 

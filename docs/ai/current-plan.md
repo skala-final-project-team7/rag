@@ -16,14 +16,17 @@
 - **브랜치 규칙**: feature별로 `feat/#<이슈번호>/<기능-이름>`
 - **수정 가능 파일**: `app/`, `tests/`, 관련 `docs/`
 - **수정 금지 파일**: 루트 `CLAUDE.md`, `docs/ai/workflow.md`·`prompt-templates.md`, 다른 팀원 담당 영역
-- **참고 문서**: 루트 `CLAUDE.md`, `app/CLAUDE.md`, `docs/rag-pipeline-design.md`, `docs/chunking-strategy.md`, `docs/db-schema.md`, `docs/api-spec.md`, `docs/conventions.md`
+- **참고 문서**: 루트 `CLAUDE.md`, `app/CLAUDE.md`, `docs/rag-pipeline-design.md`, `docs/chunking-strategy.md`, `docs/db-schema.md`, `docs/api-spec.md`, `docs/atlassian-api.md`, `docs/conventions.md`
 
-## 선행 확인 / 의존성 (착수 전 해소 필요)
+## 선행 확인 / 의존성
 
-- [ ] **기획서 `PLAN-CONF-RAG-2026-002 v2.1.6`** 확보 — 설계서의 Source of Truth. 미확보 상태로 진행 시 정합성 리스크
-- [ ] **mock 데이터 ACL 필드** — `confluence_sample_data.json`에 `allowed_groups`/`allowed_users`가 없음. 백엔드 어댑터가 PageObject에 부착하는 책임이나, PoC mock에 ACL이 채워지는 시점·방식을 백엔드(권서현)와 확정 필요
-- [ ] **첨부 파일 원본** — 샘플 데이터가 참조하는 첨부 4건(docx 2 / xlsx 2)의 실제 파일 또는 `extracted_text`가 채워진 mock 미확보. 첨부 청킹(feature5) 착수 전 필요
-- [ ] **PageObject 계약 동결** — 백엔드 설계서와 `attachments[]` 등 스펙 동결 (`docs/rag-pipeline-design.md` §7.1)
+- [x] **기획서 `PLAN-CONF-RAG-2026-002 v2.1.6`** — 확보 완료. 설계서와 정합성 확인됨
+- [x] **첨부 파일 원본 4건** — 확보 완료, `samples/attachments/`에 위치 (feature4 픽스처)
+- [x] **샘플 데이터** — `samples/`에 confluence(57p)·datadog(35p) JSON 배치 완료
+- [x] **Atlassian API 명세** — 확보. `docs/atlassian-api.md`로 정리. 데이터 수집은 ML 파이프라인(본 저장소) 책임
+- [ ] **⚠ ACL 필드 모델 결정 (최우선)** — 설계서는 청크별 `allowed_groups`/`allowed_users`를 정의하나, Atlassian API 명세에는 Space 단위 권한(`DATA-03`)만 있고 샘플 데이터에 ACL 필드가 없음. (A) `space_key` 기반 vs (B) content restrictions API 추가 도입 중 팀 결정 필요. **feature1·feature7의 선행 조건.** 상세: `docs/db-schema.md` §1.4
+- [ ] **`access_token`/`cloudid` 전달 방식** — Authorization Server(Spring)가 발급한 토큰을 ML 파이프라인이 받는 경로(요청 헤더 / 내부 호출)를 백엔드와 확정 (feature2 선행)
+- [ ] **PageObject 계약 동결** — `attachments[]` 등 스펙 동결 (`docs/rag-pipeline-design.md` §7.1)
 
 ---
 
@@ -44,15 +47,16 @@
 
 ### feature2: Document Source Adapter
 
-- 요구사항: 데이터 공급원 추상화. PoC용 MongoDB mock 어댑터
-- 수정 대상: `app/adapters/base.py`, `app/adapters/mongo.py`
-- 테스트: fake MongoDB로 `fetch_pages` / `list_active_ids` / `watch_changes` 계약 검증
-- 위험: ACL 부착 책임 경계 (선행 확인 항목)
+- 요구사항: 데이터 공급원 추상화. JSON 픽스처 어댑터 + Atlassian 직접 호출 어댑터
+- 수정 대상: `app/adapters/{base,json_fixture,atlassian}.py`
+- 테스트: `samples/*.json`으로 `JsonFixtureSourceAdapter` 계약 검증, mock HTTP로 `AtlassianSourceAdapter`의 `fetch_pages`/`list_active_ids`/`watch_changes` 검증
+- 위험: `access_token`/`cloudid` 전달 방식 미확정 (선행 의존성 참조)
 
 작업 항목:
 
 - [ ] `DocumentSourceAdapter` 인터페이스
-- [ ] `MongoSourceAdapter` — `rag_mock.pages` / `rag_mock.attachments` 읽기
+- [ ] `JsonFixtureSourceAdapter` — `samples/confluence_sample_data.json` / `datadog_docs.json` → PageObject 변환
+- [ ] `AtlassianSourceAdapter` — `atlassian-python-api`로 `DATA-01`(Full Crawl) / `DATA-02`(CQL Delta Sync) / `DATA-03`(Space 목록) 호출 (`docs/atlassian-api.md`)
 
 ## Milestone B — Ingestion 파이프라인
 
@@ -69,8 +73,9 @@
 ### feature4: Adaptive Chunker (첨부 3유형)
 
 - 수정 대상: `app/ingestion/chunker/attachment.py`
-- 테스트: PDF/Word 섹션 분할, Excel/CSV 자연어 직렬화(컬럼명 동봉), 헤더 누락 fallback
-- 위험: 첨부 원본 미확보 (선행 확인 항목)
+- 테스트 픽스처: `samples/attachments/` — docx 2건(Heading 계층 + 표), xlsx 2건(멀티시트 헤더 / 순수 수치 92행)
+- 테스트: PDF/Word 섹션 분할, Excel/CSV 자연어 직렬화(컬럼명 동봉), 헤더 누락 fallback, 50행 그룹 분할
+- 비고: PDF 픽스처는 미확보 — Word/Excel 우선 구현, PDF는 별도 픽스처 확보 후
 
 작업 항목:
 
