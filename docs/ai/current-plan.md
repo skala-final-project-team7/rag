@@ -193,15 +193,50 @@
 
 ## Milestone C — Query 파이프라인
 
-### feature7: ACL Pre-filtering + @enforce_acl
+> **진행 메모 (2026-05-15)**: RAG 담당자의 기획서 범위는 Query 파이프라인이므로, Ingestion
+> (Milestone B)은 feature4-A까지 완료한 상태에서 Query(Milestone C)로 전환한다. Ingestion
+> 잔여(feature4-B-2 PDF, feature5·6)는 별도 담당/세션 몫. feature1·2(공통 기반)는 양 파이프라인
+> 공용이라 그대로 활용한다.
 
-- 수정 대상: `app/query/acl.py`
-- 테스트: JWT → 필터 생성, `@enforce_acl`가 ACL 없는 호출을 `ACLViolationError`로 거부
-- 위험: 보안 핵심 — 우회 불가 구조 검증 필수
+### feature7: ACL Pre-filtering + @enforce_acl  ✅ 완료 (2026-05-15)
+
+- **작업 목표**: 사용자 단위 검색의 권한 경계를 시스템 단에서 강제. JWT에서 사용자 식별을
+  추출하고, Qdrant 검색에 항상 주입되는 ACL 필터를 생성하며, ACL 없는 검색 호출을
+  데코레이터로 거부한다 (rag-pipeline-design.md §6 4.2, app/CLAUDE.md §3, db-schema.md §1.4).
+- **브랜치**: `feat/#1/rag-pipeline-skeleton` (기반 작업 연장)
+- **수정 대상 파일**:
+  - `app/query/acl.py` (신규)
+    - `extract_principal(jwt) -> Principal` — JWT payload를 stdlib base64+json으로 디코드해
+      `sub`(user_id)·`groups`만 추출. **서명은 검증하지 않는다** — 인증/JWT 발급은 BFF 책임
+      (api-spec.md). 형식 오류·`sub` 누락 시 `PrincipalExtractionError`(API의 `UNAUTHORIZED` 대응)
+    - `build_acl_filter(user_id, groups) -> dict` — `allowed_groups`가 사용자 그룹 중 하나와
+      매칭 **OR** `allowed_users`가 user_id 포함, 하는 Qdrant `should` 필터 dict 생성
+      (`RagState.acl_filter`가 `dict[str, Any]` 계약). ACL 필드 모델은 `allowed_groups`/
+      `allowed_users` 채택 결정됨 — 이 함수만 교체하면 다른 모델로 전환 가능 (app/CLAUDE.md §3)
+    - `ACLViolationError` + `@enforce_acl` — 검색 함수에 유효한 `acl_filter` 인자가 없으면
+      거부. 데코레이션 시점에 `acl_filter` 파라미터 존재를 강제하고, 호출 시점에 필터
+      누락·무효를 `ACLViolationError`로 거부. ACL 검사는 호출 전이라 sync/async 함수 모두 지원
+  - `app/query/__init__.py` — re-export 갱신 (adapters/·chunker/와 동일 패턴)
+  - `tests/query/__init__.py`, `tests/query/test_acl.py` (신규)
+- **수정하지 않을 파일**: `app/schemas/*`(RagState가 이미 `user_id`/`groups`/`acl_filter` 보유 —
+  변경 불필요), `app/` 그 외, 다른 팀원 담당 영역
+- **구현 단계** (테스트 우선): ① 테스트 작성 → ② `acl.py` 구현 → ③ `__init__.py` re-export →
+  ④ `./scripts/verify.sh`
+- **테스트 계획**:
+  - `extract_principal`: 정상 JWT → Principal, groups 누락 시 `[]` 기본값, 형식 오류·payload
+    디코드 실패·`sub` 누락 시 `PrincipalExtractionError`
+  - `build_acl_filter`: `should` OR 구조(allowed_groups any / allowed_users any), 빈 groups 처리
+  - `@enforce_acl`: 유효 필터 시 정상 호출, 필터 누락/None/무효 시 `ACLViolationError`,
+    `acl_filter` 파라미터 없는 함수 데코레이션 시 `TypeError`
+- **문서 수정 필요 여부**: 없음 (acl.py는 db-schema.md §1.4·api-spec.md와 정합 확인만)
+- **위험 요소**: 보안 핵심 — ACL 우회 불가 구조 검증 필수. 필터 생성 로직은 단일 함수로
+  격리해 ACL 모델 변경 시 교체 지점을 한정
+- **완료 기준**: 단위 테스트 전체 통과 / `@enforce_acl` 우회 시도가 `ACLViolationError`로
+  거부됨을 테스트로 확인 / `verify` 통과 / `working-log.md` 갱신
 
 작업 항목:
 
-- [ ] ACL 필터 생성 + `@enforce_acl` 데코레이터
+- [x] ACL 필터 생성 + `@enforce_acl` 데코레이터 + JWT 클레임 추출
 
 ### feature8: 질의 라우터 + 멀티턴 히스토리 [Agent]
 

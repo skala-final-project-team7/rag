@@ -12,4 +12,25 @@
 - generator.py  답변 생성기 [Agent]  의도별 프롬프트 + GPT-4o + SSE 스트리밍 + Function Calling
 - verifier.py   답변 검증 [Pipeline + Agent]  1단계 규칙 매칭 → FLAG → 2단계 LLM 평가자
 - formatter.py  응답 포맷터 [Pipeline]  검증된 답변·출처·검증 결과 → UI JSON (docs/api-spec.md)
+
+구현 상태:
+- acl.py        extract_principal / build_acl_filter / @enforce_acl [feature7]
 """
+
+from app.query.acl import (
+    ACLViolationError,
+    Principal,
+    PrincipalExtractionError,
+    build_acl_filter,
+    enforce_acl,
+    extract_principal,
+)
+
+__all__ = [
+    "ACLViolationError",
+    "Principal",
+    "PrincipalExtractionError",
+    "build_acl_filter",
+    "enforce_acl",
+    "extract_principal",
+]
