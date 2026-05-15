@@ -20,6 +20,8 @@
 - rerank.py     select_reranked / RerankResult — Cross-Encoder 재순위화 선정 로직 [feature9-A]
 - verifier.py   verify_answer_rules / RuleVerificationResult — 답변 검증 1단계 규칙 매칭
                 [feature10-Pipeline] (2단계 LLM 평가자 [Agent]는 별도 담당자 추가)
+- formatter.py  format_response — 검증된 답변·출처·검증 결과를 QueryResponse로 변환
+                [feature11-Pipeline]
 """
 
 from app.query.acl import (
@@ -30,6 +32,7 @@ from app.query.acl import (
     enforce_acl,
     extract_principal,
 )
+from app.query.formatter import format_response
 from app.query.rerank import RerankResult, select_reranked
 from app.query.search import (
     fuse_and_rank,
@@ -49,6 +52,7 @@ __all__ = [
     "build_acl_filter",
     "enforce_acl",
     "extract_principal",
+    "format_response",
     "fuse_and_rank",
     "merge_pools",
     "reciprocal_rank_fusion",

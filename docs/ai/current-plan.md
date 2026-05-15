@@ -340,18 +340,36 @@
 
 ### feature11: 응답 포맷터 + Query 그래프 + API — ⚠ 일부 통합 지점
 
-- **본 담당자 몫(Pipeline)**: 응답 포맷터(`app/query/formatter.py`) — 검증된 답변·출처·검증
-  결과를 UI JSON으로 변환(api-spec.md). 순수 로직, 완전 독립 구현·테스트 가능.
+- **본 담당자 몫(Pipeline)**: 응답 포맷터 — `app/query/formatter.py`.
+  - **작업 목표**: 생성·검증을 거친 답변을 `QueryResponse`(UI JSON)로 변환하고,
+    api-spec.md "표준 분기 응답" 규칙을 적용한다 — Cross-Encoder 최고 점수가 낮으면
+    저신뢰 분기(`feedback_enabled=false`), NOT_SUPPORTED 비율 > 50%면 답변 차단·대체
+    (rag-pipeline-design.md §6 4.8, api-spec.md).
+  - **수정 대상**: `app/query/formatter.py`(신규), `app/query/__init__.py`,
+    `tests/query/test_formatter.py`(신규)
+  - **구현**: `format_response(answer, sources, verification, intent, used_llm,
+    latency_ms) -> QueryResponse` 순수 함수 + 헬퍼(`_is_low_confidence`·
+    `_not_supported_ratio`) + 상수(`LOW_CONFIDENCE_SCORE`=20·`VERIFICATION_BLOCK_RATIO`=
+    0.5·`BLOCKED_ANSWER_MESSAGE`). feature9-A처럼 순수 로직 우선 — RagState→인자 추출
+    노드 래퍼는 그래프 조립 단계에서.
+  - **scoping**: `Source` 객체 생성(Chunk+Cross-Encoder 점수 → Source)은 feature9-B
+    책임(점수를 가진 단계). 포맷터는 완성된 `Source`를 입력으로 받는다(`RagState.sources`가
+    이미 `list[Source]`). 검색 0건 early-exit는 그래프(아래 통합 지점) 몫 — 포맷터는
+    "생성된 답변을 응답으로 변환"만 한다.
+  - **수정하지 않을 파일**: `app/schemas/*`(QueryResponse·Source 기존 활용), `app/llm/*`,
+    `app/pipeline/*`·`app/api/*`(통합 지점 — 아래), 다른 팀원 담당 영역
+  - **테스트**: 정상 응답(feedback_enabled=True), 저신뢰 분기(최고 Source 점수 < 20),
+    검증 차단(NOT_SUPPORTED 비율 > 50% → 답변 대체), 경계값, 차단 우선순위,
+    sources/verification 통과
+  - **완료 기준**: 단위 테스트 전체 통과 / `verify` 통과 / `working-log.md` 갱신
 - **통합 지점**: Query 그래프 조립(`app/pipeline/query_graph.py`)·FastAPI 라우트(`app/api/*`)는
   Agent 노드 + Pipeline 노드를 배선한다. Agent 노드는 stub/fake로 두고 구현·end-to-end
   테스트한 뒤, Agent 코드 전달 시 교체. 그래프 조립은 feature5·9-B 이후가 적절.
-- 수정 대상: `app/query/formatter.py`, `app/pipeline/query_graph.py`, `app/api/*`
-- 테스트: 응답 JSON 스키마(포맷터), SSE 이벤트 순서·end-to-end(전 단계 mock/stub), 에러 응답 코드
 - 문서 수정: API 변경 시 `docs/api-spec.md`
 
 작업 항목:
 
-- [ ] (본 담당자) 응답 포맷터 [Pipeline]
+- [x] (본 담당자) 응답 포맷터 [Pipeline]
 - [ ] Query LangGraph 조립 + FastAPI 라우트(SSE) — Agent 노드 stub → 전달 후 교체
 
 ---
