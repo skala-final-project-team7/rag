@@ -561,3 +561,63 @@ P1-3 (`Attachment.local_path` 분리):
   단계를 포함한다.
 - 코드 리뷰 P2 잔여(품질 튜닝 영역): `verifier._token_grounded` 워드 경계·`count_tokens`
   SentencePiece 도입·ACL prefix 컨벤션 ADR — 별도 세션/스프린트에서.
+
+
+## 2026-05-17 — 코드 리뷰 후속 2: 시연 데모 + P2 잔여 + ADR-0002
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 직전 change-set(P1+P2)이 완료된 뒤, 회사 시연 전에 "쿼리 → 샘플 데이터 검색"이
+  실제로 동작함을 보일 수 있도록 가벼운 PoC 데모와 P2 잔여 항목 두 건을 일괄 보완.
+
+### 변경 사항
+
+검색 시연 데모:
+- `examples/demo_search.py` 신규 — 외부 의존성 0건. samples 92p → 청크 379건 →
+  Multi-Pool BM25-lite 인메모리 인덱스 → ACL 필터(`build_acl_filter` + 직접 OR 매칭)
+  → 의도별 Pool 가중 합산 → Top-K 출처 카드. `RETRIEVAL_EMPTY` 표준 분기 응답까지 시연.
+- 데이터 흐름: `JsonFixtureSourceAdapter → chunk_page → pool_embedding_texts →
+  BM25Lite → build_acl_filter → 가중 합산 → 출처 카드` — 본 담당자가 끝낸 결정론적
+  부품이 모두 잇혀 동작함을 보인다.
+- 회사 Mac에서 feature5-B/9-B/11 통합 시 `BM25Lite` 자리만 multilingual-e5-large +
+  Qdrant + Cross-Encoder로 교체하면 동일한 흐름이 유지된다.
+
+P2 잔여 (working-log 2026-05-17 직전 섹션에서 "별도 세션" 표기):
+- `app/query/verifier.py` `_token_grounded`에 ASCII 워드 경계 적용 — 답변의 '32'가
+  청크의 '320' 안에서 false positive 매칭되는 것을 차단. 한글 토큰은 워드 경계 개념이
+  없어 부분 문자열 매칭 유지(품질 튜닝 단계에서 Mecab 도입 후 교체).
+- `app/ingestion/chunker/storage_format.py` `_HUGO_SHORTCODE` 정규식 추가 — datadog
+  본문의 `{{< ref "..." >}}` 같은 Hugo 숏코드 잔재를 정제 단계에서 제거. 임베딩 잡음 감소.
+
+ADR-0002 ACL prefix 컨벤션:
+- `docs/adr/0002-acl-prefix-convention.md` 신규 — `space:{key}` prefix 채택을 명시 동결.
+  `JsonFixtureSourceAdapter._synthesize_acl`과 `examples/demo_search.py`가 이미 그
+  컨벤션을 따르고 있으며, BFF가 JWT `groups` 클레임에 같은 형식을 보장해야 함을 명시.
+
+신규 회귀 테스트:
+- `tests/ingestion/chunker/test_storage_format.py::test_hugo_shortcode_is_stripped` (1건)
+- `tests/query/test_verifier.py::test_number_not_matched_inside_larger_number` (1건)
+
+### 검증 결과 (집 Windows 샌드박스 기준)
+
+- `python -m examples.demo_search "EKS 노드 장애 대응 절차" --top-k 3`
+  → CLOUD/EKS 장애 대응 가이드(#1), CCC/장애 대응 프로세스 표준(#2),
+    ONBOARD/Cloud Control Center팀 신규 입사자 온보딩 가이드(#3) 정상 매칭.
+- `--groups space:ONBOARD` 만 부여 시 후보 14건으로 정확히 격리됨.
+- `--groups space:NONEXIST` 시 RETRIEVAL_EMPTY 표준 분기 응답 출력 확인.
+- pytest: **274 passed** (이전 272 + Hugo 숏코드 1 + verifier 워드 경계 1).
+- ruff format/check: 통과.
+
+### 비고
+
+- 1 change-set 원칙상 직전 change-set과 분리해서 별도 commit 그룹 3개로 묶었다
+  (feat: 시연 데모 / refactor + test: P2 잔여 / docs: ADR-0002 + working-log).
+- 회사 Mac에서 진행할 다음 단계 — feature5-B(실제 임베딩·Qdrant) / AtlassianSourceAdapter
+  / feature6(Ingestion 그래프) / feature11 통합(Query 그래프 + SSE) — 환경적으로 회사
+  환경이 적합한 항목들이다.
+
+### 남은 TODO
+
+- feature4-B / feature5-B / feature6 / feature9-B / feature11 통합 / AtlassianSourceAdapter
+  (회사 Mac 다음 세션)
+- `docs/api-spec.md`의 JWT 클레임 예시를 `groups=["space:..."]`로 갱신할지 BFF 담당자
+  협의 후 결정 (별도 PR)
