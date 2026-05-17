@@ -11,6 +11,9 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature10-Pipeline — verify_answer_rules / RuleVerificationResult
     (1단계 규칙 매칭. 2단계 LLM 평가자 [Agent]는 별도 담당자가 추가한다)
+  - 2026-05-17, 코드 리뷰 후속(P2) — _token_grounded가 ASCII 토큰에 대해 워드 경계를
+    적용해 false positive(예: '32'가 '320'에 매칭) 차단. 한글은 워드 경계 개념이 없어
+    부분 문자열 매칭 유지(품질 튜닝 단계에서 Mecab 도입 후 교체)
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -120,16 +123,35 @@ def _extract_checkable_tokens(sentence: str) -> list[str]:
     """문장에서 규칙 대조 대상 검증 토큰(수치·구조적 식별자)을 추출한다.
 
     인용 마커 `[#n]`은 제거한 뒤 추출해 마커 숫자가 토큰으로 잡히지 않게 한다.
-    일반 단어는 패러프레이즈 여지가 커 노이즈가 되므로 검증 대상에서 제외한다.
+    일반 단어는 패러프레이즈 여지가 커 노이즈가 되므로 검증 대상에서 제외한다. 구조적
+    식별자(예: ``v1.29.1``)가 잡힌 영역에서는 같은 부위의 숫자(예: ``1.29.1``)를
+    중복 추출하지 않도록 _STRUCTURED_TOKEN을 먼저 적용하고 그 자리를 비운 뒤 _NUMBER를
+    돌린다 (P2 보완, 2026-05-17).
     """
     text = _CITATION.sub(" ", sentence)
-    tokens = _NUMBER.findall(text) + _STRUCTURED_TOKEN.findall(text)
-    return list(dict.fromkeys(tokens))
+    structured = _STRUCTURED_TOKEN.findall(text)
+    remaining = _STRUCTURED_TOKEN.sub(" ", text)
+    numbers = _NUMBER.findall(remaining)
+    return list(dict.fromkeys(structured + numbers))
 
 
 def _token_grounded(token: str, cited_text: str) -> bool:
-    """검증 토큰이 인용 청크 텍스트에 나타나면 True (대소문자 무시)."""
-    return token.lower() in cited_text.lower()
+    """검증 토큰이 인용 청크 텍스트에 나타나면 True (대소문자 무시).
+
+    ASCII 전용 토큰(수치·영문 식별자)은 워드 경계 안에서만 매칭한다 — 예: 답변의 '32'가
+    청크의 '320' 안에서 false positive 매칭되는 것을 차단한다(P2 보완 2026-05-17).
+    한글 토큰은 워드 경계 개념이 없어 부분 문자열 매칭을 유지한다(Mecab 도입 단계에서
+    교체).
+    """
+    token_lower = token.lower()
+    text_lower = cited_text.lower()
+    if all(ord(char) < 128 for char in token_lower):
+        # ASCII 단어 문자/구분자(./-_) 경계만 검사한다. `\\w`는 Unicode 모드에서 한글까지
+        # 포함하므로 명시적 ASCII 클래스를 쓴다. 한글 '32대' 같은 케이스에서 '32'가 정상
+        # 매칭되도록 우측은 [A-Za-z0-9_]만 차단한다.
+        pattern = r"(?<![A-Za-z0-9_./-])" + re.escape(token_lower) + r"(?![A-Za-z0-9_])"
+        return re.search(pattern, text_lower) is not None
+    return token_lower in text_lower
 
 
 def verify_answer_rules(answer: str, top_chunks: list[Chunk]) -> RuleVerificationResult:
