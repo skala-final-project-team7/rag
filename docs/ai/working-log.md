@@ -485,3 +485,79 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 - 남은 TODO: feature5-B(실제 임베딩·Qdrant·MongoDB) → feature9-B(검색·재순위화 노드
   오케스트레이션) → feature11 통합(Query 그래프 조립 + API — 히스토리 어댑터·검색·검증·
   포맷터·라우터(Agent 전달 후) 배선). 질의 라우터는 Agent 담당자 전달 시 동일 방식으로 통합
+
+
+## 2026-05-17 — 코드 리뷰 후속: P1·P2 보완
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: `docs/ai/code-review-2026-05-17.md`의 P1 3건 + 본 담당자 영역 P2 결함을 일괄 보완.
+  옵션 "P1 + 본 담당자 영역 P2 (권장)"를 사용자 승인 후 진행.
+
+### 변경 사항
+
+P1-1 (Settings.samples_dir):
+- `app/adapters/factory.py` 신설 — `build_source_adapter(settings)`가 `Settings.source_type`
+  에 따라 어댑터를 생성하고 `samples_dir`을 주입한다. `UnsupportedSourceTypeError` 추가.
+- `app/adapters/__init__.py` re-export 갱신.
+- `app/config.py` `mysql_uri`에 운영 전환 시 `SecretStr` 승급 후보 NOTE 추가.
+
+P1-2 (`_is_valid_acl_filter` 강화):
+- `app/query/acl.py`에 `_is_valid_acl_clause` 신설. `should` 절 내부 구조(`key`/`match.any`)
+  까지 검사하도록 `_is_valid_acl_filter` 강화. 잘못된 호출 조기 감지.
+- `enforce_acl` docstring을 coroutine 반환 함수 한정 표현으로 정정.
+
+P1-3 (`Attachment.local_path` 분리):
+- `docs/adr/0001-attachment-source-url.md` 신규 — `download_url`은 사용자 노출용 URL/URI,
+  `local_path`(선택)는 청커가 파일을 직접 열 때 사용. 운영 어댑터는 다운로드 헬퍼가 채운다.
+- `app/schemas/page_object.py` `Attachment.local_path: str | None = None` 추가(비파괴).
+- `app/adapters/json_fixture.py` `_map_attachments`가 `download_url`은 file:// URI,
+  `local_path`는 실제 경로로 분리 매핑.
+- `app/ingestion/chunker/attachment.py` `_resolve_attachment_path` 헬퍼 추가. `_chunk_docx`·
+  `_chunk_xlsx`가 그 경로를 사용.
+- `docs/db-schema.md` Attachment 스펙·주석 갱신.
+
+본 담당자 영역 P2:
+- xlsx 단일 행/축소 한계(10행) 그룹이 800토큰 초과 시 슬라이딩 윈도우 추가 분할
+  (`_group_sheet_rows` `emit_single_row`). 클러스터 메트릭 시트가 행 단위로 분해됨.
+- `_looks_like_header`를 raw value 기반으로 보강 — datetime 셀이 헤더로 오인되지 않게 함.
+- `ChunkMetadata.doc_type`을 `DocType | AttachmentType`으로 정적 강제(StrEnum이라
+  직렬화는 동일). 잘못된 doc_type 값 주입을 컴파일 시 차단.
+- `metadata.build_metadata`·`attachment.build_attachment_metadata`에서 `str(doc_type)`/
+  `str(attachment_type)` 변환 제거 — enum 그대로 전달.
+- `vector_store.build_point_payload`·`embedding.pool_embedding_texts`에 `.value` 명시
+  (enum 통일).
+- `tests/test_config.py` `.env` 자동 로드를 끄는 `_isolate_rag_env` autouse fixture +
+  `_settings_without_env_file` 헬퍼 추가 — 개발자 머신 `.env`가 `Settings()` 검증을
+  오염시키지 않도록 격리. 모든 `Settings()` 호출이 `_env_file=None`으로 격리됨.
+
+신규 회귀 테스트 (7건 + 1건 갱신):
+- `tests/adapters/test_factory.py` (4건): 기본값/Settings.samples_dir 주입/unknown 거부/
+  atlassian deferred.
+- `tests/query/test_acl.py`: 비-리스트 groups 거부, `_is_valid_acl_filter` 절 구조 검사,
+  async 함수 데코레이션 통합 (3건).
+- `tests/schemas/test_page_object.py`: Attachment.local_path 기본/명시 (2건 보강).
+- `tests/ingestion/chunker/test_attachment.py`: 단일 행 oversize 슬라이딩, datetime 헤더
+  오인 방지 (2건 신규), 기존 `[클러스터 메트릭] 행 1~10` 단언을 P2 동작에 맞춰 갱신.
+
+### 검증 결과
+
+- ruff format / ruff check: 통과 (1개 파일 reformat 됨, all checks passed)
+- pytest: **272 passed** (이전 baseline 262 + 신규 회귀 10건). RAG 핵심 196 + vendor
+  history-manager-agent 76. 1 failed→0 (사용자 `.env` 의존 환경 격리 결함 보완 포함).
+
+### 비고
+
+- 손상된 Edit 도구로 인해 일부 파일이 truncate 됐던 사건은 `git restore` + bash python으로
+  안전하게 재패치하여 해결. 모든 변경 파일은 UTF-8 LF로 일관 저장.
+- 의도된 미완 영역(`app/api/`, `app/pipeline/`, `app/llm/`, `app/query/generator.py`,
+  `app/query/router.py`, `app/ingestion/document_analyzer.py`, AtlassianSourceAdapter,
+  feature4-B/5-B/6/9-B/10-Agent/11-통합)은 변경하지 않았다.
+- ACL 모델·청크 메타·라우팅/검증 임계값 등 동결 계약은 변경 없음(P1-3은 `Attachment`에
+  새 필드 추가만 — 비파괴 확장).
+
+### 남은 TODO
+
+- ADR-0001 반영 — `AtlassianSourceAdapter` 구현 시 다운로드 헬퍼가 `local_path`를 채우는
+  단계를 포함한다.
+- 코드 리뷰 P2 잔여(품질 튜닝 영역): `verifier._token_grounded` 워드 경계·`count_tokens`
+  SentencePiece 도입·ACL prefix 컨벤션 ADR — 별도 세션/스프린트에서.
