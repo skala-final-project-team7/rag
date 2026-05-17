@@ -7,6 +7,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature1 schemas — chunking-strategy.md §6 정합
+  - 2026-05-17, 코드 리뷰 후속(P2) — doc_type을 ``DocType | AttachmentType``으로 정적
+    강제(StrEnum이라 직렬화 의미는 동일, 잘못된 값 주입을 컴파일 시 차단)
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -18,7 +20,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.schemas.enums import ExtractedFormat, SourceType
+from app.schemas.enums import AttachmentType, DocType, ExtractedFormat, SourceType
 
 
 def make_chunk_id(page_id: str, chunk_index: int, attachment_id: str | None = None) -> str:
@@ -54,7 +56,8 @@ class ChunkMetadata(BaseModel):
     section_path: str
     chunk_index: int
     labels: list[str] = Field(default_factory=list)
-    doc_type: str  # 본문은 DocType 값, 첨부는 AttachmentType 값
+    # 본문은 DocType, 첨부는 AttachmentType. StrEnum이라 직렬화는 동일한 소문자 문자열.
+    doc_type: DocType | AttachmentType
     space_key: str
     allowed_groups: list[str]
     allowed_users: list[str]

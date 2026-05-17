@@ -9,6 +9,9 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature7 — extract_principal / build_acl_filter / @enforce_acl
+  - 2026-05-17, 코드 리뷰 후속(P1-2) — _is_valid_acl_filter가 should 절 내부 구조까지
+    검사하도록 강화 (잘못된 호출 조기 감지). enforce_acl docstring을 coroutine 반환 함수
+    한정으로 정정
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -122,16 +125,36 @@ def build_acl_filter(user_id: str, groups: list[str]) -> dict[str, Any]:
     }
 
 
+def _is_valid_acl_clause(clause: object) -> bool:
+    """단일 ACL 절(should 항목)이 build_acl_filter 산출물 형태인지 검사한다.
+
+    절은 ``{"key": <str>, "match": {"any": <list>}}`` 형태여야 한다. 'key'·'match'·
+    'match.any' 중 하나라도 빠지거나 타입이 어긋나면 거부한다 (P1-2 강화).
+    """
+    if not isinstance(clause, dict):
+        return False
+    key = clause.get("key")
+    match = clause.get("match")
+    if not isinstance(key, str) or not key:
+        return False
+    if not isinstance(match, dict):
+        return False
+    return isinstance(match.get("any"), list)
+
+
 def _is_valid_acl_filter(acl_filter: object) -> bool:
     """ACL 필터가 build_acl_filter 산출물 형태인지 검사한다.
 
-    필터 누락(None)·빈 dict·비-dict·`should` 절 부재를 모두 거부한다. 구조적 누락을
-    잡기 위한 검사이며, 위조 방지가 아니라 'ACL 주입을 잊지 않도록' 강제하는 목적이다.
+    필터 누락(None)·빈 dict·비-dict·`should` 절 부재·절 내부 구조 오류를 모두 거부한다.
+    구조적 누락을 잡기 위한 검사이며, 위조 방지가 아니라 'ACL 주입을 잊지 않도록'
+    강제하는 목적이다. P1-2(코드 리뷰 후속)에서 절 내부 검사를 추가했다.
     """
     if not isinstance(acl_filter, dict):
         return False
     should = acl_filter.get("should")
-    return isinstance(should, list) and len(should) > 0
+    if not isinstance(should, list) or not should:
+        return False
+    return all(_is_valid_acl_clause(clause) for clause in should)
 
 
 def enforce_acl(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -141,8 +164,9 @@ def enforce_acl(func: Callable[..., Any]) -> Callable[..., Any]:
     무효이면 `ACLViolationError`로 거부한다 (app/CLAUDE.md §3 — ACL Pre-filtering 우회 금지).
 
     데코레이션 시점에 대상 함수가 `acl_filter` 파라미터를 갖는지 검사하고, 호출 시점에
-    그 인자가 유효한 ACL 필터인지 검사한다. ACL 검사는 함수 호출 이전에 끝나므로
-    동기·비동기 함수 모두에 적용할 수 있다.
+    그 인자가 유효한 ACL 필터인지 검사한다. ACL 검사는 함수 호출 이전에 끝나기 때문에
+    coroutine 반환 함수에도 적용할 수 있다 — wrapper 자체는 동기로 검사하고 원본 함수의
+    반환값(coroutine)을 그대로 돌려준다(호출자가 ``await`` 책임).
 
     Args:
         func: `acl_filter` 파라미터를 갖는 검색 함수.

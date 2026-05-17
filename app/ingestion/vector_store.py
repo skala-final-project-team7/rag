@@ -8,6 +8,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature5-A — Pool 이름 상수 + build_point_payload (순수 로직)
+  - 2026-05-17, 코드 리뷰 후속(P2) — doc_type이 enum이 된 후에도 동일 JSON을 직렬화하도록
+    .value 변환 명시 (ChunkMetadata.doc_type을 DocType|AttachmentType으로 강제한 결과 반영)
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -53,7 +55,7 @@ def build_point_payload(chunk: Chunk, version_number: int) -> dict[str, Any]:
         "section_path": metadata.section_path,
         "chunk_index": metadata.chunk_index,
         "labels": list(metadata.labels),
-        "doc_type": metadata.doc_type,
+        "doc_type": metadata.doc_type.value,
         "space_key": metadata.space_key,
         "allowed_groups": list(metadata.allowed_groups),
         "allowed_users": list(metadata.allowed_users),

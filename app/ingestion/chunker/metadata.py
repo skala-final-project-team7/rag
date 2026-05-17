@@ -7,6 +7,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature3-B — build_metadata (본문 청크)
+  - 2026-05-17, 코드 리뷰 후속(P2) — doc_type을 DocType enum 그대로 전달
+    (ChunkMetadata.doc_type 정적 강제 반영)
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -52,7 +54,7 @@ def build_metadata(
         section_path=section_path,
         chunk_index=chunk_index,
         labels=page.labels,
-        doc_type=str(doc_type),
+        doc_type=doc_type,
         space_key=page.space_key,
         allowed_groups=page.allowed_groups,
         allowed_users=page.allowed_users,

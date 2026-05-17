@@ -8,6 +8,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature2 — JsonFixtureSourceAdapter + Atlassian 포맷 매핑
+  - 2026-05-17, 코드 리뷰 후속(P1-3) — download_url을 file:// URI(사용자 노출용)로 두고,
+    청커가 직접 열 로컬 경로는 local_path 필드에 분리 매핑 (ADR-2026-001)
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -142,14 +144,15 @@ class JsonFixtureSourceAdapter(DocumentSourceAdapter):
         """페이지 attachments[] → Attachment 목록.
 
         샘플 JSON은 첨부 메타(filename/content_type)만 가지므로 누락 필드를 합성한다.
-        download_url은 samples/attachments/ 내 실제 파일 경로를 가리키며,
-        extracted_text는 다운스트림(첨부 분석기)이 채운다.
+        download_url은 사용자 노출용 URI(file:// scheme)이며, 청커가 직접 열 실제 경로는
+        local_path에 채운다 (ADR-2026-001). extracted_text는 다운스트림(첨부 분석기)이 채운다.
         """
         page_id = raw["id"]
         attachments: list[Attachment] = []
         for index, item in enumerate(raw.get("attachments", [])):
             filename = item["filename"]
             mime_type = item["content_type"]
+            local_path = (self.samples_dir / "attachments" / filename).resolve()
             attachments.append(
                 Attachment(
                     attachment_id=f"{page_id}-att-{index}",
@@ -157,7 +160,8 @@ class JsonFixtureSourceAdapter(DocumentSourceAdapter):
                     mime_type=mime_type,
                     extracted_text="",
                     extracted_format=infer_extracted_format(mime_type),
-                    download_url=str(self.samples_dir / "attachments" / filename),
+                    download_url=local_path.as_uri(),
+                    local_path=str(local_path),
                     parent_page_id=page_id,
                     last_modified=last_modified,
                 )
