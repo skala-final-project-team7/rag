@@ -71,6 +71,14 @@ def test_extract_principal_rejects_missing_sub() -> None:
         extract_principal(_make_jwt({"groups": ["sre"]}))
 
 
+def test_extract_principal_rejects_non_list_groups() -> None:
+    # groups 클레임이 배열이 아니면 추출 실패 (P2 회귀 보호)
+    with pytest.raises(PrincipalExtractionError):
+        extract_principal(_make_jwt({"sub": "taesung", "groups": "sre"}))
+    with pytest.raises(PrincipalExtractionError):
+        extract_principal(_make_jwt({"sub": "taesung", "groups": {"role": "sre"}}))
+
+
 # --- build_acl_filter ---
 
 
@@ -137,6 +145,27 @@ def test_enforce_acl_rejects_invalid_filter() -> None:
         search("q", acl_filter="not-a-filter")
 
 
+def test_enforce_acl_rejects_malformed_should_clauses() -> None:
+    # P1-2: should 절 내부 구조까지 검사 — key/match.any 누락·타입 오류 모두 거부
+    @enforce_acl
+    def search(query: str, *, acl_filter: dict | None = None) -> str:
+        return "results"
+
+    with pytest.raises(ACLViolationError):
+        search("q", acl_filter={"should": []})
+    with pytest.raises(ACLViolationError):
+        search("q", acl_filter={"should": ["not-a-clause"]})
+    with pytest.raises(ACLViolationError):
+        search("q", acl_filter={"should": [{"match": {"any": ["sre"]}}]})
+    with pytest.raises(ACLViolationError):
+        search("q", acl_filter={"should": [{"key": "allowed_groups"}]})
+    with pytest.raises(ACLViolationError):
+        search(
+            "q",
+            acl_filter={"should": [{"key": "allowed_groups", "match": {"any": "sre"}}]},
+        )
+
+
 def test_enforce_acl_accepts_positional_filter() -> None:
     @enforce_acl
     def search(acl_filter: dict, query: str) -> str:
@@ -169,3 +198,19 @@ def test_principal_filter_passes_enforce_acl() -> None:
         return "ok"
 
     assert search("q", acl_filter=acl_filter) == "ok"
+
+
+def test_enforce_acl_returns_coroutine_for_async_target() -> None:
+    # 비동기 검색 함수에 데코레이션해도 ACL 검사가 호출 전에 끝난 뒤 coroutine을 그대로
+    # 돌려준다. ACL 누락 시는 ACLViolationError로 즉시 거부.
+    import asyncio
+
+    @enforce_acl
+    async def async_search(query: str, *, acl_filter: dict | None = None) -> str:
+        return f"async results for {query}"
+
+    coro = async_search("q", acl_filter=_valid_filter())
+    assert asyncio.iscoroutine(coro)
+    assert asyncio.run(coro) == "async results for q"
+    with pytest.raises(ACLViolationError):
+        async_search("q", acl_filter=None)

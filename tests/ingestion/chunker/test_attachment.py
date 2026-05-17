@@ -46,14 +46,20 @@ _PARENT_PAGE = PageObject(
 
 
 def _attachment(filename: str, mime_type: str) -> Attachment:
-    """samples/attachments/<filename>을 가리키는 Attachment 픽스처."""
+    """samples/attachments/<filename>을 가리키는 Attachment 픽스처.
+
+    ADR-0001 이후 청커는 ``local_path``를 우선 사용하므로 그 값을 채우고,
+    ``download_url``은 사용자 노출용 file:// URI로 둔다.
+    """
+    local = ATTACHMENTS_DIR / filename
     return Attachment(
         attachment_id="CONF-PAGE-1-att-0",
         filename=filename,
         mime_type=mime_type,
         extracted_text="",
         extracted_format=ExtractedFormat.RAW_TEXT,
-        download_url=str(ATTACHMENTS_DIR / filename),
+        download_url=local.as_uri(),
+        local_path=str(local),
         parent_page_id="CONF-PAGE-1",
         last_modified=datetime.fromisoformat("2026-04-20T10:00:00+09:00"),
     )
@@ -124,7 +130,7 @@ def test_docx_headingless_falls_back_to_single_draft(tmp_path: Path) -> None:
     path = tmp_path / "plain.docx"
     document.save(path)
     plain = _attachment("plain.docx", _DOCX_MIME)
-    plain = plain.model_copy(update={"download_url": str(path)})
+    plain = plain.model_copy(update={"local_path": str(path), "download_url": path.as_uri()})
 
     drafts = split_attachment(plain, AttachmentType.DOCX)
     assert len(drafts) == 1
@@ -139,14 +145,16 @@ def test_docx_headingless_falls_back_to_single_draft(tmp_path: Path) -> None:
 def test_xlsx_splits_by_sheet_and_serializes_rows() -> None:
     drafts = split_attachment(_XLSX_METRICS, AttachmentType.XLSX)
     headers = {d.section_header for d in drafts}
-    # 시트 단위 분할 — section_header는 '[시트명] 행 N~M'
-    assert "[클러스터 메트릭] 행 1~10" in headers
+    # 시트 단위 분할 — 작은 시트는 '[시트명] 행 N~M', 단일 행 oversize 시트는 '[시트명] 행 N'.
     assert "[개정 이력] 행 1~4" in headers
+    # 클러스터 메트릭 시트는 단일 행도 800토큰 초과라 행 단위로 분해된다(P2 보완).
+    cluster_drafts = [d for d in drafts if d.section_header.startswith("[클러스터 메트릭]")]
+    assert cluster_drafts
     # 각 행이 '[<시트명>] <컬럼>: <값> | ...' 형식으로 직렬화된다 (컬럼명 매 행 동봉)
-    cluster = next(d for d in drafts if d.section_header == "[클러스터 메트릭] 행 1~10")
-    assert (
+    assert any(
         "[클러스터 메트릭] 메트릭 ID: CL-001 | 메트릭 이름: kubernetes.node.cpu.usage.pct"
-        in cluster.text
+        in d.text
+        for d in cluster_drafts
     )
 
 
@@ -159,7 +167,7 @@ def test_xlsx_omits_empty_cells(tmp_path: Path) -> None:
     path = tmp_path / "sparse.xlsx"
     workbook.save(path)
     sparse = _attachment("sparse.xlsx", _XLSX_MIME)
-    sparse = sparse.model_copy(update={"download_url": str(path)})
+    sparse = sparse.model_copy(update={"local_path": str(path), "download_url": path.as_uri()})
 
     drafts = split_attachment(sparse, AttachmentType.XLSX)
     text = drafts[0].text
@@ -180,7 +188,9 @@ def test_xlsx_groups_rows_by_50(tmp_path: Path) -> None:
     path = tmp_path / "rows.xlsx"
     workbook.save(path)
     rows_attach = _attachment("rows.xlsx", _XLSX_MIME)
-    rows_attach = rows_attach.model_copy(update={"download_url": str(path)})
+    rows_attach = rows_attach.model_copy(
+        update={"local_path": str(path), "download_url": path.as_uri()}
+    )
 
     drafts = split_attachment(rows_attach, AttachmentType.XLSX)
     headers = [d.section_header for d in drafts]
@@ -199,12 +209,57 @@ def test_xlsx_oversized_group_shrinks_to_25(tmp_path: Path) -> None:
     path = tmp_path / "long.xlsx"
     workbook.save(path)
     long_attach = _attachment("long.xlsx", _XLSX_MIME)
-    long_attach = long_attach.model_copy(update={"download_url": str(path)})
+    long_attach = long_attach.model_copy(
+        update={"local_path": str(path), "download_url": path.as_uri()}
+    )
 
     drafts = split_attachment(long_attach, AttachmentType.XLSX)
     headers = [d.section_header for d in drafts]
     # 50행 그룹이 25행으로 축소: 1~25 / 26~50 / 51~60
     assert headers == ["[긴행] 행 1~25", "[긴행] 행 26~50", "[긴행] 행 51~60"]
+
+
+def test_xlsx_single_row_oversize_splits_with_sliding_window(tmp_path: Path) -> None:
+    """단일 행이 800토큰을 넘으면 10행 그룹도 축소 불가 → 슬라이딩 윈도우 분할 (P2 보완)."""
+    from app.ingestion.chunker.base import MAX_TOKENS
+    from app.ingestion.chunker.tokenizer import count_tokens
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "거대행"
+    sheet.append(["코드", "설명"])
+    long_text = "토큰 " * 1000
+    sheet.append(["BIG-1", long_text])
+    path = tmp_path / "big_row.xlsx"
+    workbook.save(path)
+    big = _attachment("big_row.xlsx", _XLSX_MIME)
+    big = big.model_copy(update={"local_path": str(path), "download_url": path.as_uri()})
+
+    drafts = split_attachment(big, AttachmentType.XLSX)
+    assert len(drafts) >= 2
+    headers = [d.section_header for d in drafts]
+    assert all("part" in h.lower() for h in headers)
+    for draft in drafts:
+        assert count_tokens(draft.text) <= MAX_TOKENS
+
+
+def test_xlsx_datetime_first_row_is_not_misread_as_header(tmp_path: Path) -> None:
+    """첫 행에 datetime이 있어도 _cell_to_str의 isoformat 변환에 헤더로 오인되지 않는다."""
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "이벤트"
+    sheet.append([datetime(2026, 4, 22, 8, 15, 0), "장애 발생"])
+    sheet.append([datetime(2026, 4, 22, 8, 20, 0), "복구"])
+    path = tmp_path / "events.xlsx"
+    workbook.save(path)
+    events = _attachment("events.xlsx", _XLSX_MIME)
+    events = events.model_copy(update={"local_path": str(path), "download_url": path.as_uri()})
+
+    drafts = split_attachment(events, AttachmentType.XLSX)
+    text = drafts[0].text
+    # 첫 행은 데이터로 분류되어야 하므로 col_1/col_2 헤더가 부여된다 (ATTACH_NO_HEADER)
+    assert "col_1: 2026-04-22T08:15:00" in text
+    assert "col_2: 장애 발생" in text
 
 
 def test_xlsx_synthesizes_header_when_missing(tmp_path: Path) -> None:
@@ -217,7 +272,7 @@ def test_xlsx_synthesizes_header_when_missing(tmp_path: Path) -> None:
     path = tmp_path / "noheader.xlsx"
     workbook.save(path)
     noheader = _attachment("noheader.xlsx", _XLSX_MIME)
-    noheader = noheader.model_copy(update={"download_url": str(path)})
+    noheader = noheader.model_copy(update={"local_path": str(path), "download_url": path.as_uri()})
 
     drafts = split_attachment(noheader, AttachmentType.XLSX)
     text = drafts[0].text

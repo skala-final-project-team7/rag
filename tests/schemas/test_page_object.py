@@ -63,6 +63,16 @@ def test_attachment_valid_and_format_enum() -> None:
     assert att.attachment_id == "CONF-ATT-99001"
     assert att.extracted_format is ExtractedFormat.SHEET_SERIALIZED
     assert att.file_size_bytes is None  # 선택 필드
+    # ADR-0001: local_path는 선택 필드이며 기본값은 None.
+    # download_url(사용자 노출 URL)과 의미가 분리되어 있다.
+    assert att.local_path is None
+
+
+def test_attachment_local_path_populated_separately() -> None:
+    # local_path를 명시 주입해도 download_url은 그대로 유지된다 (ADR-0001)
+    att = Attachment(**{**_ATTACHMENT_KWARGS, "local_path": "/tmp/x.xlsx"})
+    assert att.local_path == "/tmp/x.xlsx"
+    assert att.download_url == _ATTACHMENT_KWARGS["download_url"]
 
 
 def test_page_object_with_attachments() -> None:
