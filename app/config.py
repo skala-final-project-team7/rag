@@ -8,6 +8,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature1 — pydantic-settings 기반 Settings 정의
+  - 2026-05-17, 코드 리뷰 후속(P1-1) — samples_dir이 어댑터에 흐르도록 정리,
+    mysql_uri는 운영 전환 시 SecretStr 승급 후보 NOTE 명시
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+, pydantic-settings 2.3+
@@ -48,6 +50,8 @@ class Settings(BaseSettings):
     mongo_db: str = "lina_rag"
 
     # --- MySQL (space_doc_type_cache) ---
+    # NOTE(P2): 운영 전환 시 비밀번호 포함 DSN이 들어오면 SecretStr로 승급해야 한다.
+    # PoC는 localhost·비밀번호 없는 DSN만 사용하므로 평문 문자열을 유지한다.
     mysql_uri: str = "mysql+pymysql://localhost:3306/lina_rag"
 
     # --- OpenAI ---

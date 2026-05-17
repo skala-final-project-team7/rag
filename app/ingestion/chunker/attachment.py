@@ -9,6 +9,9 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature4-A — docx/xlsx 분할기 + chunk_attachment
+  - 2026-05-17, 코드 리뷰 후속(P1-3·P2) — attachment.local_path 우선 사용(ADR-2026-001),
+    xlsx 단일 행/축소 한계 그룹 oversize 슬라이딩 윈도우 분할, _looks_like_header가
+    raw value 기반으로 datetime을 헤더로 오인하지 않도록 보강, doc_type enum 그대로 전달
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, python-docx 1.1+, openpyxl 3.1+
@@ -27,7 +30,12 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from app.ingestion.chunker.base import MAX_TOKENS, ChunkDraft, apply_size_rules
+from app.ingestion.chunker.base import (
+    MAX_TOKENS,
+    ChunkDraft,
+    apply_size_rules,
+    split_oversized,
+)
 from app.ingestion.chunker.tokenizer import count_tokens
 from app.schemas.chunk import Chunk, ChunkMetadata, make_chunk_id
 from app.schemas.enums import AttachmentType, ExtractedFormat, SourceType
@@ -94,6 +102,23 @@ def _coerce_attachment_type(attachment_type: AttachmentType | str) -> Attachment
         return AttachmentType(attachment_type)
     except ValueError as exc:
         raise ValueError(f"알 수 없는 attachment_type: {attachment_type!r}") from exc
+
+
+def _resolve_attachment_path(attachment: Attachment) -> str:
+    """청커가 파일을 직접 열기 위한 경로를 결정한다 (ADR-2026-001).
+
+    ``local_path``가 채워져 있으면 그것을 사용하고, 없으면 ``download_url``을 fallback으로
+    사용한다(file:// scheme이면 그 경로를 가리킨다고 가정). 운영 어댑터가 도착하면 다운로드
+    헬퍼가 ``local_path``를 채워주는 것이 정공법이다.
+    """
+    if attachment.local_path:
+        return attachment.local_path
+    url = attachment.download_url
+    if url.startswith("file://"):
+        from urllib.parse import urlparse
+
+        return urlparse(url).path
+    return url
 
 
 # --- docx 1차 분할 ---
@@ -172,7 +197,7 @@ def _chunk_docx(attachment: Attachment) -> list[ChunkDraft]:
     헤딩이 하나도 없으면 전체를 단일 draft로 폴백하고 section_header에 파일명을 쓴다.
     첨부 섹션은 원자성이 없으므로 is_atomic=False — 크기 규칙은 chunk_attachment가 적용한다.
     """
-    preamble, sections = _extract_docx_sections(attachment.download_url)
+    preamble, sections = _extract_docx_sections(_resolve_attachment_path(attachment))
     if not sections:
         text = "\n".join(preamble).strip()
         if not text:
@@ -204,11 +229,16 @@ def _cell_to_str(value: object) -> str:
 
 
 def _looks_like_header(row: list[object]) -> bool:
-    """첫 행이 헤더로 보이는지 판단한다 — 비어 있지 않은 셀이 모두 비수치 텍스트면 헤더."""
-    cells = [cell for cell in row if _cell_to_str(cell) != ""]
-    if not cells:
+    """첫 행이 헤더로 보이는지 판단한다 — 비어 있지 않은 셀이 모두 비수치·비-datetime 텍스트면 헤더.
+
+    raw 셀 값(`int`/`float`/`datetime`)을 그대로 검사한다. ``_cell_to_str``이 datetime을
+    isoformat 문자열로 미리 변환하면 datetime 셀이 텍스트로 보이는 false-positive가
+    발생하므로, raw value 기반 판정으로 보강한다 (P2 보완, 2026-05-17).
+    """
+    non_empty = [cell for cell in row if cell is not None and _cell_to_str(cell) != ""]
+    if not non_empty:
         return False
-    return all(not isinstance(cell, (int, float)) for cell in cells)
+    return all(not isinstance(cell, (int, float, datetime)) for cell in non_empty)
 
 
 def _resolve_header(rows: list[list[object]]) -> tuple[list[str], list[list[object]]]:
@@ -261,19 +291,42 @@ def _group_sheet_rows(
     """시트 데이터 행을 N행 그룹으로 묶어 ChunkDraft 목록을 만든다.
 
     기본 50행 그룹을 만들되, 직렬화 결과가 800토큰을 초과하면 25→10행으로 축소
-    재분할한다. 10행 그룹도 초과하면 더 줄일 단계가 없으므로 그대로 둔다
-    (chunking-strategy.md §5).
+    재분할한다. 10행 그룹도 초과하면 더 줄일 단계가 없으므로 단일 행 슬라이딩 윈도우
+    분할(800토큰/100토큰 오버랩)을 적용해 임베딩 모델 입력 한계를 넘지 않게 한다
+    (chunking-strategy.md §5, P2 보완 2026-05-17).
     """
     drafts: list[ChunkDraft] = []
+
+    def emit_single_row(row: list[object], row_index: int) -> None:
+        """단일 행도 800토큰을 넘으면 텍스트를 슬라이딩 윈도우로 추가 분할한다."""
+        text = _serialize_rows(sheet_name, header, [row])
+        if not text.strip():
+            return
+        section_header = f"[{sheet_name}] 행 {row_index + 1}"
+        windows = split_oversized(text)
+        if len(windows) == 1:
+            drafts.append(ChunkDraft(text=text, section_header=section_header, is_atomic=False))
+            return
+        for part_index, window in enumerate(windows, start=1):
+            part_header = f"{section_header} (part {part_index}/{len(windows)})"
+            drafts.append(ChunkDraft(text=window, section_header=part_header, is_atomic=False))
 
     def emit(rows: list[list[object]], start_index: int) -> None:
         text = _serialize_rows(sheet_name, header, rows)
         if not text.strip():
             return
         smaller = _next_smaller_group_size(len(rows))
-        if smaller is not None and count_tokens(text) > MAX_TOKENS:
-            for offset in range(0, len(rows), smaller):
-                emit(rows[offset : offset + smaller], start_index + offset)
+        if count_tokens(text) > MAX_TOKENS:
+            if smaller is not None:
+                for offset in range(0, len(rows), smaller):
+                    emit(rows[offset : offset + smaller], start_index + offset)
+                return
+            # 더 줄일 그룹 단계가 없으면 행 단위로 분해 (단일 행도 oversize면 텍스트 슬라이딩).
+            if len(rows) > 1:
+                for row_offset, row in enumerate(rows):
+                    emit_single_row(row, start_index + row_offset)
+                return
+            emit_single_row(rows[0], start_index)
             return
         section_header = f"[{sheet_name}] 행 {start_index + 1}~{start_index + len(rows)}"
         drafts.append(ChunkDraft(text=text, section_header=section_header, is_atomic=False))
@@ -289,7 +342,7 @@ def _chunk_xlsx(attachment: Attachment) -> list[ChunkDraft]:
     빈 행은 제외하고, 각 행을 컬럼명과 함께 자연어로 직렬화한다. 행 그룹 분할 자체가
     xlsx의 크기 처리이므로 chunk_attachment는 별도 크기 규칙을 적용하지 않는다.
     """
-    workbook = openpyxl.load_workbook(attachment.download_url, data_only=True)
+    workbook = openpyxl.load_workbook(_resolve_attachment_path(attachment), data_only=True)
     drafts: list[ChunkDraft] = []
     try:
         for sheet_name in workbook.sheetnames:
@@ -379,7 +432,7 @@ def build_attachment_metadata(
         section_path=section_path,
         chunk_index=chunk_index,
         labels=page.labels,
-        doc_type=str(attachment_type),
+        doc_type=attachment_type,
         space_key=page.space_key,
         allowed_groups=page.allowed_groups,
         allowed_users=page.allowed_users,

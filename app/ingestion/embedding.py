@@ -9,6 +9,8 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature5-A — pool_embedding_texts / should_skip_embedding
     (순수 로직)
+  - 2026-05-17, 코드 리뷰 후속(P2) — metadata.doc_type이 enum이 된 후에도 동일 텍스트로
+    join되도록 .value 명시
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -42,7 +44,7 @@ def pool_embedding_texts(chunk: Chunk) -> dict[str, str]:
         title_text = f"{metadata.attachment_filename} {metadata.section_header}"
     else:
         title_text = f"{metadata.page_title} {metadata.section_header}"
-    label_text = " ".join([*metadata.labels, metadata.space_key, metadata.doc_type])
+    label_text = " ".join([*metadata.labels, metadata.space_key, metadata.doc_type.value])
     return {
         TITLE_POOL: title_text.strip(),
         CONTENT_POOL: chunk.text,
