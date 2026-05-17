@@ -8,6 +8,8 @@
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature3-A — clean_storage_format (samples 본문 패턴 기준)
+  - 2026-05-17, 코드 리뷰 후속(P2) — Hugo 숏코드(`{{< ... >}}`) 잔재를 정제 단계에서
+    제거해 datadog 본문 임베딩 잡음 감소
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, beautifulsoup4 4.12+
@@ -47,6 +49,8 @@ _TASK = re.compile(
     re.DOTALL,
 )
 _CONFLUENCE_TAG = re.compile(r"</?(?:ac|ri):[^>]*>")
+# Hugo 숏코드 잔재(datadog 본문 등) — `{{< ref "..." >}}` 같은 형태를 통째로 제거한다.
+_HUGO_SHORTCODE = re.compile(r"\{\{[<%].*?[>%]\}\}", re.DOTALL)
 
 
 def clean_storage_format(html: str) -> str:
@@ -160,9 +164,10 @@ def _table_to_markdown(node: Tag) -> str:
 
 
 def _normalize(text: str) -> str:
-    """스마트 따옴표를 ASCII로, 과도한 공백·빈 줄을 정리한다."""
+    """스마트 따옴표를 ASCII로, Hugo 숏코드를 제거하고, 과도한 공백·빈 줄을 정리한다."""
     for smart, ascii_char in _SMART_QUOTES.items():
         text = text.replace(smart, ascii_char)
+    text = _HUGO_SHORTCODE.sub("", text)
     lines = [line.rstrip() for line in text.split("\n")]
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text)

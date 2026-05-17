@@ -98,3 +98,14 @@ def test_malformed_html_does_not_crash() -> None:
     out = clean_storage_format("<p>닫히지 않은 태그 <strong>굵게")
     assert "닫히지 않은 태그" in out
     assert "굵게" in out
+
+
+def test_hugo_shortcode_is_stripped() -> None:
+    # P2: datadog 본문의 Hugo 숏코드(`{{< ref "..." >}}`)는 임베딩 잡음을 줄이려 제거된다.
+    out = clean_storage_format(
+        '<p>자세한 내용은 {{< ref "/agent/install" >}} 페이지를 참고하세요.</p>'
+    )
+    assert "Hugo" not in out  # placeholder
+    assert "{{<" not in out
+    assert "ref" not in out  # 숏코드 안의 'ref' 키워드도 함께 제거된다
+    assert "참고하세요" in out

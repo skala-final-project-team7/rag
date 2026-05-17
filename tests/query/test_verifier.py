@@ -121,6 +121,18 @@ def test_empty_answer_returns_empty_result() -> None:
     assert result.passed_verifications() == []
 
 
+def test_number_not_matched_inside_larger_number() -> None:
+    # P2: 답변의 '32'가 청크의 '320'에 false positive 매칭되지 않는다 (워드 경계)
+    from app.query.verifier import verify_answer_rules
+
+    result = verify_answer_rules(
+        "노드는 32대 운영됩니다 [#1].", [_chunk("평균 320대 노드를 운영한다")]
+    )
+    check = result.sentences[0]
+    assert check.is_suspicious is True  # '32'는 '320' 안에 있어도 매칭 안 됨
+    assert "32" in check.unverified_tokens
+
+
 def test_accessors_split_passed_and_suspicious() -> None:
     answer = "prod-main-eks는 32대입니다 [#1].\n메모리는 99% 입니다 [#2]."
     chunks = [_chunk("prod-main-eks 32대"), _chunk("메모리 70%")]
