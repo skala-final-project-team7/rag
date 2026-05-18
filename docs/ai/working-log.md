@@ -1770,3 +1770,119 @@ Pipeline 단계(검색·재순위화·검증 1단계·포맷터)·HTTP 계층(SS
   `_chunk_from_search_hit`)을 본 commit 하나에서 모두 처리. 다음 follow-up 후보
   — 풀 텍스트 lookup 어댑터(Source.text_preview 200자 한계 보완), `build_real_deps`
   운영 어댑터 부트스트랩, Agent 코드 통합(`QueryGraphDeps` 3개 필드 교체).
+
+
+## 2026-05-18 — build_real_deps + use_real_adapters 환경 토글
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: feature11 통합 Phase 2(`build_poc_deps`) 완료 후, 운영 전환 시
+  E5DenseEmbedder + BM25SparseEmbedder + `QdrantPoolStore.from_settings` +
+  `CrossEncoderRerankerImpl` 실 어댑터를 부트스트랩하는 진입점이 필요했다. 본
+  세션은 코드 + 환경 토글까지만 작성하고, 실 모델 다운로드(약 2.4 GB) + Qdrant
+  서버 접속 검증은 별도 라이브 smoke로 분리한다. 5-A token_count(직전 commit
+  `13f07a9`) 후속.
+
+### 변경 사항
+
+수정 `app/config.py`:
+
+- ``use_real_adapters: bool = False`` 필드 추가 (env ``RAG_USE_REAL_ADAPTERS``).
+  기본 False라 미설정 환경에서 무의식적으로 운영 모드가 켜져 모델 다운로드가
+  발생하지 않도록 한다.
+- 모듈 docstring 변경 이력에 `2026-05-18, build_real_deps 후속` 항목 추가.
+
+수정 `app/api/deps.py`:
+
+- ``build_real_deps(settings) -> QueryGraphDeps`` 함수 신설. 호출 시점에
+  ``E5DenseEmbedder`` / ``BM25SparseEmbedder`` / ``CrossEncoderRerankerImpl`` 을
+  **lazy import** — embedding extra 미설치 환경에서도 PoC 경로
+  (``build_poc_deps``)와 본 모듈 자체 import는 영향 받지 않는다.
+- ``QdrantPoolStore.from_settings(settings, dense_dimension=dense.dimension)``
+  + ``bootstrap_collections()`` 호출. dense_dimension은 어댑터가 모델 로드 후
+  보고한 값을 사용 (E5-large = 1024).
+- samples 자동 인덱싱은 운영 모드에서 수행하지 않음 — 별도 ingestion 파이프라인
+  적재 가정. 매 startup마다 92페이지 재임베딩 회피.
+- 모듈 docstring·변경 이력 갱신 + `[호환성]` NOTE에 lazy import 정책 명시.
+
+수정 `app/api/main.py`:
+
+- ``_lifespan`` 에서 ``settings.use_real_adapters`` 토글 분기 — True →
+  ``build_real_deps(settings)`` / False(기본) → ``build_poc_deps(settings)``.
+- 기본값 False라 기존 동작(:memory: Qdrant + Fake + samples 자동 인덱싱)
+  변화 0.
+- 모듈 docstring 변경 이력에 본 세션 항목 추가.
+
+수정 `app/api/__init__.py`:
+
+- 패키지 docstring 모듈 일람·구현 상태에 build_real_deps 명시.
+
+### 신규 테스트 `tests/api/test_deps.py` (~210 lines, 5 통합 tests)
+
+monkeypatch로 실 어댑터 4종(E5/BM25/CrossEncoder + Qdrant from_settings)을 가짜
+로 대체해 함수 로직만 검증. sentence-transformers / fastembed / 실 Qdrant 서버
+없이 통과.
+
+- `test_build_real_deps_wires_real_adapter_classes` — 4 어댑터 모두 호출 +
+  QueryGraphDeps 박힘 + dense_dimension=1024 전달 + Fake 어댑터 미사용.
+- `test_build_real_deps_passes_model_names_from_settings` —
+  ``settings.dense_embedding_model`` / ``cross_encoder_model`` 이 어댑터 생성자
+  에 전달.
+- `test_build_real_deps_does_not_ingest_samples` — 운영 모드 ``_ingest_samples``
+  미호출 (매 startup마다 재임베딩 회피 검증).
+- `test_build_real_deps_does_not_eagerly_import_sentence_transformers` — 모듈
+  소스 inspect로 최상단 import 영역에 sentence-transformers / fastembed / 실
+  어댑터 모듈이 등장하지 않음을 검증 (lazy import 회귀 보호).
+- `test_build_poc_deps_uses_fake_adapters_unchanged` — PoC 경로 회귀 보호.
+
+### 추가 회귀 테스트 `tests/test_config.py` (+2 tests)
+
+- `test_settings_use_real_adapters_defaults_false` — 기본값 False.
+- `test_settings_use_real_adapters_env_override` —
+  ``RAG_USE_REAL_ADAPTERS=true`` → True.
+
+### 책임 분리 (본 담당자 영역만)
+
+- 본 commit은 본 담당자 영역 4개 모듈(app/api 3 + app/config 1) + 테스트 2개
+  파일. Agent 영역(app/llm, app/query/router, app/query/generator) / app/schemas /
+  app/pipeline / app/query/search·rerank / app/storage 모두 무변경.
+- 운영 어댑터 자체(E5DenseEmbedder / BM25SparseEmbedder / CrossEncoderRerankerImpl /
+  QdrantPoolStore.from_settings)는 feature5-B-1·5-B-2·9-B-1 에서 이미 완성.
+  본 세션은 그것들을 부트스트랩하는 wiring만 추가.
+
+### 토글 정책 (운영 안전)
+
+- `use_real_adapters=False` (기본): :memory: Qdrant + Fake everything + samples
+  자동 인덱싱. 외부 의존성 0, 즉시 응답. 개발·CI·테스트·PoC 데모용.
+- `use_real_adapters=True`: 모델 다운로드(e5-large 2.24 GB + cross-encoder
+  130 MB) + Qdrant 서버 접속. 첫 startup 시 lag 30~60초. 운영용.
+- embedding extra (`sentence-transformers` + `fastembed`) 미설치 환경에서
+  `use_real_adapters=True` 활성화 시 ``build_real_deps`` 호출 시점에 ImportError
+  로 즉시 실패. PoC 경로와 모듈 import 자체는 영향 받지 않음 (lazy import 회귀
+  보호 테스트로 확인).
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- 샌드박스 ruff 0.15.13으로 format(106 files, 1 reformat) + check(All checks
+  passed!) 통과.
+- pytest는 회사 Mac에서 `./scripts/verify.sh` 실행 시 통과 예상 — 신규 7건
+  (test_deps.py 5 + test_config.py 2) + 기존 회귀 0건. 샌드박스 Python 3.10
+  한계로 직접 pytest 미실행 (이전 feature 패턴 동일).
+
+### 비고
+
+- 6개 파일(5 modified + 1 new), +101 -16 lines (`git diff --stat HEAD`).
+- 본 commit은 `examples/demo_search.py` 변경 없음 — 데모는 명시적으로
+  ``build_poc_deps()`` 만 호출하는 시연 도구.
+- `docs/architecture.md` / `docs/api-spec.md` / `docs/db-schema.md` 변경 없음
+  — 외부 API 표면·아키텍처·DB 스키마 동일, 운영 토글은 환경 변수일 뿐.
+- `docs/ai/current-plan.md` 변경 없음 — feature11 통합 후속 미세 보강이라 별도
+  milestone 아님.
+
+### 후속 TODO (다음 세션 후보)
+
+- **운영 Qdrant 라이브 smoke** — `docker compose up` + ``RAG_USE_REAL_ADAPTERS=true``
+  + `uvicorn` 으로 실 모델 다운로드 + 검색 끝-끝 동작 확인. 회사 Mac에서 수동.
+- **풀 텍스트 lookup 어댑터** — Source.text_preview 200자 한계 보완 +
+  Source.download_url 채움 + Chunk lookup 어댑터 + db-schema 갱신.
+- **Agent 코드 통합** — Agent 담당자 코드 전달 시 ``QueryGraphDeps.router_node`` /
+  ``generator_node`` / ``verify_llm_evaluator`` 3개 필드 교체.

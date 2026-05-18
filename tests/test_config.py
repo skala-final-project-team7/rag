@@ -53,3 +53,17 @@ def test_openai_api_key_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_get_settings_returns_settings() -> None:
     assert isinstance(get_settings(), Settings)
+
+
+def test_settings_use_real_adapters_defaults_false() -> None:
+    # build_real_deps 후속(2026-05-18) — 운영 어댑터 토글. 기본값 False(PoC).
+    # 미설정 환경에서 무의식적으로 운영 모드가 켜져 모델 다운로드가 발생하지 않도록.
+    settings = _settings_without_env_file()
+    assert settings.use_real_adapters is False
+
+
+def test_settings_use_real_adapters_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RAG_USE_REAL_ADAPTERS=true 일 때만 운영 어댑터 부트스트랩을 켠다.
+    monkeypatch.setenv("RAG_USE_REAL_ADAPTERS", "true")
+    settings = Settings(_env_file=None)  # type: ignore[arg-type]
+    assert settings.use_real_adapters is True
