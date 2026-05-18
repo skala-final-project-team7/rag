@@ -761,3 +761,115 @@ docx 청커 타입 어노테이션 정비 (`app/ingestion/chunker/attachment.py`
   I/O + 청크 인덱싱 오케스트레이터(멱등성 통합).
 - **9-B 의존 해소 진척**: 5-B-1 완료로 query 임베딩 부분 잠금 해제. 5-B-2 후 Qdrant
   검색까지 잠금 해제되면 9-B 착수 가능.
+
+
+## 2026-05-18 — feature5-B-2: Qdrant Multi-Pool 클라이언트 + 5-A payload chunk_id 보정
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 5-B-1 어댑터 다음으로 Qdrant 측 어댑터를 작성. 부트스트랩(3 Pool 컬렉션·Named
+  Vector·payload 인덱스) + Named Vector upsert + ACL 필터 검색 + 키 기반 삭제를
+  단일 클래스에 모음. `:memory:` Qdrant in-process 모드로 외부 컨테이너 없이 통합
+  검증.
+- 5-A 영역 보정(Qdrant Point ID 제약 발견 → 작은 후속 수정): db-schema §1.2는 "Point
+  id = chunk_id"라고 명시했으나 Qdrant는 Point ID로 UUID 또는 unsigned int만 허용한다
+  (SHA1 hex 40자는 거부). 첫 소비자(5-B-2)에서 드러난 implicit contract 위반이라
+  본 change-set에 포함해 보정.
+
+### 변경 사항
+
+5-A 영역 보정 (additive — 외부 동작 호환):
+
+- `app/ingestion/vector_store.py` — `build_point_payload` 결과에 `chunk_id` 필드 1개
+  추가. 어댑터가 `uuid5(NAMESPACE_OID, chunk_id)`로 Point ID 매핑하므로, 원본
+  `chunk_id`는 payload에서 복원해야 한다. docstring·변경사항 내역 갱신.
+- `tests/ingestion/test_vector_store.py` — `test_build_point_payload_includes_chunk_id`
+  단언 추가.
+- `docs/db-schema.md` §1.2 — Payload 표에 `chunk_id` 행 추가(20필드)
+  + "Point ID 매핑" 본문 단락 신설(uuid5 결정론·멱등성 명시). §1.3 keyword 인덱스에
+  `chunk_id` 추가.
+
+신규 `app/storage/` 패키지:
+
+- `app/storage/__init__.py` — `QdrantPoolStore`·`SearchHit` re-export. 향후 5-B-3에서
+  `mongo_cache.py` 추가 예정.
+- `app/storage/qdrant_client.py` (~390 lines)
+  - `QdrantPoolStore` 클래스 [Storage] — db-schema §1 정합.
+    - `from_settings()` — 실 Qdrant 서버 연결(host/port).
+    - `in_memory()` — qdrant-client `:memory:` in-process 클라이언트 (테스트·PoC).
+    - `bootstrap_collections()` — 3 Pool 컬렉션 멱등 생성 + payload 인덱스 9종 부착
+      (`chunk_id`/`allowed_groups`/`allowed_users`/`space_key`/`labels`/`doc_type`/
+      `page_id`/`attachment_id`/`source_type` keyword + `last_modified` datetime).
+      Named Vector(dense Cosine + sparse-bm25 idf) — db-schema §1.1 정합.
+    - `upsert_chunk` / `upsert_chunks_batch` — chunk_id → uuid5 매핑, payload는
+      `build_point_payload`(5-A) 재사용, vector는 {"dense": [...], "sparse-bm25":
+      QdrantSparseVector(...)}.
+    - `search` — 단일 Named Vector 검색(dense 또는 sparse). Hybrid는 호출자가 두 번
+      호출 후 9-A `reciprocal_rank_fusion`으로 결합(설계서 §6 4.5). `acl_filter`는
+      필수 키워드 인자로 강제 → 미주입 시 시그니처 오류. `metadata_filters` 부가
+      적용(str → MatchValue, list → MatchAny). qdrant-client v1.11에서 deprecated된
+      `search()` 대신 `query_points()` 사용.
+    - `delete_by_page_id` / `delete_by_attachment_id` / `delete_by_chunk_id` —
+      문서·첨부·청크 단위 삭제(세 Pool 모두에서). feature6 sync 어댑터 의존성 해소.
+  - `SearchHit` frozen dataclass — qdrant-client `ScoredPoint` 의존을 어댑터 안쪽으로
+    격리. payload에서 원본 `chunk_id` 복원.
+  - `_chunk_id_to_point_id(chunk_id)` 헬퍼 — `uuid5(NAMESPACE_OID, chunk_id)` 결정론
+    매핑. 동일 `chunk_id` → 동일 UUID → Qdrant 레벨에서도 멱등 upsert 유지.
+
+신규 테스트 `tests/storage/test_qdrant_client.py` (~480 lines, 22 unit·통합 tests):
+
+- `_chunk_id_to_point_id` 결정론·UUID 형식·서로 다른 chunk_id → 서로 다른 UUID.
+- `_pool_name_to_collection` — 알려진 pool 매핑 / 알 수 없는 pool 거부.
+- `SearchHit` 불변성.
+- `:memory:` 통합:
+  - `bootstrap_collections` — 3 Pool 생성 + 멱등(두 번 호출 OK) + Named Vector 구조
+    확인(dense + sparse-bm25 둘 다 설정됨).
+  - Upsert + dense 검색으로 chunk_id 복원 + Cosine 자기-매칭 1.0.
+  - Upsert 배치 + 정렬·매칭 검증.
+  - 멱등 upsert(동일 chunk_id 재호출 → count 동일 + version_number 갱신).
+  - ACL 필터: 일치 그룹만 매칭, 불일치 그룹은 빈 결과.
+  - dense·sparse 분기: sparse-only 검색 / 빈 sparse → short-circuit / 동시 입력
+    거부 / 둘 다 없음 거부 / top_k 제한.
+  - metadata_filters: str → MatchValue, list → MatchAny.
+  - 삭제: page_id / attachment_id / chunk_id별 — 다른 청크 보존.
+  - POOL_NAMES 회귀 — 3 Pool 모두 독립 동작.
+
+### 책임 분리 (5-A vs 5-B-1 vs 5-B-2)
+
+- feature5-A `vector_store.py::build_point_payload` → 무엇을 payload로 담을지(db-schema
+  §1.2 스키마 매핑).
+- feature5-B-1 `embedder/` → 어떻게 임베딩할지(모델 호출·프리픽스·정규화).
+- feature5-B-2 `storage/qdrant_client.py` → 어떻게 저장·검색·삭제할지(컬렉션·인덱스·
+  Named Vector·Point ID 매핑·필터 결합). `@enforce_acl`(feature7)이 검증한 acl_filter
+  dict를 받아 Qdrant Filter로 결합한다.
+
+### 검증 결과 (회사 Mac 기준)
+
+- format / lint(ruff + mypy) / pytest 통과. 회귀 없음, 신규 ~23 tests 추가
+  (storage 22 + vector_store 1).
+- `:memory:` 통합 테스트 22건 — 부트스트랩 멱등성·Named Vector·ACL 필터·검색 분기·
+  멱등 upsert·키 기반 삭제까지 모두 검증.
+- qdrant-client `:memory:` 로컬 모드에서 payload 인덱스 UserWarning(`Payload indexes
+  have no effect`)은 무시 처리(`warnings.filterwarnings`) — 실 Qdrant 서버에서는
+  성능 인덱스로 동작함을 db-schema 본문에 명시.
+- 시크릿/토큰 grep 결과 0건 — `token_count`(필드명)만 매칭.
+
+### 비고
+
+- qdrant-client `search()` 메서드는 deprecated → `query_points()`로 갈아탔다. 출력은
+  `QueryResponse.points` (list[ScoredPoint]).
+- Filter 결합 패턴: ACL Filter(`should` OR) + metadata FieldCondition/Filter들을 함께
+  `must` 리스트에 둠. Qdrant Filter는 `must` 안에 `FieldCondition`과 nested `Filter`
+  혼용을 허용한다.
+- 운영 Qdrant 서버에서 `shard_number=2 / replication_factor=1 / on_disk_payload=true`
+  설정은 그대로 적용된다. `:memory:` 로컬 모드는 단일 샤드로 동작.
+- 새 의존성 도입 없음 — `qdrant-client>=1.9`는 이미 main dependencies에 있다.
+
+### 남은 TODO
+
+- **5-B-3** — `app/storage/mongo_cache.py` + `app/ingestion/indexer.py`: MongoDB
+  `embedding_cache` I/O + 청크 인덱싱 오케스트레이터(임베더 + Qdrant 클라이언트 +
+  캐시 + 멱등성 통합). 5-B 마무리.
+- **9-B 의존 완전 해소** — query 임베딩(5-B-1) + Qdrant 검색(5-B-2) 둘 다 준비됨 →
+  9-B(검색·재순위화 노드 오케스트레이션) 즉시 착수 가능.
+- 운영 Qdrant 서버 라이브 smoke 테스트 — `docker compose up qdrant` 후 `samples/`
+  일부 청크 upsert·검색 시각 확인. 별도 세션.
