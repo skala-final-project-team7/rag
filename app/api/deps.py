@@ -25,6 +25,11 @@
     1 인스턴스를 _ingest_samples 와 QueryGraphDeps 양쪽에 공유 주입. samples
     인덱싱 시점에 attachment_download_urls 매핑을 page.attachments 에서 합성해
     indexer 에 전달, 첨부 청크의 Source.download_url 이 검색 시점에 채워지도록 한다.
+  - 2026-05-18, feature6 후속 — build_poc_ingestion_deps + build_real_ingestion_deps
+    추가. Ingestion 그래프(feature6 Phase 4)의 부트스트랩 진입점. PoC 는 모든 어댑터
+    가 Fake, 운영은 E5/BM25/Qdrant.from_settings + Mongo 3종(embedding_cache /
+    chunk_lookup / ingestion_jobs) 모두 lazy import. Ingestion 은 query 와 별도 진입점
+    (RabbitMQ Worker / 별도 트리거 시스템) 책임이므로 lifespan 에 자동 wire 하지 않음.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -42,6 +47,7 @@ from app.config import Settings, get_settings
 from app.ingestion.chunker import chunk_page
 from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import index_chunks
+from app.pipeline.ingestion_graph import IngestionGraphDeps
 from app.pipeline.query_graph import QueryGraphDeps
 from app.query.reranker.base import FakeCrossEncoderReranker
 from app.schemas.chunk import Chunk
@@ -184,4 +190,95 @@ def _ingest_samples(
         cache=FakeEmbeddingCache(),
         chunk_lookup=chunk_lookup,
         attachment_download_urls=attachment_download_urls,
+    )
+
+
+# --- Ingestion 그래프 부트스트랩 (feature6 후속) ---
+
+
+def build_poc_ingestion_deps(settings: Settings | None = None) -> IngestionGraphDeps:
+    """PoC IngestionGraphDeps — :memory: Qdrant + Fake 어댑터 6종 (외부 의존성 0).
+
+    Ingestion 그래프(`app/pipeline/ingestion_graph.py`)를 외부 컨테이너·모델·DB 없이
+    실행하기 위한 부트스트랩. 본 함수는 samples 자동 인덱싱을 수행하지 않는다 — 그래프
+    실행은 호출자가 명시 PageObject 를 전달해 진행한다 (`run_ingestion` 직접 호출).
+
+    Args:
+        settings: 환경 설정. None 이면 ``get_settings()`` 로 lazy 로드.
+
+    Returns:
+        모든 Fake 어댑터가 wiring 된 ``IngestionGraphDeps``. Agent 노드는 stub 기본값.
+    """
+    # Fake 어댑터들은 함수 본문 내 import — 본 모듈 최상단을 가볍게 유지.
+    from app.storage.chunk_lookup import FakeChunkTextLookup
+    from app.storage.jobs import FakeIngestionJobsRepository
+
+    settings = settings or get_settings()
+
+    dense = FakeDenseEmbedder(dimension=_POC_DENSE_DIMENSION)
+    sparse = FakeSparseEmbedder()
+    store = QdrantPoolStore.in_memory(settings, dense_dimension=_POC_DENSE_DIMENSION)
+    store.bootstrap_collections()
+
+    return IngestionGraphDeps(
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=FakeEmbeddingCache(),
+        chunk_lookup=FakeChunkTextLookup(),
+        jobs=FakeIngestionJobsRepository(),
+    )
+
+
+def build_real_ingestion_deps(settings: Settings | None = None) -> IngestionGraphDeps:
+    """운영 IngestionGraphDeps — E5 + BM25 + Qdrant.from_settings + Mongo 3종.
+
+    feature6 Phase 4 종결에 따른 운영 진입점. Ingestion 그래프 6 어댑터 모두 운영
+    어댑터로 wiring:
+        - E5DenseEmbedder (sentence-transformers, lazy import)
+        - BM25SparseEmbedder (fastembed, lazy import)
+        - QdrantPoolStore.from_settings (실 Qdrant 서버)
+        - MongoEmbeddingCache.from_settings (db-schema §2.4)
+        - MongoChunkTextLookup.from_settings (db-schema §2.5)
+        - MongoIngestionJobsRepository.from_settings (db-schema §2.3)
+
+    Ingestion 은 query 와 별도 진입점(RabbitMQ Worker / 운영 트리거 시스템) 책임
+    이므로 FastAPI lifespan 에 자동 wire 하지 않는다. 운영 Worker 가 본 함수를 1회
+    호출해 deps 를 받고, 매 메시지마다 ``run_ingestion(state, graph=...)`` 으로 단일
+    페이지 적재를 수행하는 패턴을 가정한다.
+
+    Args:
+        settings: 환경 설정. None 이면 ``get_settings()`` 로 lazy 로드.
+
+    Returns:
+        운영 어댑터 6종이 wiring 된 ``IngestionGraphDeps``. Agent 노드(문서 분석기)
+        는 stub 기본값 — Agent 코드 전달 시 ``deps.document_analyzer_node`` 만 교체.
+
+    Raises:
+        ImportError: sentence-transformers / fastembed 미설치 시 (embedding extra
+            누락). 운영 모드 활성화 전 ``pip install -e .[embedding]`` 필요.
+    """
+    settings = settings or get_settings()
+
+    # 실 어댑터 import 는 모두 lazy — embedding extra 미설치 환경에서도 PoC 경로와
+    # 본 모듈 import 는 동작해야 한다 (build_real_deps 정책 정합).
+    from app.ingestion.embedder.dense import E5DenseEmbedder
+    from app.ingestion.embedder.sparse import BM25SparseEmbedder
+    from app.storage.chunk_lookup import MongoChunkTextLookup
+    from app.storage.jobs import MongoIngestionJobsRepository
+    from app.storage.mongo_cache import MongoEmbeddingCache
+
+    dense = E5DenseEmbedder(settings.dense_embedding_model)
+    sparse = BM25SparseEmbedder()
+    # dense_dimension 은 어댑터가 모델 로드 후 보고한 값 (E5-large = 1024).
+    store = QdrantPoolStore.from_settings(settings, dense_dimension=dense.dimension)
+    store.bootstrap_collections()
+
+    return IngestionGraphDeps(
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=MongoEmbeddingCache.from_settings(settings),
+        chunk_lookup=MongoChunkTextLookup.from_settings(settings),
+        jobs=MongoIngestionJobsRepository.from_settings(settings),
     )
