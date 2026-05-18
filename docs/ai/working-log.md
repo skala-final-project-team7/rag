@@ -621,3 +621,54 @@ ADR-0002 ACL prefix 컨벤션:
   (회사 Mac 다음 세션)
 - `docs/api-spec.md`의 JWT 클레임 예시를 `groups=["space:..."]`로 갱신할지 BFF 담당자
   협의 후 결정 (별도 PR)
+
+
+## 2026-05-18 — 회사 Mac 환경 셋업 + mypy 설정 비대칭 보정
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 핸드오프(2026-05-17)에 따라 회사 Mac에서 origin 8커밋 fast-forward 후
+  `pip install -e ".[dev,ingestion]"`로 환경 구성. `./scripts/verify.sh` 첫 실행에서
+  mypy 단계만 4건 실패 — ruff/pytest는 통과 예정 상태였으나 mypy 2.1.0(신버전) 검사가
+  벤더 영역까지 따라 들어가는 비대칭이 드러남.
+
+### 변경 사항
+
+mypy 설정 비대칭 보정 (`pyproject.toml`):
+- `[tool.ruff]`에는 `extend-exclude = ["history_manager_agent", "tests/history_manager_agent"]`로
+  벤더 코드(History Manager Agent) 제외가 이미 박혀 있었으나, `[tool.mypy]`에는 동일 정책이
+  없어 `app/`에서 import를 따라 들어가 벤더 내부의 dataclass/Any 타입 이슈 2건이
+  보고되고 있었음.
+- `[tool.mypy]`에 `exclude = ["history_manager_agent/", "tests/history_manager_agent/"]` 추가.
+- 추가로 `[[tool.mypy.overrides]] module = "history_manager_agent.*"` + `follow_imports = "skip"`
+  지정 — `app/query/history.py` 같은 통합 어댑터가 벤더 모듈을 import해도 벤더 내부까지
+  파고들지 않도록 정지선 설정.
+- 통합 어댑터(`app/query/history.py`) 자체는 정상 검사 유지.
+
+docx 청커 타입 어노테이션 정비 (`app/ingestion/chunker/attachment.py`):
+- `_iter_block_items(document: object)` → `_iter_block_items(document: "DocxDocument")`로
+  좁힘. python-docx `Document()` 팩토리의 반환 타입(`docx.document.Document`)이
+  `t.ProvidesStoryPart` Protocol을 만족하므로 `Paragraph(child, document)` /
+  `Table(child, document)` 호출의 mypy 에러(2건)가 해소됨.
+- `from docx.document import Document as DocxDocument`는 `TYPE_CHECKING` 가드 안에 둬서
+  런타임 import 비용 없음(원본 `from docx import Document as load_docx` 그대로 유지).
+- 동시에 `body = document.element.body  # type: ignore[attr-defined]` 주석도 제거 가능
+  해져서 함께 정리.
+
+### 검증 결과 (회사 Mac 기준)
+
+- `./scripts/format.sh` — 66 files already formatted, All checks passed.
+- `./scripts/lint.sh` — ruff All checks passed + mypy `Success: no issues found in 32 source files`.
+- `./scripts/test.sh` — 274 passed 회귀 유지(RAG 198 + vendor history-manager-agent 76).
+
+### 비고
+
+- 핸드오프 §4.2의 "ruff format/check 통과" 옆에 **mypy 명시가 없었던 이유**는 집 환경에
+  mypy 1.x가 깔려 있었거나 lint.sh에서 mypy 단계가 silent skip되었던 정황으로 추정.
+  Mac에서 `mypy>=1.10` 의존성 명세에 따라 신규 설치된 2.1.0이 더 엄격해서 비대칭이 드러난 것.
+- 정책 변경이 아닌 설정의 ruff↔mypy 대칭화이므로 ADR 미작성. 단 향후 벤더 코드
+  업데이트 시(예: ai-agent 팀 원본 변경 → re-vendoring) 본 보정도 같이 점검.
+
+### 남은 TODO
+
+- feature4-B(PDF/CSV 청킹) / feature5-B(실제 임베딩·Qdrant) / feature6(Ingestion 그래프) /
+  feature9-B / feature11 통합 / AtlassianSourceAdapter — 본 환경 셋업 완료로 이어서 착수 가능.
