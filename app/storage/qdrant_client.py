@@ -358,7 +358,10 @@ class QdrantPoolStore:
                 else:
                     must_conditions.append(FieldCondition(key=field, match=MatchValue(value=value)))
         must_conditions.append(acl_filter_obj)
-        return Filter(must=must_conditions)
+        # mypy: Filter.must 는 더 넓은 Condition union list를 받지만 list invariance 때문에
+        # list[FieldCondition | Filter]가 호환되지 않는다. 런타임 contract는 만족(우리가 넣는
+        # 두 타입 모두 그 union에 속함)하므로 좁힘만 우회.
+        return Filter(must=must_conditions)  # type: ignore[arg-type]
 
     # --- Delete ---
 
