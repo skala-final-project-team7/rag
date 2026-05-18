@@ -102,7 +102,9 @@ class MongoEmbeddingCache(EmbeddingCache):
         """환경 설정에서 MongoClient를 생성해 인스턴스화한다 (운영 경로)."""
         from pymongo import MongoClient
 
-        client = MongoClient(settings.mongo_uri)
+        # mypy: MongoClient는 generic이라 명시 annotation을 요구한다 — 운영 경로에서는
+        # Any 타입의 클라이언트를 받아 MongoEmbeddingCache 측이 dict-style 인덱싱만 한다.
+        client: MongoClient = MongoClient(settings.mongo_uri)  # type: ignore[type-arg]
         return cls(client=client, db_name=settings.mongo_db, collection_name=collection_name)
 
     def get_cached_version(self, chunk_id: str) -> int | None:

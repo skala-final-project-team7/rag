@@ -32,7 +32,9 @@ def _settings() -> Settings:
     return Settings(_env_file=None)
 
 
-def _chunk(*, chunk_id: str, page_id: str = "P1", chunk_index: int = 0, text: str = "alpha") -> Chunk:
+def _chunk(
+    *, chunk_id: str, page_id: str = "P1", chunk_index: int = 0, text: str = "alpha"
+) -> Chunk:
     metadata = ChunkMetadata(
         chunk_id=chunk_id,
         page_id=page_id,
