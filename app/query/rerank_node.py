@@ -70,8 +70,7 @@ def cross_encoder_rerank(
 
     # --- 4. 9-A select_reranked ---
     scored_by_chunk_id = {
-        chunk.metadata.chunk_id: score
-        for chunk, score in zip(candidates, raw_scores, strict=True)
+        chunk.metadata.chunk_id: score for chunk, score in zip(candidates, raw_scores, strict=True)
     }
     rerank_result = select_reranked(scored_by_chunk_id)
 
