@@ -227,3 +227,29 @@ def test_build_poc_deps_uses_fake_adapters_unchanged() -> None:
     assert isinstance(deps.dense_embedder, FakeDenseEmbedder)
     assert isinstance(deps.sparse_embedder, FakeSparseEmbedder)
     assert isinstance(deps.reranker, FakeCrossEncoderReranker)
+
+
+def test_build_poc_deps_shares_chunk_lookup_with_ingest_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_poc_deps는 단일 FakeChunkTextLookup 을 _ingest_samples 와 QueryGraphDeps
+    양쪽에 동일 인스턴스로 주입한다 (Phase 2 적재 통합 회귀 보호).
+
+    이 공유가 깨지면 인덱싱 시 적재된 chunk_lookup 과 검색 시 조회하는 chunk_lookup 이
+    서로 다른 인스턴스가 돼 download_url 채움이 실패한다.
+    """
+    from app.api import deps as deps_module
+    from app.storage.chunk_lookup import FakeChunkTextLookup
+
+    captured: dict[str, Any] = {}
+
+    def _capture(**kwargs: Any) -> None:
+        captured["chunk_lookup"] = kwargs.get("chunk_lookup")
+
+    monkeypatch.setattr(deps_module, "_ingest_samples", _capture)
+
+    deps = deps_module.build_poc_deps()
+
+    assert isinstance(deps.chunk_lookup, FakeChunkTextLookup)
+    # _ingest_samples 가 받은 인스턴스와 QueryGraphDeps 에 박힌 인스턴스가 동일해야 함.
+    assert captured["chunk_lookup"] is deps.chunk_lookup

@@ -21,6 +21,10 @@
   - 2026-05-18, 풀 텍스트 lookup 후속 — chunk_lookup 어댑터 wiring 추가. PoC는
     빈 FakeChunkTextLookup(QueryGraphDeps 기본값), 운영은 MongoChunkTextLookup
     .from_settings로 chunk_lookup 컬렉션(db-schema §2.5)을 가리키도록 한다.
+  - 2026-05-18, 풀 텍스트 lookup Phase 2 — build_poc_deps 가 FakeChunkTextLookup
+    1 인스턴스를 _ingest_samples 와 QueryGraphDeps 양쪽에 공유 주입. samples
+    인덱싱 시점에 attachment_download_urls 매핑을 page.attachments 에서 합성해
+    indexer 에 전달, 첨부 청크의 Source.download_url 이 검색 시점에 채워지도록 한다.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -41,6 +45,7 @@ from app.ingestion.indexer import index_chunks
 from app.pipeline.query_graph import QueryGraphDeps
 from app.query.reranker.base import FakeCrossEncoderReranker
 from app.schemas.chunk import Chunk
+from app.storage.chunk_lookup import FakeChunkTextLookup
 from app.storage.mongo_cache import FakeEmbeddingCache
 from app.storage.qdrant_client import QdrantPoolStore
 
@@ -73,13 +78,23 @@ def build_poc_deps(settings: Settings | None = None) -> QueryGraphDeps:
     store.bootstrap_collections()
 
     # samples 자동 인덱싱 — 외부 데이터·모델 없이 ACL 매칭 검색이 동작하도록.
-    _ingest_samples(store=store, dense=dense, sparse=sparse, samples_dir=Path(settings.samples_dir))
+    # chunk_lookup은 _ingest_samples 와 QueryGraphDeps 양쪽에 1 인스턴스 공유 — 인덱싱
+    # 시 적재한 풀 텍스트·첨부 download_url 을 검색 시 rerank 노드가 그대로 조회한다.
+    chunk_lookup = FakeChunkTextLookup()
+    _ingest_samples(
+        store=store,
+        dense=dense,
+        sparse=sparse,
+        samples_dir=Path(settings.samples_dir),
+        chunk_lookup=chunk_lookup,
+    )
 
     return QueryGraphDeps(
         dense_embedder=dense,
         sparse_embedder=sparse,
         store=store,
         reranker=FakeCrossEncoderReranker(),
+        chunk_lookup=chunk_lookup,
     )
 
 
@@ -140,13 +155,22 @@ def _ingest_samples(
     dense: FakeDenseEmbedder,
     sparse: FakeSparseEmbedder,
     samples_dir: Path,
+    chunk_lookup: FakeChunkTextLookup,
 ) -> None:
-    """``samples/*.json`` 을 PageObject → Chunk → Qdrant에 적재한다 (멱등)."""
+    """``samples/*.json`` 을 PageObject → Chunk → Qdrant + chunk_lookup 에 적재한다 (멱등).
+
+    PoC 픽스처(`JsonFixtureSourceAdapter`)는 page.attachments[*].download_url 을 file://
+    URI로 채워둔다. 이 매핑을 indexer 에 전달해 첨부 청크의 chunk_lookup 적재 시점에
+    Source.download_url 이 함께 채워지도록 한다.
+    """
     adapter = JsonFixtureSourceAdapter(samples_dir=samples_dir)
     chunks: list[Chunk] = []
     version_by_page_id: dict[str, int] = {}
+    attachment_download_urls: dict[str, str] = {}
     for page in adapter.fetch_pages():
         version_by_page_id[page.page_id] = page.version_number
+        for attachment in page.attachments:
+            attachment_download_urls[attachment.attachment_id] = attachment.download_url
         chunks.extend(chunk_page(page))
 
     if not chunks:
@@ -158,4 +182,6 @@ def _ingest_samples(
         sparse_embedder=sparse,
         store=store,
         cache=FakeEmbeddingCache(),
+        chunk_lookup=chunk_lookup,
+        attachment_download_urls=attachment_download_urls,
     )
