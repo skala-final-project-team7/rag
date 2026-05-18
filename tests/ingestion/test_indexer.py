@@ -17,7 +17,8 @@ from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import IndexerResult, index_chunks
 from app.ingestion.vector_store import CONTENT_POOL, POOL_NAMES, TITLE_POOL
 from app.schemas.chunk import Chunk, ChunkMetadata
-from app.schemas.enums import SourceType
+from app.schemas.enums import AttachmentType, ExtractedFormat, SourceType
+from app.storage.chunk_lookup import FakeChunkTextLookup
 from app.storage.mongo_cache import FakeEmbeddingCache
 from app.storage.qdrant_client import QdrantPoolStore
 
@@ -51,6 +52,38 @@ def _chunk(
         last_modified=datetime.fromisoformat("2026-04-22T08:15:00+09:00"),
         source_type=SourceType.PAGE,
         token_count=120,
+    )
+    return Chunk(text=text, metadata=metadata)
+
+
+def _attachment_chunk(
+    *,
+    chunk_id: str,
+    attachment_id: str,
+    page_id: str = "P1",
+    chunk_index: int = 0,
+    text: str = "첨부 청크 본문",
+) -> Chunk:
+    metadata = ChunkMetadata(
+        chunk_id=chunk_id,
+        page_id=page_id,
+        page_title="EKS 운영 가이드",
+        section_header="첨부",
+        section_path="Cloud 운영 문서 > 첨부",
+        chunk_index=chunk_index,
+        labels=["eks"],
+        doc_type=AttachmentType.PDF,
+        space_key="CLOUD",
+        allowed_groups=["space:CLOUD"],
+        allowed_users=[],
+        webui_link="/display/CLOUD/eks",
+        last_modified=datetime.fromisoformat("2026-04-22T08:15:00+09:00"),
+        source_type=SourceType.ATTACHMENT,
+        attachment_id=attachment_id,
+        attachment_filename="runbook.pdf",
+        attachment_mime="application/pdf",
+        extracted_format=ExtractedFormat.RAW_TEXT,
+        token_count=80,
     )
     return Chunk(text=text, metadata=metadata)
 
@@ -437,3 +470,190 @@ def test_title_pool_uses_page_title_plus_section_header(
     content_idx = POOL_NAMES.index(CONTENT_POOL)
     assert received[title_idx] == ["EKS 운영 가이드 개요"]  # page_title + section_header
     assert received[content_idx] == ["본문 텍스트"]  # 청크 본문
+
+
+# --- chunk_lookup 적재 통합 (Phase 2) ---
+
+
+def test_chunk_lookup_records_page_chunk_text_without_download_url(
+    store: QdrantPoolStore,
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    cache: FakeEmbeddingCache,
+) -> None:
+    """본문 청크는 chunk_lookup에 text는 풀 텍스트 그대로, download_url=None으로 적재."""
+    lookup = FakeChunkTextLookup()
+    chunk = _chunk(chunk_id="a" * 40, text="본문 풀 텍스트입니다.")
+
+    index_chunks(
+        [chunk],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=cache,
+        chunk_lookup=lookup,
+    )
+
+    record = lookup.fetch("a" * 40)
+    assert record is not None
+    assert record.chunk_id == "a" * 40
+    assert record.text == "본문 풀 텍스트입니다."
+    assert record.download_url is None
+
+
+def test_chunk_lookup_records_attachment_chunk_with_download_url(
+    store: QdrantPoolStore,
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    cache: FakeEmbeddingCache,
+) -> None:
+    """첨부 청크는 attachment_download_urls 매핑에서 download_url을 가져와 적재."""
+    lookup = FakeChunkTextLookup()
+    chunk = _attachment_chunk(
+        chunk_id="b" * 40,
+        attachment_id="P1-att-0",
+        text="첨부 풀 텍스트",
+    )
+
+    index_chunks(
+        [chunk],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=cache,
+        chunk_lookup=lookup,
+        attachment_download_urls={"P1-att-0": "https://confluence/download/att-0"},
+    )
+
+    record = lookup.fetch("b" * 40)
+    assert record is not None
+    assert record.text == "첨부 풀 텍스트"
+    assert record.download_url == "https://confluence/download/att-0"
+
+
+def test_chunk_lookup_attachment_without_url_mapping_falls_back_to_none(
+    store: QdrantPoolStore,
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    cache: FakeEmbeddingCache,
+) -> None:
+    """첨부 청크지만 매핑에 attachment_id가 없으면 download_url=None으로 안전 fallback."""
+    lookup = FakeChunkTextLookup()
+    chunk = _attachment_chunk(
+        chunk_id="c" * 40,
+        attachment_id="P1-att-1",
+    )
+
+    index_chunks(
+        [chunk],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=cache,
+        chunk_lookup=lookup,
+        attachment_download_urls={},  # P1-att-1 없음
+    )
+
+    record = lookup.fetch("c" * 40)
+    assert record is not None
+    assert record.download_url is None
+
+
+def test_chunk_lookup_default_none_keeps_legacy_behavior(
+    store: QdrantPoolStore,
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    cache: FakeEmbeddingCache,
+) -> None:
+    """chunk_lookup=None(default) 호출자는 적재가 일어나지 않는다 (legacy 호환)."""
+    chunk = _chunk(chunk_id="a" * 40)
+    result = index_chunks(
+        [chunk],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=cache,
+        # chunk_lookup 미주입
+    )
+    # 기존 동작 유지: Qdrant + cache는 갱신, chunk_lookup 적재 없음(별도 dep 없음).
+    assert result.upserted_count == 1
+
+
+def test_chunk_lookup_skips_when_cache_hits(
+    store: QdrantPoolStore,
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    cache: FakeEmbeddingCache,
+) -> None:
+    """cache hit으로 스킵된 청크는 chunk_lookup에도 적재되지 않는다 (멱등성)."""
+    chunk = _chunk(chunk_id="a" * 40)
+    lookup = FakeChunkTextLookup()
+
+    # 1차 적재 — chunk_lookup에도 적재됨
+    index_chunks(
+        [chunk],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=cache,
+        chunk_lookup=lookup,
+    )
+    assert lookup.fetch("a" * 40) is not None
+
+    # 동일 청크를 다른 text로 호출 (테스트 명료성 목적 — 실제로는 동일 chunk_id면 동일 text)
+    # cache hit이므로 chunk_lookup도 재호출되지 않아야 함 — spy로 검증.
+    upsert_calls: list[int] = []
+
+    class _SpyLookup(FakeChunkTextLookup):
+        def upsert_many(self, records):  # type: ignore[no-untyped-def]
+            upsert_calls.append(len(records))
+            super().upsert_many(records)
+
+    spy_lookup = _SpyLookup()
+    result = index_chunks(
+        [chunk],
+        version_by_page_id={"P1": 1},  # 동일 version → cache hit
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=cache,
+        chunk_lookup=spy_lookup,
+    )
+    assert result.skipped_count == 1
+    assert upsert_calls == [], "cache hit 시 chunk_lookup upsert_many 호출 불필요"
+
+
+def test_chunk_lookup_batches_upsert_many_in_single_call(
+    store: QdrantPoolStore,
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    cache: FakeEmbeddingCache,
+) -> None:
+    """다수 청크 적재 시 chunk_lookup.upsert_many는 1회 호출(배치 효율)."""
+    upsert_calls: list[int] = []
+
+    class _SpyLookup(FakeChunkTextLookup):
+        def upsert_many(self, records):  # type: ignore[no-untyped-def]
+            upsert_calls.append(len(records))
+            super().upsert_many(records)
+
+    lookup = _SpyLookup()
+    chunks = [_chunk(chunk_id=letter * 40, chunk_index=i) for i, letter in enumerate("abc")]
+
+    index_chunks(
+        chunks,
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=cache,
+        chunk_lookup=lookup,
+    )
+
+    # 3 청크 → upsert_many 단일 호출, batch size=3.
+    assert upsert_calls == [3]

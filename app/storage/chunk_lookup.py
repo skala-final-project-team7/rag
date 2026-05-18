@@ -12,6 +12,10 @@
   - 2026-05-18, 최초 작성, 풀 텍스트 lookup 인프라 — ChunkTextLookup ABC +
     ChunkLookupRecord 값 객체 + FakeChunkTextLookup (in-memory) + MongoChunkTextLookup.
     적재 흐름(인덱싱 시 chunk_lookup upsert)은 별도 후속 milestone.
+  - 2026-05-18, 풀 텍스트 lookup Phase 2 — ABC에 upsert / upsert_many 추상 메서드 추가
+    + Fake (dict 갱신) / Mongo (replace_one + bulk_write/ReplaceOne) 구현. updated_at은
+    어댑터가 적재 시점에 자동 부여한다 (db-schema §2.5 정합). 빈 입력 short-circuit으로
+    pymongo InvalidOperation 회피.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -22,6 +26,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from app.config import Settings
 
@@ -73,6 +78,26 @@ class ChunkTextLookup(ABC):
             ``chunk_id`` → 레코드 dict. 미존재 chunk_id는 결과 dict에 포함되지 않는다.
         """
 
+    @abstractmethod
+    def upsert(self, record: ChunkLookupRecord) -> None:
+        """단일 레코드를 ``chunk_id`` 키로 upsert한다.
+
+        Args:
+            record: 적재할 레코드. 동일 ``chunk_id`` 가 있으면 본 레코드로 덮어쓴다
+                (운영은 ``replace_one(upsert=True)`` 시맨틱). ``updated_at`` 은 어댑터
+                가 적재 시점(UTC)에 자동 부여한다.
+        """
+
+    @abstractmethod
+    def upsert_many(self, records: list[ChunkLookupRecord]) -> None:
+        """다수 레코드를 배치 upsert한다.
+
+        Args:
+            records: 적재할 레코드 목록. 빈 입력은 noop으로 처리한다 (운영은 pymongo
+                ``bulk_write`` 가 빈 ops에서 ``InvalidOperation`` 을 발생시킴 — 호출
+                자에게 책임 떠넘기지 않도록 어댑터가 short-circuit).
+        """
+
 
 class FakeChunkTextLookup(ChunkTextLookup):
     """In-memory ChunkTextLookup — 테스트·PoC용 (외부 의존성 0).
@@ -96,6 +121,15 @@ class FakeChunkTextLookup(ChunkTextLookup):
 
     def fetch_many(self, chunk_ids: list[str]) -> dict[str, ChunkLookupRecord]:
         return {cid: self._records[cid] for cid in chunk_ids if cid in self._records}
+
+    def upsert(self, record: ChunkLookupRecord) -> None:
+        # in-memory 구현은 ``add`` 와 동일 시맨틱 (dict 덮어쓰기). ABC 계약 정합을 위해
+        # 별도 메서드로 노출한다.
+        self._records[record.chunk_id] = record
+
+    def upsert_many(self, records: list[ChunkLookupRecord]) -> None:
+        for record in records:
+            self._records[record.chunk_id] = record
 
 
 class MongoChunkTextLookup(ChunkTextLookup):
@@ -152,6 +186,34 @@ class MongoChunkTextLookup(ChunkTextLookup):
         )
         return {doc["chunk_id"]: _doc_to_record(doc) for doc in cursor}
 
+    def upsert(self, record: ChunkLookupRecord) -> None:
+        # 단건 upsert는 replace_one(upsert=True)로 처리 — chunk_id unique 인덱스(db-schema
+        # §2.5)와 정합. updated_at은 적재 시점에 어댑터가 부여해 호출자 책임 분리.
+        self._collection.replace_one(  # type: ignore[attr-defined]
+            {"chunk_id": record.chunk_id},
+            _record_to_doc(record),
+            upsert=True,
+        )
+
+    def upsert_many(self, records: list[ChunkLookupRecord]) -> None:
+        if not records:
+            # 빈 입력에서 pymongo bulk_write 는 InvalidOperation 을 던지므로 어댑터가
+            # short-circuit 해 호출자(indexer)가 별도 분기 없이 호출하도록 한다.
+            return
+        # ReplaceOne 은 호출 시점에 lazy import — pymongo 가 미설치된 테스트 환경에서도
+        # 모듈 import 가 깨지지 않게 한다 (Fake 경로는 본 모듈 import만으로 동작).
+        from pymongo import ReplaceOne
+
+        ops = [
+            ReplaceOne(
+                {"chunk_id": record.chunk_id},
+                _record_to_doc(record),
+                upsert=True,
+            )
+            for record in records
+        ]
+        self._collection.bulk_write(ops)  # type: ignore[attr-defined]
+
 
 def _doc_to_record(doc: dict) -> ChunkLookupRecord:
     """Mongo document → ChunkLookupRecord 안전 변환.
@@ -165,6 +227,21 @@ def _doc_to_record(doc: dict) -> ChunkLookupRecord:
         text=str(doc.get("text") or ""),
         download_url=_optional_str(doc.get("download_url")),
     )
+
+
+def _record_to_doc(record: ChunkLookupRecord) -> dict:
+    """ChunkLookupRecord → Mongo document — ``updated_at`` 을 적재 시점(UTC)에 부여.
+
+    db-schema §2.5 의 4개 필드(chunk_id / text / download_url / updated_at)를 모두
+    채운다. 본문 청크의 ``download_url`` 은 None 그대로 저장해 fetch 시 None으로 복원
+    된다.
+    """
+    return {
+        "chunk_id": record.chunk_id,
+        "text": record.text,
+        "download_url": record.download_url,
+        "updated_at": datetime.now(UTC),
+    }
 
 
 def _optional_str(value: object) -> str | None:

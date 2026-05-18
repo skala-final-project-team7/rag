@@ -137,9 +137,15 @@ payload의 `text_preview`(첫 200자) 한계를 보완하고, `Source.download_u
 | `download_url` | string \| null | 첨부 청크일 때만 채워지는 사용자 노출용 URL. 본문 청크는 null |
 | `updated_at` | datetime | 적재·갱신 시각 |
 
-**인덱스.** `chunk_id` unique 인덱스 1개로 O(1) 룩업. 본 컬렉션 적재(인덱싱 단계에서
-`chunk_lookup` upsert)는 별도 후속 milestone에서 indexer를 확장한다 — 본 commit은
-어댑터 인터페이스와 운영 wiring만 추가.
+**인덱스.** `chunk_id` unique 인덱스 1개로 O(1) 룩업.
+
+**적재 흐름.** `app/ingestion/indexer.py`의 `index_chunks`가 모든 Pool upsert + cache
+write 성공 직후 `ChunkTextLookup.upsert_many` 로 단일 배치 적재한다 (Phase 4). cache hit
+으로 스킵된 청크는 적재 대상에서 제외 — `embedding_cache` 와 멱등성 정합. 본문 청크는
+`download_url=null`, 첨부 청크는 호출자가 주입한 `attachment_download_urls` 매핑
+(`attachment_id -> download_url`)에서 조회해 채운다. `updated_at` 은 `MongoChunkTextLookup`
+어댑터가 적재 시점(UTC)에 자동 부여한다. cache write 이후 단계라 chunk_lookup 적재 실패가
+멱등성 캐시 상태를 오염시키지 않는다.
 
 ---
 
