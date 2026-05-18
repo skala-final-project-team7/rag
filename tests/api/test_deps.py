@@ -253,3 +253,194 @@ def test_build_poc_deps_shares_chunk_lookup_with_ingest_samples(
     assert isinstance(deps.chunk_lookup, FakeChunkTextLookup)
     # _ingest_samples 가 받은 인스턴스와 QueryGraphDeps 에 박힌 인스턴스가 동일해야 함.
     assert captured["chunk_lookup"] is deps.chunk_lookup
+
+
+# --- build_poc_ingestion_deps / build_real_ingestion_deps (feature6 후속) ---
+
+
+def test_build_poc_ingestion_deps_returns_all_fake_adapters() -> None:
+    """PoC ingestion 부트스트랩 — 모든 어댑터가 Fake 인스턴스 (외부 의존성 0)."""
+    from app.api.deps import build_poc_ingestion_deps
+    from app.ingestion.chunker import chunk_attachment as real_chunk_attachment
+    from app.pipeline.ingestion_graph import IngestionGraphDeps
+    from app.pipeline.stubs import document_analyzer_stub
+    from app.storage.chunk_lookup import FakeChunkTextLookup
+    from app.storage.jobs import FakeIngestionJobsRepository
+    from app.storage.mongo_cache import FakeEmbeddingCache
+
+    deps = build_poc_ingestion_deps()
+
+    assert isinstance(deps, IngestionGraphDeps)
+    assert isinstance(deps.dense_embedder, FakeDenseEmbedder)
+    assert isinstance(deps.sparse_embedder, FakeSparseEmbedder)
+    assert isinstance(deps.cache, FakeEmbeddingCache)
+    assert isinstance(deps.chunk_lookup, FakeChunkTextLookup)
+    assert isinstance(deps.jobs, FakeIngestionJobsRepository)
+    # Agent 노드는 stub 기본값
+    assert deps.document_analyzer_node is document_analyzer_stub
+    # chunk_attachment_fn 은 실 함수 default — 운영 시점에 fake 주입 가능
+    assert deps.chunk_attachment_fn is real_chunk_attachment
+
+
+def test_build_poc_ingestion_deps_bootstrap_collections() -> None:
+    """PoC ingestion 부트스트랩 시 :memory: Qdrant 3 Pool 컬렉션이 생성된다."""
+    from app.api.deps import build_poc_ingestion_deps
+
+    deps = build_poc_ingestion_deps()
+
+    settings = _settings()
+    actual = {c.name for c in deps.store._client.get_collections().collections}
+    assert settings.qdrant_title_pool in actual
+    assert settings.qdrant_content_pool in actual
+    assert settings.qdrant_label_pool in actual
+
+
+@pytest.fixture()
+def patched_real_ingestion_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    """build_real_ingestion_deps 가 호출하는 운영 어댑터 6종을 가짜로 대체.
+
+    - E5DenseEmbedder / BM25SparseEmbedder (lazy import — 기존 patched_real_adapters와 동일 패턴)
+    - QdrantPoolStore.from_settings → :memory:
+    - MongoEmbeddingCache.from_settings → FakeEmbeddingCache
+    - MongoChunkTextLookup.from_settings → FakeChunkTextLookup
+    - MongoIngestionJobsRepository.from_settings → FakeIngestionJobsRepository
+    """
+    from app.storage.chunk_lookup import FakeChunkTextLookup, MongoChunkTextLookup
+    from app.storage.jobs import (
+        FakeIngestionJobsRepository,
+        MongoIngestionJobsRepository,
+    )
+    from app.storage.mongo_cache import FakeEmbeddingCache, MongoEmbeddingCache
+
+    captured: dict[str, Any] = {
+        "dense_init": None,
+        "sparse_init": None,
+        "store_from_settings": None,
+        "cache_from_settings": None,
+        "lookup_from_settings": None,
+        "jobs_from_settings": None,
+    }
+
+    def _fake_dense_factory(*args: Any, **kwargs: Any) -> _FakeRealDense:
+        captured["dense_init"] = {"args": args, "kwargs": kwargs}
+        return _FakeRealDense()
+
+    def _fake_sparse_factory(*args: Any, **kwargs: Any) -> _FakeRealSparse:
+        captured["sparse_init"] = {"args": args, "kwargs": kwargs}
+        return _FakeRealSparse()
+
+    def _fake_store_from_settings(
+        cls: type[QdrantPoolStore], settings: Settings, *, dense_dimension: int = 1024
+    ) -> QdrantPoolStore:
+        captured["store_from_settings"] = {"dense_dimension": dense_dimension}
+        return QdrantPoolStore.in_memory(settings, dense_dimension=dense_dimension)
+
+    def _fake_cache_from_settings(
+        cls: type[MongoEmbeddingCache], settings: Settings
+    ) -> FakeEmbeddingCache:
+        captured["cache_from_settings"] = {"settings": settings}
+        return FakeEmbeddingCache()
+
+    def _fake_lookup_from_settings(
+        cls: type[MongoChunkTextLookup], settings: Settings, **kwargs: Any
+    ) -> FakeChunkTextLookup:
+        captured["lookup_from_settings"] = {"settings": settings, "kwargs": kwargs}
+        return FakeChunkTextLookup()
+
+    def _fake_jobs_from_settings(
+        cls: type[MongoIngestionJobsRepository], settings: Settings, **kwargs: Any
+    ) -> FakeIngestionJobsRepository:
+        captured["jobs_from_settings"] = {"settings": settings, "kwargs": kwargs}
+        return FakeIngestionJobsRepository()
+
+    import app.ingestion.embedder.dense as dense_module
+    import app.ingestion.embedder.sparse as sparse_module
+
+    monkeypatch.setattr(dense_module, "E5DenseEmbedder", _fake_dense_factory)
+    monkeypatch.setattr(sparse_module, "BM25SparseEmbedder", _fake_sparse_factory)
+    monkeypatch.setattr(QdrantPoolStore, "from_settings", classmethod(_fake_store_from_settings))
+    monkeypatch.setattr(
+        MongoEmbeddingCache, "from_settings", classmethod(_fake_cache_from_settings)
+    )
+    monkeypatch.setattr(
+        MongoChunkTextLookup, "from_settings", classmethod(_fake_lookup_from_settings)
+    )
+    monkeypatch.setattr(
+        MongoIngestionJobsRepository, "from_settings", classmethod(_fake_jobs_from_settings)
+    )
+
+    return captured
+
+
+def test_build_real_ingestion_deps_wires_all_real_adapter_classes(
+    patched_real_ingestion_adapters: dict[str, Any],
+) -> None:
+    """운영 ingestion 부트스트랩 — 6 어댑터 모두 호출 + IngestionGraphDeps 시그니처 정합."""
+    from app.api.deps import build_real_ingestion_deps
+    from app.pipeline.ingestion_graph import IngestionGraphDeps
+
+    deps = build_real_ingestion_deps(_settings())
+
+    assert isinstance(deps, IngestionGraphDeps)
+    captured = patched_real_ingestion_adapters
+    assert captured["dense_init"] is not None
+    assert captured["sparse_init"] is not None
+    assert captured["store_from_settings"] is not None
+    assert captured["cache_from_settings"] is not None
+    assert captured["lookup_from_settings"] is not None
+    assert captured["jobs_from_settings"] is not None
+    # dense_dimension 은 어댑터 보고 값으로 전달 (E5 = 1024).
+    assert captured["store_from_settings"]["dense_dimension"] == 1024
+    # 운영 모드는 Fake 임베더 미사용 (PoC 경로 분리 회귀 보호).
+    assert not isinstance(deps.dense_embedder, FakeDenseEmbedder)
+    assert not isinstance(deps.sparse_embedder, FakeSparseEmbedder)
+
+
+def test_build_real_ingestion_deps_passes_dense_model_name(
+    patched_real_ingestion_adapters: dict[str, Any],
+) -> None:
+    """settings.dense_embedding_model 이 E5DenseEmbedder 생성자에 전달된다."""
+    from app.api.deps import build_real_ingestion_deps
+
+    settings = _settings()
+    build_real_ingestion_deps(settings)
+
+    dense_kwargs = patched_real_ingestion_adapters["dense_init"]
+    passed = list(dense_kwargs["args"]) + list(dense_kwargs["kwargs"].values())
+    assert settings.dense_embedding_model in passed
+
+
+def test_build_real_ingestion_deps_does_not_eagerly_import_sentence_transformers() -> None:
+    """app.api.deps 모듈 import 단계에서 sentence-transformers / fastembed 가 끌어와지지 않는다.
+
+    embedding extra 미설치 환경에서도 PoC 경로(build_poc_ingestion_deps + build_poc_deps)
+    는 동작해야 하므로 운영 어댑터는 함수 본문 내 lazy import 여야 한다 (build_real_deps
+    와 동일 정책 — 회귀 보호).
+    """
+    import ast
+    import inspect
+
+    import app.api.deps as deps_module
+
+    tree = ast.parse(inspect.getsource(deps_module))
+    top_level_imports: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_level_imports.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            top_level_imports.add(module)
+            for alias in node.names:
+                top_level_imports.add(f"{module}.{alias.name}")
+
+    forbidden_at_top = {
+        "sentence_transformers",
+        "fastembed",
+        "app.ingestion.embedder.dense",
+        "app.ingestion.embedder.sparse",
+    }
+    leaked = top_level_imports & forbidden_at_top
+    assert not leaked, f"실 어댑터/heavy 의존성이 모듈 최상단에서 import됨: {leaked}"
