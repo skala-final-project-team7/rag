@@ -117,5 +117,5 @@ def test_sigmoid_large_negative_does_not_overflow() -> None:
 
 def test_sigmoid_monotonic_increasing() -> None:
     values = [_sigmoid(value) for value in (-5.0, -1.0, 0.0, 1.0, 5.0)]
-    for prev, curr in zip(values, values[1:], strict=True):
+    for prev, curr in zip(values[:-1], values[1:], strict=True):
         assert prev < curr
