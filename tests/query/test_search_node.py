@@ -96,10 +96,14 @@ def store(dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder) -> QdrantPoolSto
     return s
 
 
+# sentinel — 호출자가 명시 None을 넘긴 경우와 default 적용 경우를 구분한다.
+_UNSET: object = object()
+
+
 def _make_state(
     *,
     query: str = "alpha",
-    acl_filter: dict[str, list[dict[str, object]]] | None = None,
+    acl_filter: object = _UNSET,
     rewritten_queries: list[str] | None = None,
     pool_weights: dict[str, float] | None = None,
     metadata_filters: dict[str, object] | None = None,
@@ -107,7 +111,7 @@ def _make_state(
     return RagState(
         query=query,
         user_id="user-test",
-        acl_filter=acl_filter if acl_filter is not None else _acl_for_cloud(),
+        acl_filter=_acl_for_cloud() if acl_filter is _UNSET else acl_filter,  # type: ignore[arg-type]
         rewritten_queries=rewritten_queries or [],
         pool_weights=pool_weights,
         metadata_filters=metadata_filters,
