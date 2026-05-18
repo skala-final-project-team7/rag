@@ -16,6 +16,7 @@ from app.query.reranker.base import CrossEncoderReranker, FakeCrossEncoderRerank
 from app.schemas.chunk import Chunk, ChunkMetadata
 from app.schemas.enums import ExtractedFormat, SourceType
 from app.schemas.rag_state import HistoryDecision, RagState
+from app.storage.chunk_lookup import ChunkLookupRecord, FakeChunkTextLookup
 
 # --- 픽스처·헬퍼 ---
 
@@ -291,6 +292,82 @@ def test_source_field_mapping_for_attachment_chunk() -> None:
     assert src.source_type is SourceType.ATTACHMENT
     assert src.attachment_filename == "EKS_운영_매뉴얼.docx"
     assert src.attachment_mime == _DOCX_MIME
+
+
+def test_attachment_source_download_url_filled_from_lookup() -> None:
+    """첨부 청크 + ChunkTextLookup 적재 → Source.download_url이 lookup 값으로 채워진다."""
+    chunk_id = "a" * 40
+    chunk = _chunk(
+        chunk_id=chunk_id,
+        is_attachment=True,
+        attachment_filename="EKS_운영_매뉴얼.docx",
+    )
+    lookup = FakeChunkTextLookup(
+        {
+            chunk_id: ChunkLookupRecord(
+                chunk_id=chunk_id,
+                text="첨부 풀 텍스트",
+                download_url="https://confluence/download/att-1",
+            )
+        }
+    )
+    state = _state(candidates=[chunk])
+    result = cross_encoder_rerank(
+        state, reranker=_ConstantScoreReranker(score=0.9), chunk_lookup=lookup
+    )
+    assert result.sources[0].download_url == "https://confluence/download/att-1"
+
+
+def test_page_source_download_url_remains_none_even_with_lookup() -> None:
+    """본문 청크는 lookup 조회 자체를 회피 — download_url은 항상 None."""
+    chunk_id = "a" * 40
+    chunk = _chunk(chunk_id=chunk_id, text="본문 텍스트")
+    # 실수로 본문 청크 chunk_id에 download_url이 적재된 경우라도 정합성 보호.
+    lookup = FakeChunkTextLookup(
+        {
+            chunk_id: ChunkLookupRecord(
+                chunk_id=chunk_id,
+                text="본문 풀 텍스트",
+                download_url="https://confluence/should-not-leak",
+            )
+        }
+    )
+    state = _state(candidates=[chunk])
+    result = cross_encoder_rerank(
+        state, reranker=_ConstantScoreReranker(score=0.75), chunk_lookup=lookup
+    )
+    assert result.sources[0].download_url is None
+
+
+def test_attachment_source_download_url_none_when_lookup_missing_record() -> None:
+    """첨부 청크지만 lookup에 레코드가 없으면 download_url=None (안전 fallback)."""
+    chunk = _chunk(
+        chunk_id="a" * 40,
+        is_attachment=True,
+        attachment_filename="EKS_운영_매뉴얼.docx",
+    )
+    # 빈 lookup
+    state = _state(candidates=[chunk])
+    result = cross_encoder_rerank(
+        state,
+        reranker=_ConstantScoreReranker(score=0.9),
+        chunk_lookup=FakeChunkTextLookup(),
+    )
+    assert result.sources[0].download_url is None
+
+
+def test_lookup_default_none_keeps_legacy_behavior() -> None:
+    """chunk_lookup=None (legacy) → 모든 Source.download_url=None."""
+    chunk = _chunk(
+        chunk_id="a" * 40,
+        is_attachment=True,
+        attachment_filename="EKS_운영_매뉴얼.docx",
+    )
+    state = _state(candidates=[chunk])
+    result = cross_encoder_rerank(
+        state, reranker=_ConstantScoreReranker(score=0.9), chunk_lookup=None
+    )
+    assert result.sources[0].download_url is None
 
 
 def test_score_is_rounded_to_integer_percent() -> None:
