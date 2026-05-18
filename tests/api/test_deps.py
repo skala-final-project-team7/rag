@@ -73,17 +73,22 @@ class _FakeRealReranker(CrossEncoderReranker):
 
 @pytest.fixture()
 def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """build_real_deps가 호출하는 실 어댑터 4종을 모두 가짜로 대체한다.
+    """build_real_deps가 호출하는 실 어댑터 5종을 모두 가짜로 대체한다.
 
     실 어댑터들은 build_real_deps 함수 본문 내 lazy import이므로 원본 모듈
     (``app.ingestion.embedder.dense`` 등)의 클래스 자체를 교체한다. Qdrant
     ``from_settings`` 도 :memory: 클라이언트로 우회해 외부 컨테이너 없이 검증.
+    Query Routing Agent 의 ``OpenAIRoutingLLMProvider.from_config`` 도 sentinel
+    객체를 반환하는 가짜로 대체해 OPENAI_API_KEY 환경변수 없이 회귀 보호.
     """
+    from query_routing_agent.llm import OpenAIRoutingLLMProvider
+
     captured: dict[str, Any] = {
         "dense_init": None,
         "sparse_init": None,
         "reranker_init": None,
         "store_from_settings": None,
+        "routing_provider_init": None,
     }
 
     def _fake_dense_factory(*args: Any, **kwargs: Any) -> _FakeRealDense:
@@ -105,6 +110,14 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         captured["store_from_settings"] = {"dense_dimension": dense_dimension}
         return QdrantPoolStore.in_memory(settings, dense_dimension=dense_dimension)
 
+    def _fake_routing_provider_from_config(
+        cls: type[OpenAIRoutingLLMProvider], config: Any, **kwargs: Any
+    ) -> object:
+        # API key 검증·실 HTTP transport 회피용 sentinel — 운영 build_real_deps 가 환경변수
+        # 없이도 wiring 까지 진행되는지 단위 검증 (real OpenAI 호출은 별도 opt-in 스모크).
+        captured["routing_provider_init"] = {"config": config, "kwargs": kwargs}
+        return object()
+
     import app.ingestion.embedder.dense as dense_module
     import app.ingestion.embedder.sparse as sparse_module
     import app.query.reranker.cross_encoder as reranker_module
@@ -113,6 +126,11 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(sparse_module, "BM25SparseEmbedder", _fake_sparse_factory)
     monkeypatch.setattr(reranker_module, "CrossEncoderRerankerImpl", _fake_reranker_factory)
     monkeypatch.setattr(QdrantPoolStore, "from_settings", classmethod(_fake_from_settings))
+    monkeypatch.setattr(
+        OpenAIRoutingLLMProvider,
+        "from_config",
+        classmethod(_fake_routing_provider_from_config),
+    )
 
     return captured
 
@@ -123,7 +141,8 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def test_build_real_deps_wires_real_adapter_classes(
     patched_real_adapters: dict[str, Any],
 ) -> None:
-    """build_real_deps가 4개 운영 어댑터 클래스를 모두 호출해 QueryGraphDeps에 박는다."""
+    """build_real_deps 가 5 종 운영 어댑터(임베더 2 + Qdrant + reranker + 라우터
+    provider)를 모두 호출해 QueryGraphDeps 에 박는다."""
     from app.api.deps import build_real_deps
 
     deps = build_real_deps(_settings())
@@ -133,12 +152,19 @@ def test_build_real_deps_wires_real_adapter_classes(
     assert patched_real_adapters["sparse_init"] is not None
     assert patched_real_adapters["reranker_init"] is not None
     assert patched_real_adapters["store_from_settings"] is not None
+    assert patched_real_adapters["routing_provider_init"] is not None
     # dense_dimension은 어댑터가 보고한 값으로 전달돼야 한다 (E5 = 1024)
     assert patched_real_adapters["store_from_settings"]["dense_dimension"] == 1024
+    # 라우터 provider 는 GPT-4o-mini 로 설정돼야 한다 (app/CLAUDE.md §5 라우팅 정책).
+    assert patched_real_adapters["routing_provider_init"]["config"].model == "gpt-4o-mini"
     # Fake 어댑터는 PoC 경로에서만 사용되어야 한다 — 운영 모드는 Fake 사용 금지
     assert not isinstance(deps.dense_embedder, FakeDenseEmbedder)
     assert not isinstance(deps.sparse_embedder, FakeSparseEmbedder)
     assert not isinstance(deps.reranker, FakeCrossEncoderReranker)
+    # 라우터 provider / config 가 QueryGraphDeps 에 박혔는지 회귀 보호 (router_node
+    # 가 manage_router 기본값일 때 partial 로 노드에 주입되는 경로).
+    assert deps.routing_provider is not None
+    assert deps.routing_config is not None
 
 
 def test_build_real_deps_passes_model_names_from_settings(

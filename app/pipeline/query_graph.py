@@ -15,6 +15,11 @@
   - 2026-05-18, 풀 텍스트 lookup 후속 — QueryGraphDeps.chunk_lookup 필드 추가
     (기본 FakeChunkTextLookup). rerank 노드 wiring에 lookup 주입해 첨부 청크의
     Source.download_url을 채우도록 확장.
+  - 2026-05-18, Agent 통합 1/4 — query-routing-agent vendoring + manage_router 어댑터
+    교체. QueryGraphDeps 의 router_node 기본값을 router_stub → manage_router 로 변경.
+    LLM provider/Config 주입을 위해 routing_provider/routing_config 필드 추가
+    (functools.partial 패턴으로 노드에 wiring). 라우터 stub 은 회귀 보호·PoC fallback
+    용도로 보존.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, LangGraph 0.2.x
@@ -42,13 +47,13 @@ from app.pipeline.nodes import (
 )
 from app.pipeline.stubs import (
     generator_stub,
-    router_stub,
     verify_llm_evaluator_stub,
 )
 from app.query.formatter import format_response
 from app.query.history import manage_history
 from app.query.rerank_node import cross_encoder_rerank
 from app.query.reranker.base import CrossEncoderReranker
+from app.query.router import manage_router
 from app.query.search_node import hybrid_search
 from app.schemas.enums import Intent, LlmModel
 from app.schemas.rag_state import RagState
@@ -58,6 +63,13 @@ from app.storage.qdrant_client import QdrantPoolStore
 
 # history-manager-agent의 LLM provider — runtime 인터페이스 의존성 회피를 위해 Any.
 HistoryProvider = Any
+
+# query-routing-agent의 LLM provider / config — runtime 인터페이스 의존성 회피를 위해 Any.
+# 실제 타입은 RoutingLLMProvider / QueryRoutingConfig. manage_router 가 None 일 때 fake
+# provider + 기본 config 를 사용하므로, 본 dataclass 가 vendoring 패키지의 import 를
+# 강제하지 않아도 된다.
+RoutingProvider = Any
+RoutingConfig = Any
 
 # 노드 시그니처 (모두 (RagState) -> RagState)
 QueryNode = Callable[[RagState], RagState]
@@ -88,8 +100,16 @@ class QueryGraphDeps:
     # FakeHistoryLLMProvider 기본을 사용한다.
     history_provider: HistoryProvider | None = None
 
-    # --- Agent 노드 — 기본값은 stub. 실 Agent 코드 전달 시 교체. ---
-    router_node: QueryNode = field(default=router_stub)
+    # 질의 라우터 LLM provider / config — None 이면 manage_router 가
+    # FakeRoutingLLMProvider + 기본 QueryRoutingConfig 를 사용한다.
+    routing_provider: RoutingProvider | None = None
+    routing_config: RoutingConfig | None = None
+
+    # --- Agent 노드 ---
+    # router_node 는 manage_router (query-routing-agent 어댑터) 가 기본값. provider 가
+    # None 이면 fake provider 가 자동 주입되어 외부 API 키 없이 PoC 경로 동작.
+    # generator_node / verify_llm_evaluator 는 아직 stub — Agent 코드 전달 시 교체.
+    router_node: QueryNode = field(default=manage_router)
     generator_node: QueryNode = field(default=generator_stub)
     verify_llm_evaluator: VerifyEvaluator = field(default=verify_llm_evaluator_stub)
 
@@ -114,7 +134,20 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
     # NOTE: 노드명은 RagState 필드명과 네임스페이스를 공유한다 (LangGraph 1.x 제약).
     # 히스토리 관리자 노드는 RagState.history 필드와 충돌하므로 'manage_history'로 둔다.
     builder.add_node("manage_history", partial(manage_history, provider=deps.history_provider))
-    builder.add_node("router", deps.router_node)
+    # 라우터 노드는 manage_router 기본값일 때만 routing_provider / routing_config 를
+    # functools.partial 로 주입한다. 외부에서 주입된 사용자 정의 router_node 는 이미
+    # provider 가 captured 되어 있다고 가정하고 그대로 등록 (history 패턴 정합).
+    if deps.router_node is manage_router:
+        builder.add_node(
+            "router",
+            partial(
+                manage_router,
+                provider=deps.routing_provider,
+                config=deps.routing_config,
+            ),
+        )
+    else:
+        builder.add_node("router", deps.router_node)
     builder.add_node(
         "hybrid_search",
         partial(

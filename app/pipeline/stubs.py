@@ -13,15 +13,20 @@
   - 2026-05-18, feature6 Phase 4 — document_analyzer_stub 추가. Ingestion 그래프의
     Agent 노드(문서 분석기) 자리에 들어가며 설계서 §8 fallback 정합으로 doc_type="operation"
     기본값을 채운다. Agent 담당자 코드 전달 시 교체.
+  - 2026-05-18, Agent 통합 1/4 — query-routing-agent 어댑터(``app/query/router.py``)
+    가 라우터 자리에 wiring 완료. router_stub 자체는 회귀 보호·PoC fallback 용도로
+    보존 (QueryGraphDeps.router_node 의 default 는 manage_router 로 변경).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
   - 외부 의존성 0 — Pydantic + StrEnum만 사용.
-  - NOTE: 본 모듈은 PoC·테스트용 fake다. 실제 Agent 코드가 전달되면 다음 두 위치에서
-          한 줄씩 교체한다:
-            * `app/pipeline/query_graph.py` 의 `build_query_graph` — router/generator
-              노드 등록
-            * `QueryGraphDeps.verify_llm_evaluator` 주입 — 검증 2단계
+  - NOTE: 본 모듈은 PoC·테스트용 fake다. 실제 Agent 코드 전달 진척에 따라 다음과
+          같이 교체된다:
+            * router_stub → ``app/query/router.py`` 의 ``manage_router`` (Agent 통합 1/4
+              완료, 2026-05-18). 본 stub 은 회귀 보호용으로 보존.
+            * generator_stub → Agent 답변 생성기 (대기 중)
+            * verify_llm_evaluator_stub → Agent 검증 2단계 평가자 (대기 중)
+            * document_analyzer_stub → Agent 문서 분석기 (대기 중)
           본 파일 자체는 Agent 코드를 포함하지 않는다 (담당 영역 분리 — `app/CLAUDE.md`
           "담당 범위를 벗어난 파일은 수정하지 않는다").
 --------------------------------------------------

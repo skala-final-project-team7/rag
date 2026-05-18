@@ -17,6 +17,8 @@
 - acl.py        extract_principal / build_acl_filter / @enforce_acl [feature7]
 - history.py    manage_history — 멀티턴 히스토리 관리자 통합 어댑터 노드
                 [feature8 통합] (vendoring한 history_manager_agent 패키지를 RagState에 연결)
+- router.py     manage_router — 질의 라우터 통합 어댑터 노드
+                [Agent 통합 1/4] (vendoring한 query_routing_agent 패키지를 RagState에 연결)
 - search.py     reciprocal_rank_fusion / merge_pools / select_top_candidates /
                 fuse_and_rank — Hybrid Search 핵심 로직 [feature9-A]
 - rerank.py     select_reranked / RerankResult — Cross-Encoder 재순위화 선정 로직 [feature9-A]
@@ -37,6 +39,7 @@ from app.query.acl import (
 from app.query.formatter import format_response
 from app.query.history import manage_history
 from app.query.rerank import RerankResult, select_reranked
+from app.query.router import manage_router
 from app.query.search import (
     fuse_and_rank,
     merge_pools,
@@ -58,6 +61,7 @@ __all__ = [
     "format_response",
     "fuse_and_rank",
     "manage_history",
+    "manage_router",
     "merge_pools",
     "reciprocal_rank_fusion",
     "select_reranked",
