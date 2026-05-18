@@ -985,3 +985,78 @@ LangGraph 노드 wiring만 남는다.
 - **feature4-B** — PDF/CSV 첨부 분할기 (픽스처·`pymupdf` 확보 후).
 - **`examples/demo_search.py` 갱신** — BM25-lite 인메모리 검색을 실 5-B-1/2/3로 교체
   하는 시연 데모. 소규모 작업.
+
+
+## 2026-05-18 — feature9-B-1: Cross-Encoder Reranker 어댑터 (ABC + Fake + 실 어댑터)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 9-B(검색·재순위화 노드 오케스트레이션) 진입을 위해 Cross-Encoder 외부 모델
+  어댑터를 5-B-1과 같은 패턴(ABC + Fake + 실 어댑터)으로 격리. 9-A의 순수 로직
+  ``select_reranked`` 와 9-B-2/3 노드 오케스트레이션 사이를 잇는 "어떻게 재순위화 점수를
+  낼지" 계약.
+- 분할 결정: 어댑터만 먼저 격리하면 9-B-2(검색 노드) / 9-B-3(rerank 노드)이 큰 위험
+  없이 진입 가능. 5-B 시리즈의 점진적 분할 패턴 연속.
+
+### 변경 사항
+
+신규 패키지 `app/query/reranker/`:
+
+- `base.py` (~70 lines)
+  - `CrossEncoderReranker` ABC — `score(query, passages) -> list[float]` 단일 메서드.
+    반환 점수는 ``[0.0, 1.0]`` 범위로 강제 — `select_reranked` (9-A)의 임계값
+    (``NARROW_SCORE_THRESHOLD=0.30``, ``LOW_CONFIDENCE_THRESHOLD=0.20``) 정합.
+  - `FakeCrossEncoderReranker` — sha256 결정론 해시 기반. 같은 ``(query, passage)`` →
+    같은 점수. 실 모델 다운로드(약 130 MB) 없이 단위 테스트 통과.
+- `cross_encoder.py` (~85 lines)
+  - `CrossEncoderRerankerImpl` — sentence-transformers ``CrossEncoder`` 래퍼.
+    `model_name` 기본값 ``cross-encoder/ms-marco-MiniLM-L-12`` (`docs/.env.example`
+    정합). raw logit → `_sigmoid` 변환으로 ``[0.0, 1.0]`` 점수 산출.
+  - `_sigmoid(value)` 헬퍼 — 수치 안정 Sigmoid (큰 양수/음수에서 overflow·underflow
+    회피하도록 부호 분기).
+- `__init__.py` — Protocol/Fake만 re-export. 실 어댑터는 명시적 import 요구 —
+  embedding extra 미설치 환경에서도 base는 import 가능.
+
+신규 테스트 `tests/query/reranker/` (~190 lines, 17 unit tests):
+
+- `test_base.py` — 8 tests. FakeCrossEncoderReranker의 ABC 정합·shape·결정론·
+  ``[0.0, 1.0]`` 점수 범위·서로 다른 (query, passage) → 서로 다른 점수·빈 입력·
+  **9-A `select_reranked` 와의 통합 흐름** 검증 (어댑터 출력 dict → select_reranked
+  → RerankResult).
+- `test_cross_encoder.py` — 9 tests. `pytest.importorskip("sentence_transformers")`
+  로 미설치 환경 스킵. stub CrossEncoder로 모델 다운로드 회피, pairs 구성·batch_size
+  전달·빈 입력 short-circuit·Sigmoid 적용 검증. `_sigmoid` 수치 안정성(0/큰 양수/큰
+  음수/단조 증가) 별도 검증.
+
+### 책임 분리 (9-A vs 9-B-1)
+
+- **feature9-A** `app/query/rerank.py::select_reranked` — Top-K 선정·축소·저신뢰
+  분기 (순수 로직, ``dict[chunk_id, score]`` 입력).
+- **feature9-B-1** `app/query/reranker/` — 점수 산출 어댑터 (외부 모델 호출, raw logit
+  → Sigmoid). 호출자(9-B-2/3 노드)가 ``chunk_id`` 매핑을 만들어 두 단계를 결합한다.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- format / lint(ruff + mypy) / pytest 통과 예상.
+- 신규 17 tests (base 8 + cross_encoder 9).
+- `embedding` extra 미설치 환경에서는 `test_cross_encoder.py` 9건 skip, `test_base.py`
+  8건은 외부 의존성 없이 통과.
+
+### 비고
+
+- 새 의존성 도입 없음 — `sentence-transformers>=3.0` 은 이미 5-B-1에서 도입됨.
+- `CrossEncoder.predict` 의 raw logit 출력을 Sigmoid로 변환하는 책임은 어댑터 측에
+  명시적으로 둠 — `apply_softmax` 인자에 위임하지 않고 어댑터 자체에서 처리. 9-A 임계값
+  정합이 어댑터 계약의 일부이기 때문.
+- `_sigmoid` 는 stdlib `math.exp` 만 사용 — `torch.nn.functional.sigmoid` 의존을 피해
+  의존성 폭발 회피. 어차피 단일 값씩 처리하므로 vectorize 이득 없음.
+- ms-marco-MiniLM-L-12 모델은 한 번에 32쌍 추론 권장 — `docs/conventions.md` §5.7 NOTE
+  정합.
+
+### 남은 TODO
+
+- **9-B-2** — `hybrid_search` 노드 (RagState → query 임베딩(5-B-1) → 3 Pool dense+sparse
+  검색(5-B-2) → 9-A `reciprocal_rank_fusion` + `merge_pools` → `candidates` Top-20).
+- **9-B-3** — `cross_encoder_rerank` 노드 (candidates → 9-B-1 Reranker.score →
+  9-A `select_reranked` → `top_chunks` Top-5 + 저신뢰 분기).
+- **9-B 의존 완전 해소** — 9-B-1 후 Cross-Encoder 측 잠금까지 해소됨 → 9-B-2/3 즉시
+  착수 가능.
