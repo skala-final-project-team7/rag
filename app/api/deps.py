@@ -30,6 +30,10 @@
     가 Fake, 운영은 E5/BM25/Qdrant.from_settings + Mongo 3종(embedding_cache /
     chunk_lookup / ingestion_jobs) 모두 lazy import. Ingestion 은 query 와 별도 진입점
     (RabbitMQ Worker / 별도 트리거 시스템) 책임이므로 lifespan 에 자동 wire 하지 않음.
+  - 2026-05-18, Agent 통합 1/4 — query-routing-agent 어댑터 wiring.
+    build_poc_deps 는 QueryGraphDeps 기본값(routing_provider=None → fake provider 자동)
+    그대로 사용 — 외부 API 키 없이 PoC 경로 동작 유지. build_real_deps 는
+    OpenAIRoutingLLMProvider 를 lazy import 해 OPENAI_API_KEY 환경변수 기반으로 주입.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -135,6 +139,8 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     from app.ingestion.embedder.sparse import BM25SparseEmbedder
     from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
     from app.storage.chunk_lookup import MongoChunkTextLookup
+    from query_routing_agent.config import QueryRoutingConfig
+    from query_routing_agent.llm import OpenAIRoutingLLMProvider
 
     dense = E5DenseEmbedder(settings.dense_embedding_model)
     sparse = BM25SparseEmbedder()
@@ -145,6 +151,12 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # chunk_lookup은 운영 모드에서 MongoDB `chunk_lookup` 컬렉션을 가리킨다 (db-schema §2.5).
     # 컬렉션이 비어 있어도 fetch가 None을 반환하므로 download_url=None으로 안전 fallback.
     chunk_lookup = MongoChunkTextLookup.from_settings(settings)
+    # 라우터는 운영 모드에서 OpenAI provider 를 사용한다. OPENAI_API_KEY 환경변수가
+    # 없으면 from_config 가 RoutingProviderError 를 던지므로, 운영 lifespan 진입 직전에
+    # 누락이 명확히 드러난다. 키가 있으면 GPT-4o-mini (app/CLAUDE.md §5 라우팅 정책) 로
+    # 분류한다.
+    routing_config = QueryRoutingConfig(model="gpt-4o-mini")
+    routing_provider = OpenAIRoutingLLMProvider.from_config(routing_config)
 
     return QueryGraphDeps(
         dense_embedder=dense,
@@ -152,6 +164,8 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
         store=store,
         reranker=reranker,
         chunk_lookup=chunk_lookup,
+        routing_provider=routing_provider,
+        routing_config=routing_config,
     )
 
 
