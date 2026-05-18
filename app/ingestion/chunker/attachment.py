@@ -23,12 +23,16 @@ import re
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import openpyxl
 from docx import Document as load_docx
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+
+if TYPE_CHECKING:
+    from docx.document import Document as DocxDocument
 
 from app.ingestion.chunker.base import (
     MAX_TOKENS,
@@ -124,13 +128,13 @@ def _resolve_attachment_path(attachment: Attachment) -> str:
 # --- docx 1차 분할 ---
 
 
-def _iter_block_items(document: object) -> Iterator[Paragraph | Table]:
+def _iter_block_items(document: "DocxDocument") -> Iterator[Paragraph | Table]:
     """docx 본문(body)의 문단·표를 문서에 나타난 순서대로 순회한다.
 
     python-docx의 `document.paragraphs` / `document.tables`는 순서 정보를 잃으므로,
     표가 어느 섹션에 속하는지 보존하려면 body XML 자식을 직접 순회해야 한다.
     """
-    body = document.element.body  # type: ignore[attr-defined]
+    body = document.element.body
     for child in body.iterchildren():
         if child.tag == qn("w:p"):
             yield Paragraph(child, document)

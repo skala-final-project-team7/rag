@@ -152,8 +152,7 @@ def test_xlsx_splits_by_sheet_and_serializes_rows() -> None:
     assert cluster_drafts
     # 각 행이 '[<시트명>] <컬럼>: <값> | ...' 형식으로 직렬화된다 (컬럼명 매 행 동봉)
     assert any(
-        "[클러스터 메트릭] 메트릭 ID: CL-001 | 메트릭 이름: kubernetes.node.cpu.usage.pct"
-        in d.text
+        "[클러스터 메트릭] 메트릭 ID: CL-001 | 메트릭 이름: kubernetes.node.cpu.usage.pct" in d.text
         for d in cluster_drafts
     )
 

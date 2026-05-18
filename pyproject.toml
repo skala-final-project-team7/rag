@@ -76,3 +76,14 @@ asyncio_mode = "auto"
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
+# vendoring한 외부 코드(History Manager Agent)는 mypy 검사 대상에서 제외 —
+# ruff 설정(extend-exclude)과 대칭. 원본을 무수정 보존한다.
+# 통합 어댑터(app/query/history.py)는 정상적으로 검사된다.
+exclude = [
+    "history_manager_agent/",
+    "tests/history_manager_agent/",
+]
+
+[[tool.mypy.overrides]]
+module = "history_manager_agent.*"
+follow_imports = "skip"
