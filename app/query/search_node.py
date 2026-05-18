@@ -12,6 +12,9 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature9-B-2 — hybrid_search 외부 노드 + 내부 ACL 가드
     + Chunk 재구성 + 기본 pool_weights fallback
+  - 2026-05-18, 5-A 후속 — _chunk_from_search_hit가 payload.token_count를 그대로
+    복원하도록 변경 (build_point_payload 동봉 확장과 짝). legacy 인덱스 호환 위해
+    필드 없으면 0 fallback.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -166,8 +169,9 @@ def _chunk_from_search_hit(hit: SearchHit) -> Chunk:
     Cross-Encoder reranker(9-B-3) / 답변 생성기 / 응답 포맷터가 ``Chunk`` 모양을 요구하므로
     검색 단계에서 변환한다. ``text`` 는 payload의 ``text_preview`` (첫 200자) — 9-B-3
     재순위화는 text_preview로 점수 산출하며, 운영에서 풀 텍스트가 필요해지면 별도
-    chunk lookup 어댑터를 추가한다. ``token_count`` 는 payload에 없어 0으로 두고
-    별도 follow-up에서 payload 스키마 확장(5-A 영역).
+    chunk lookup 어댑터를 추가한다. ``token_count`` 는 5-A 후속(2026-05-18)에서
+    payload에 동봉했으므로 payload에서 직접 복원한다. legacy 인덱스에 필드가 없으면
+    0으로 fallback (후방 호환).
     """
     payload = hit.payload
     metadata = ChunkMetadata(
@@ -189,7 +193,7 @@ def _chunk_from_search_hit(hit: SearchHit) -> Chunk:
         attachment_filename=_optional_str(payload.get("attachment_filename")),
         attachment_mime=_optional_str(payload.get("attachment_mime")),
         extracted_format=_parse_extracted_format(payload.get("extracted_format")),
-        token_count=0,
+        token_count=int(payload.get("token_count") or 0),
     )
     return Chunk(text=str(payload.get("text_preview") or ""), metadata=metadata)
 

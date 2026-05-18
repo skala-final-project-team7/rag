@@ -150,8 +150,9 @@ def test_hybrid_search_returns_chunks_with_reconstructed_metadata(
     assert candidate.metadata.doc_type.value == "operation"
     # text는 payload의 text_preview (5-A: 첫 200자)
     assert candidate.text in {"alpha", "beta", "gamma"}
-    # token_count는 9-B-2에서 0 default (별도 follow-up으로 payload에 추가 예정)
-    assert candidate.metadata.token_count == 0
+    # token_count는 5-A 후속(2026-05-18)에서 payload에 동봉 — 인덱싱한 청크의
+    # token_count(120)가 재구성 후에도 보존되어야 한다.
+    assert candidate.metadata.token_count == 120
 
 
 def test_hybrid_search_top_k_limit(

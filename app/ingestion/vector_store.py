@@ -14,6 +14,9 @@
     SHA1 hex(40자) chunk_id를 Point ID로 직접 사용 불가. 어댑터(app/storage/qdrant_client.py)
     가 uuid5(NAMESPACE_OID, chunk_id)로 매핑하고, 원본 chunk_id는 payload에 보존하도록
     payload에 chunk_id 필드 1개 추가 (additive). db-schema §1.2·§1.3 동시 갱신.
+  - 2026-05-18, 5-A 후속 — Chunk 재구성 정합. 청커가 산출한 token_count를 payload에
+    동봉해 검색 단계(_chunk_from_search_hit)가 ChunkMetadata.token_count를 그대로
+    복원할 수 있도록 한다 (additive). db-schema §1.2 동시 갱신.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -77,5 +80,6 @@ def build_point_payload(chunk: Chunk, version_number: int) -> dict[str, Any]:
         "extracted_format": (
             metadata.extracted_format.value if metadata.extracted_format else None
         ),
+        "token_count": metadata.token_count,
         "text_preview": chunk.text[:TEXT_PREVIEW_LIMIT],
     }

@@ -119,3 +119,11 @@ def test_build_point_payload_text_preview_truncated_to_200() -> None:
 def test_build_point_payload_text_preview_keeps_short_text() -> None:
     payload = build_point_payload(_page_chunk("짧은 본문"), version_number=1)
     assert payload["text_preview"] == "짧은 본문"
+
+
+def test_build_point_payload_includes_token_count() -> None:
+    # 5-A 후속(2026-05-18) — Chunk 재구성 정합. 청커가 산출한 token_count를
+    # payload에 동봉해 검색 단계(_chunk_from_search_hit)에서 그대로 복원하도록 한다.
+    # 픽스처는 token_count=120 (ChunkMetadata 필수 필드).
+    payload = build_point_payload(_page_chunk(), version_number=1)
+    assert payload["token_count"] == 120
