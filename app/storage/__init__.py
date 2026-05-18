@@ -11,6 +11,10 @@
 - ``chunk_lookup.py`` — ``ChunkTextLookup`` ABC + ``MongoChunkTextLookup`` +
   ``FakeChunkTextLookup`` + ``ChunkLookupRecord``. db-schema §2.5의 ``chunk_lookup``
   컬렉션 어댑터. 청크 풀 텍스트·첨부 download_url을 chunk_id로 조회한다.
+- ``jobs.py`` — ``IngestionJobsRepository`` ABC + ``MongoIngestionJobsRepository`` +
+  ``FakeIngestionJobsRepository`` + ``IngestionJobRecord``. db-schema §2.3의
+  ``ingestion_jobs`` 컬렉션 어댑터. Ingestion 파이프라인 각 단계(analyze/chunk/embed/
+  upsert/sync) 처리 결과를 기록한다.
 
 Ingestion·Query 파이프라인은 본 패키지의 추상화만 통해 저장소에 접근하며, 모델·라이브러리
 종속을 격리한다.
@@ -21,6 +25,12 @@ from app.storage.chunk_lookup import (
     ChunkTextLookup,
     FakeChunkTextLookup,
     MongoChunkTextLookup,
+)
+from app.storage.jobs import (
+    FakeIngestionJobsRepository,
+    IngestionJobRecord,
+    IngestionJobsRepository,
+    MongoIngestionJobsRepository,
 )
 from app.storage.mongo_cache import (
     EmbeddingCache,
@@ -37,8 +47,12 @@ __all__ = [
     "EmbeddingCacheEntry",
     "FakeChunkTextLookup",
     "FakeEmbeddingCache",
+    "FakeIngestionJobsRepository",
+    "IngestionJobRecord",
+    "IngestionJobsRepository",
     "MongoChunkTextLookup",
     "MongoEmbeddingCache",
+    "MongoIngestionJobsRepository",
     "QdrantPoolStore",
     "SearchHit",
 ]

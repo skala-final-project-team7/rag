@@ -119,6 +119,17 @@ payload 필드로 복원한다.
 | `started_at` / `finished_at` | datetime | 처리 구간 |
 | `error` | string \| null | 실패 상세 |
 
+**적재 흐름.** `app/storage/jobs.py` 의 `IngestionJobsRepository.record` /
+`record_many` 가 Ingestion 그래프 각 노드 종료 시점에 7필드 레코드를 적재한다.
+`stage`/`status` 는 `IngestionStage` / `IngestionStatus` enum 의 `.value` 문자열로
+직렬화. `record_many` 는 빈 입력에서 short-circuit 해 pymongo `insert_many` 의
+`InvalidOperation` 을 회피한다. 관리자 대시보드 조회 API 는 별도 시스템 책임이므로
+본 어댑터는 적재만 노출 (오버튜닝 회피).
+
+**인덱스 권장.** 운영에서는 관리자 대시보드 조회 패턴에 맞춰 `(page_id, started_at)`
+복합 인덱스 + `status` 단일 인덱스를 권장 (실패 잡 필터링). 본 milestone 은 적재
+어댑터만 추가, 인덱스 생성은 운영 부트스트랩 단계에서 별도 처리.
+
 ### 2.4 `embedding_cache` (멱등성)
 
 `chunk_id`, `version_number`, `dense_hash`, `sparse_hash`, `computed_at`.

@@ -213,8 +213,9 @@
 
 ### feature6: 문서 분석기 + 첨부 분석기 + Ingestion 그래프 — ⚠ 담당 분리
 
-- **본 담당자 몫(Pipeline)**: 첨부 파일 분석기(`app/ingestion/attachment_analyzer.py`),
-  삭제 동기화(`app/ingestion/sync.py`), `ingestion_jobs` 기록 헬퍼(`app/ingestion/jobs.py`).
+- **본 담당자 몫(Pipeline + Storage)**: 첨부 파일 분석기(`app/ingestion/attachment_analyzer.py`),
+  삭제 동기화(`app/ingestion/sync.py`), `ingestion_jobs` 기록 헬퍼(`app/storage/jobs.py` —
+  외부 저장소 어댑터는 `app/storage/` 패키지 일관성 정합, `app/CLAUDE.md` §8).
 - **Agent 담당자 몫**: 문서 분석기(`app/ingestion/document_analyzer.py` [Agent]).
 - **통합 지점**: Ingestion 그래프 조립(`app/pipeline/ingestion_graph.py`) — Agent 노드 stub →
   전달 후 교체.
@@ -223,7 +224,10 @@
 
 작업 항목:
 
-- [ ] (본 담당자) 첨부 분석기 [Pipeline] + 삭제 동기화 [Pipeline] + jobs 헬퍼 + Ingestion 그래프 조립
+- [x] (본 담당자) 첨부 분석기 [Pipeline] — Phase 1 완료 (2026-05-18, `4c6c2dc`)
+- [x] (본 담당자) `ingestion_jobs` 기록 헬퍼 [Storage] — Phase 2 완료 (2026-05-18)
+- [ ] (본 담당자) 삭제 동기화 [Pipeline] — Phase 3
+- [ ] (본 담당자) Ingestion 그래프 조립 — Phase 4 (Phase 1~3 + Agent 노드 stub 종합)
 - [ ] (Agent 담당자) 문서 분석기 [Agent]
 
 ## Milestone C — Query 파이프라인
