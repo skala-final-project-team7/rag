@@ -10,6 +10,9 @@
   - 2026-05-15, 최초 작성, feature1 — pydantic-settings 기반 Settings 정의
   - 2026-05-17, 코드 리뷰 후속(P1-1) — samples_dir이 어댑터에 흐르도록 정리,
     mysql_uri는 운영 전환 시 SecretStr 승급 후보 NOTE 명시
+  - 2026-05-18, build_real_deps 후속 — use_real_adapters 토글 추가
+    (RAG_USE_REAL_ADAPTERS). 기본값 False(PoC). True 시 lifespan이 build_real_deps
+    분기로 E5 + BM25 + Qdrant from_settings + CrossEncoderRerankerImpl을 부트스트랩
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+, pydantic-settings 2.3+
@@ -62,6 +65,13 @@ class Settings(BaseSettings):
     # --- 임베딩 / 재순위화 모델 ---
     dense_embedding_model: str = "intfloat/multilingual-e5-large"
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12"
+
+    # --- 운영 어댑터 토글 (build_real_deps 후속, 2026-05-18) ---
+    # True면 lifespan이 build_real_deps 분기로 E5 + BM25 + Qdrant from_settings +
+    # CrossEncoderRerankerImpl 부트스트랩. False(기본)는 build_poc_deps 분기로
+    # :memory: Qdrant + Fake everything + samples 자동 인덱싱. 운영 모드는 모델
+    # 다운로드(약 2.4 GB)와 Qdrant 서버 접속을 요구하므로 명시 활성화한다.
+    use_real_adapters: bool = False
 
 
 @lru_cache

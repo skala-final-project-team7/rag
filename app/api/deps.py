@@ -2,22 +2,29 @@
 
 --------------------------------------------------
 작성자 : 최태성
-작성목적 : feature11 통합 Phase 2 — FastAPI 앱이 시작할 때 한 번 호출되어 Query
-          그래프 의존성(``QueryGraphDeps``)을 부트스트랩한다. PoC 기본은 :memory:
-          Qdrant + Fake embedder/reranker + samples 자동 인덱싱으로 외부 컨테이너·
-          모델 없이 서버가 즉시 응답 가능하도록 한다. 실 어댑터(E5 +
-          Qdrant from_settings + Cross-Encoder 실 모델) 부트스트랩은 별도 follow-up
-          (운영 전환 시 본 모듈에 ``build_real_deps``를 추가하고 환경 토글로 선택).
+작성목적 : FastAPI 앱이 시작할 때 한 번 호출되어 Query 그래프 의존성
+          (``QueryGraphDeps``)을 부트스트랩한다. PoC 기본(``build_poc_deps``)은
+          :memory: Qdrant + Fake embedder/reranker + samples 자동 인덱싱으로 외부
+          컨테이너·모델 없이 서버가 즉시 응답 가능하도록 한다. 운영 모드
+          (``build_real_deps``)는 E5DenseEmbedder + BM25SparseEmbedder + Qdrant
+          from_settings + CrossEncoderRerankerImpl로 실 어댑터를 부트스트랩한다.
+          분기는 ``Settings.use_real_adapters`` 토글(``RAG_USE_REAL_ADAPTERS=true``)
+          이 결정한다.
 작성일 : 2026-05-18
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature11 통합 Phase 2 — build_poc_deps + samples
     자동 인덱싱
+  - 2026-05-18, build_real_deps 후속 — 운영 어댑터 부트스트랩 함수 추가
+    (E5 / BM25 / Qdrant from_settings / CrossEncoderRerankerImpl). 실 모델
+    import는 함수 본문 내 lazy로 처리해 embedding extra 미설치 환경에서도
+    PoC 경로(build_poc_deps)와 모듈 import는 동작하도록 한다.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
-  - NOTE: 본 모듈은 외부 의존성(qdrant-client `:memory:`)을 사용하지만 모델
-          다운로드는 없다. FastAPI 의존성 주입 트리는 ``app.state.graph`` /
-          ``app.state.deps`` 로 단일 인스턴스를 공유한다 (lifespan).
+  - NOTE: 본 모듈 최상단 import는 외부 의존성(qdrant-client `:memory:`)만 사용한다.
+          sentence-transformers / fastembed는 build_real_deps 호출 시점에 lazy
+          import되며, embedding extra 미설치 환경에서는 build_real_deps 호출 시
+          ImportError로 빨리 실패한다.
 --------------------------------------------------
 """
 
@@ -70,6 +77,52 @@ def build_poc_deps(settings: Settings | None = None) -> QueryGraphDeps:
         sparse_embedder=sparse,
         store=store,
         reranker=FakeCrossEncoderReranker(),
+    )
+
+
+def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
+    """운영 어댑터 부트스트랩 — E5 + BM25 + Qdrant from_settings + CrossEncoder.
+
+    PoC 부트스트랩(``build_poc_deps``)과 동일한 ``QueryGraphDeps`` 시그니처를 반환
+    한다. 실 모델 import는 함수 본문 내 lazy — embedding extra 미설치 환경에서도
+    PoC 경로와 모듈 import는 영향 받지 않는다. 운영 모드는 모델 다운로드(약
+    2.4 GB: e5-large 2.24 GB + cross-encoder 130 MB) + Qdrant 서버 접속을 요구
+    하므로 ``RAG_USE_REAL_ADAPTERS=true`` 환경 변수로 명시 활성화 후 사용한다.
+
+    samples 자동 인덱싱은 수행하지 않는다 — 운영 환경은 별도 ingestion 파이프라인이
+    Qdrant에 적재했다고 가정한다. 컬렉션이 비어 있으면 검색 0건으로 떨어져 그래프
+    의 ``empty_retrieval_node`` 가 표준 RETRIEVAL_EMPTY 응답을 반환한다.
+
+    Args:
+        settings: 환경 설정. None이면 ``get_settings()`` 로 lazy 로드.
+
+    Returns:
+        실 어댑터 4종이 wiring된 ``QueryGraphDeps``.
+
+    Raises:
+        ImportError: sentence-transformers / fastembed 미설치 시 (embedding extra
+            누락). 운영 모드 활성화 전 ``pip install -e .[embedding]`` 필요.
+    """
+    settings = settings or get_settings()
+
+    # 실 어댑터 import는 lazy — embedding extra 미설치 환경에서도 build_poc_deps와
+    # 본 모듈 import는 동작해야 한다. import 실패 시 호출자에게 ImportError 전파.
+    from app.ingestion.embedder.dense import E5DenseEmbedder
+    from app.ingestion.embedder.sparse import BM25SparseEmbedder
+    from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
+
+    dense = E5DenseEmbedder(settings.dense_embedding_model)
+    sparse = BM25SparseEmbedder()
+    # dense_dimension은 어댑터가 모델 로드 후 보고한 값을 사용 (E5-large = 1024).
+    store = QdrantPoolStore.from_settings(settings, dense_dimension=dense.dimension)
+    store.bootstrap_collections()
+    reranker = CrossEncoderRerankerImpl(settings.cross_encoder_model)
+
+    return QueryGraphDeps(
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        reranker=reranker,
     )
 
 

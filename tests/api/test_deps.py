@@ -1,0 +1,229 @@
+"""FastAPI 의존성 부트스트랩 검증 — build_real_deps + build_poc_deps.
+
+build_real_deps는 sentence-transformers / fastembed 모델 다운로드(약 2.4 GB) +
+Qdrant 서버 접속을 요구한다. 테스트는 monkeypatch로 실 어댑터 클래스 4종을
+가짜로 대체해 함수 로직(어댑터 wiring + Qdrant from_settings 호출 + samples
+인덱싱 미실행)만 검증한다. 모듈 import 단계에서 sentence-transformers가
+끌어와지지 않음(lazy import)도 함께 검증한다.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+
+from app.config import Settings
+from app.ingestion.embedder.base import (
+    DenseEmbedder,
+    FakeDenseEmbedder,
+    FakeSparseEmbedder,
+    SparseEmbedder,
+    SparseVector,
+)
+from app.pipeline.query_graph import QueryGraphDeps
+from app.query.reranker.base import CrossEncoderReranker, FakeCrossEncoderReranker
+from app.storage.qdrant_client import QdrantPoolStore
+
+
+def _settings() -> Settings:
+    return Settings(_env_file=None)  # type: ignore[arg-type]
+
+
+# --- Fake 운영 어댑터 — sentence-transformers / fastembed / 실 Qdrant 회피 ---
+
+
+@dataclass
+class _FakeRealDense(DenseEmbedder):
+    """E5DenseEmbedder 대체. 실 모델 다운로드 없이 dimension만 보고한다."""
+
+    _dimension: int = 1024
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def encode_passages(self, texts: list[str]) -> list[list[float]]:  # pragma: no cover
+        return [[0.0] * self._dimension for _ in texts]
+
+    def encode_queries(self, texts: list[str]) -> list[list[float]]:  # pragma: no cover
+        return [[0.0] * self._dimension for _ in texts]
+
+
+class _FakeRealSparse(SparseEmbedder):
+    """BM25SparseEmbedder 대체."""
+
+    def encode_passages(self, texts: list[str]) -> list[SparseVector]:  # pragma: no cover
+        return [SparseVector(indices=(), values=()) for _ in texts]
+
+    def encode_queries(self, texts: list[str]) -> list[SparseVector]:  # pragma: no cover
+        return [SparseVector(indices=(), values=()) for _ in texts]
+
+
+class _FakeRealReranker(CrossEncoderReranker):
+    """CrossEncoderRerankerImpl 대체."""
+
+    def score(self, query: str, passages: list[str]) -> list[float]:  # pragma: no cover
+        return [0.5 for _ in passages]
+
+
+# --- 픽스처 ---
+
+
+@pytest.fixture()
+def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """build_real_deps가 호출하는 실 어댑터 4종을 모두 가짜로 대체한다.
+
+    실 어댑터들은 build_real_deps 함수 본문 내 lazy import이므로 원본 모듈
+    (``app.ingestion.embedder.dense`` 등)의 클래스 자체를 교체한다. Qdrant
+    ``from_settings`` 도 :memory: 클라이언트로 우회해 외부 컨테이너 없이 검증.
+    """
+    captured: dict[str, Any] = {
+        "dense_init": None,
+        "sparse_init": None,
+        "reranker_init": None,
+        "store_from_settings": None,
+    }
+
+    def _fake_dense_factory(*args: Any, **kwargs: Any) -> _FakeRealDense:
+        captured["dense_init"] = {"args": args, "kwargs": kwargs}
+        return _FakeRealDense()
+
+    def _fake_sparse_factory(*args: Any, **kwargs: Any) -> _FakeRealSparse:
+        captured["sparse_init"] = {"args": args, "kwargs": kwargs}
+        return _FakeRealSparse()
+
+    def _fake_reranker_factory(*args: Any, **kwargs: Any) -> _FakeRealReranker:
+        captured["reranker_init"] = {"args": args, "kwargs": kwargs}
+        return _FakeRealReranker()
+
+    def _fake_from_settings(
+        cls: type[QdrantPoolStore], settings: Settings, *, dense_dimension: int = 1024
+    ) -> QdrantPoolStore:
+        # classmethod descriptor가 cls를 자동 주입하므로 첫 인자에 cls를 받는다.
+        captured["store_from_settings"] = {"dense_dimension": dense_dimension}
+        return QdrantPoolStore.in_memory(settings, dense_dimension=dense_dimension)
+
+    import app.ingestion.embedder.dense as dense_module
+    import app.ingestion.embedder.sparse as sparse_module
+    import app.query.reranker.cross_encoder as reranker_module
+
+    monkeypatch.setattr(dense_module, "E5DenseEmbedder", _fake_dense_factory)
+    monkeypatch.setattr(sparse_module, "BM25SparseEmbedder", _fake_sparse_factory)
+    monkeypatch.setattr(reranker_module, "CrossEncoderRerankerImpl", _fake_reranker_factory)
+    monkeypatch.setattr(QdrantPoolStore, "from_settings", classmethod(_fake_from_settings))
+
+    return captured
+
+
+# --- build_real_deps 테스트 ---
+
+
+def test_build_real_deps_wires_real_adapter_classes(
+    patched_real_adapters: dict[str, Any],
+) -> None:
+    """build_real_deps가 4개 운영 어댑터 클래스를 모두 호출해 QueryGraphDeps에 박는다."""
+    from app.api.deps import build_real_deps
+
+    deps = build_real_deps(_settings())
+
+    assert isinstance(deps, QueryGraphDeps)
+    assert patched_real_adapters["dense_init"] is not None
+    assert patched_real_adapters["sparse_init"] is not None
+    assert patched_real_adapters["reranker_init"] is not None
+    assert patched_real_adapters["store_from_settings"] is not None
+    # dense_dimension은 어댑터가 보고한 값으로 전달돼야 한다 (E5 = 1024)
+    assert patched_real_adapters["store_from_settings"]["dense_dimension"] == 1024
+    # Fake 어댑터는 PoC 경로에서만 사용되어야 한다 — 운영 모드는 Fake 사용 금지
+    assert not isinstance(deps.dense_embedder, FakeDenseEmbedder)
+    assert not isinstance(deps.sparse_embedder, FakeSparseEmbedder)
+    assert not isinstance(deps.reranker, FakeCrossEncoderReranker)
+
+
+def test_build_real_deps_passes_model_names_from_settings(
+    patched_real_adapters: dict[str, Any],
+) -> None:
+    """settings의 dense_embedding_model / cross_encoder_model이 어댑터 생성자에 전달된다."""
+    from app.api.deps import build_real_deps
+
+    settings = _settings()
+    build_real_deps(settings)
+
+    dense_kwargs = patched_real_adapters["dense_init"]
+    reranker_kwargs = patched_real_adapters["reranker_init"]
+    dense_passed = list(dense_kwargs["args"]) + list(dense_kwargs["kwargs"].values())
+    reranker_passed = list(reranker_kwargs["args"]) + list(reranker_kwargs["kwargs"].values())
+    assert settings.dense_embedding_model in dense_passed
+    assert settings.cross_encoder_model in reranker_passed
+
+
+def test_build_real_deps_does_not_ingest_samples(
+    patched_real_adapters: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """운영 모드는 samples 자동 인덱싱을 수행하지 않는다 (매 startup마다 재임베딩 회피)."""
+    from app.api import deps as deps_module
+
+    called = {"ingest": False}
+
+    def _spy_ingest(**kwargs: Any) -> None:
+        called["ingest"] = True
+
+    monkeypatch.setattr(deps_module, "_ingest_samples", _spy_ingest)
+
+    deps_module.build_real_deps(_settings())
+
+    assert called["ingest"] is False
+
+
+def test_build_real_deps_does_not_eagerly_import_sentence_transformers() -> None:
+    """app.api.deps 모듈 import 단계에서 sentence-transformers가 끌어와지지 않는다.
+
+    embedding extra 미설치 환경에서도 PoC 경로(build_poc_deps)는 동작해야 하므로,
+    실 어댑터 모듈은 build_real_deps 함수 본문 내 lazy import여야 한다.
+
+    docstring·주석에 모듈명이 등장하는 것은 허용하므로 AST로 실제 import 노드만
+    검사한다 (문자열 매칭은 false positive 발생).
+    """
+    import ast
+    import inspect
+
+    import app.api.deps as deps_module
+
+    tree = ast.parse(inspect.getsource(deps_module))
+    # 모듈 최상단(함수·클래스 본문 내부 제외) Import / ImportFrom 노드의 대상만 모은다.
+    top_level_imports: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_level_imports.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            top_level_imports.add(module)
+            for alias in node.names:
+                top_level_imports.add(f"{module}.{alias.name}")
+
+    forbidden_at_top = {
+        "sentence_transformers",
+        "fastembed",
+        "app.ingestion.embedder.dense",
+        "app.ingestion.embedder.sparse",
+        "app.query.reranker.cross_encoder",
+    }
+    leaked = top_level_imports & forbidden_at_top
+    assert not leaked, f"실 어댑터/heavy 의존성이 모듈 최상단에서 import됨: {leaked}"
+
+
+# --- build_poc_deps 회귀 (기존 동작 보존 확인) ---
+
+
+def test_build_poc_deps_uses_fake_adapters_unchanged() -> None:
+    """build_poc_deps는 기존대로 Fake 어댑터 + samples 인덱싱을 사용한다 (회귀 보호)."""
+    from app.api.deps import build_poc_deps
+
+    deps = build_poc_deps()
+
+    assert isinstance(deps, QueryGraphDeps)
+    assert isinstance(deps.dense_embedder, FakeDenseEmbedder)
+    assert isinstance(deps.sparse_embedder, FakeSparseEmbedder)
+    assert isinstance(deps.reranker, FakeCrossEncoderReranker)
