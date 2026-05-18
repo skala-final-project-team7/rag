@@ -1151,3 +1151,113 @@ LangGraph 노드 wiring만 남는다.
 - **풀 텍스트 lookup 어댑터** — payload.text_preview 200자 한계를 넘는 단계가 필요해질 때.
 - **examples/demo_search.py 갱신** — BM25-lite → 9-B-2 노드 호출로 시연 데모 교체.
 - **운영 Qdrant 라이브 smoke** — 5-B + 9-B-2 묶어 시각 확인.
+
+
+## 2026-05-18 — feature9-B-3: cross_encoder_rerank 노드 (Top-5 + sources, 9-B 마무리)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 9-B-2가 채운 `candidates` (Top-20)을 받아 9-B-1 Reranker로 (query, passage)
+  관련도 점수를 산출하고, 9-A `select_reranked` 결정론 로직으로 Top-K(5 또는 3) +
+  저신뢰 분기까지 적용해 `top_chunks` 와 `sources` 출처 카드를 채운다. **9-B 시리즈
+  완료** — query 라인 검색·재순위화가 끝까지 동작.
+
+### 변경 사항
+
+신규 `app/query/rerank_node.py` (~125 lines):
+
+- `cross_encoder_rerank(state, *, reranker)` LangGraph 노드. `(state) -> state` 표준
+  시그니처에 reranker만 키워드 주입 (history.py 패턴 정합). 빈 candidates면 즉시
+  short-circuit 후 `top_chunks=[], sources=[]` 초기화.
+- 알고리즘 5-phase:
+    1. **short-circuit**: `candidates` 가 비어 있으면 reranker 호출 없이 빈 결과.
+    2. **query 텍스트 결정**: `history_decision.contextualized_question` 우선, 없거나
+       빈 문자열이면 원 `state.query`.
+    3. **Reranker.score**: 9-B-1 어댑터가 [0.0, 1.0] 점수 산출 (Sigmoid 정규화 정합).
+    4. **9-A select_reranked**: chunk_id → score dict 입력 → RerankResult.top 정렬·축소·
+       저신뢰 분기 결정.
+    5. **top_chunks + sources 매핑**: `result.top` 순서 그대로 Chunk 목록 + Source
+       카드 동시 채움.
+- `_chunk_to_source(chunk, raw_score)` 헬퍼 — `docs/api-spec.md` Source 스키마 정합:
+  - `title` = attachment_filename(첨부) OR page_title(본문)
+  - `score` = `round(raw_score * 100)` — int 0~100 (포맷터 LOW_CONFIDENCE_SCORE=20 정합)
+  - `path` = section_path, `confluence_url` = webui_link
+  - `text_preview` = chunk.text (5-A의 첫 200자 보존)
+  - `download_url` = None (ChunkMetadata에 없음 — 풀 텍스트 lookup 어댑터 추가 시 채움)
+- `is_low_confidence` 신호는 RagState 별도 필드로 두지 않음 — 응답 포맷터(feature11)의
+  `_is_low_confidence(sources)` 가 `Source.score < LOW_CONFIDENCE_SCORE` 임계로 동일
+  판정. 본 노드는 score만 정확히 매핑하면 포맷터가 자동 분기.
+
+### 신규 테스트 `tests/query/test_rerank_node.py` (~335 lines, 16 tests)
+
+외부 의존성 0 — Fake Reranker + 임의 stub Reranker:
+
+- **short-circuit**: 빈 candidates → reranker 호출 0회 검증 (spy), top_chunks·sources
+  비움, 기존 top_chunks 초기화.
+- **선정·정렬**: 단건 정상, 7개 후보에서 Top-5 점수 내림차순 매핑.
+- **Top-3 축소**: 5위 점수 < `NARROW_SCORE_THRESHOLD` (0.30) → Top-3, 정확히 임계값
+  일치하면 Top-5 유지 (strict less than 보장).
+- **저신뢰 분기**: 모든 점수 < `LOW_CONFIDENCE_THRESHOLD` (0.20) → Source.score 모두
+  20 미만. `LOW_CONFIDENCE_THRESHOLD*100 == 20` 임계 정합 단언.
+- **contextualized_question**: 있으면 우선 사용 (spy로 검증), 없거나 빈 문자열이면
+  원 query fallback.
+- **Source 매핑**: 본문/첨부 청크별 title 분기, 모든 필드 매핑(path/space_key/
+  source_type/confluence_url/text_preview/attachment_filename/mime), score 반올림
+  (raw 0.567 → 57), top_chunks-sources 동기 정합.
+- **노드 계약**: in-place mutation (`result is state`).
+
+### 책임 분리 (9-A vs 9-B-1 vs 9-B-2 vs 9-B-3)
+
+- **9-A** `select_reranked` — Top-K 선정·축소·저신뢰 분기 (순수 로직).
+- **9-B-1** `CrossEncoderReranker` — (query, passage) → [0, 1] 점수 (어댑터).
+- **9-B-2** `hybrid_search` 노드 — query 임베딩 + 3 Pool 검색 + 9-A `fuse_and_rank` →
+  candidates.
+- **9-B-3** `cross_encoder_rerank` 노드 ⬅ 본 세션 — candidates + 9-B-1 + 9-A
+  `select_reranked` → top_chunks + sources.
+
+### 9-B 시리즈 완료 + feature11 진입 가능
+
+5-B-1(Embedder) + 5-B-2(Qdrant) + 5-B-3(Cache+Indexer) + 9-A(순수 로직) + 9-B-1
+(Reranker) + 9-B-2(검색 노드) + 9-B-3(재순위화 노드)으로 query 라인의 비-Agent 부품이
+모두 준비됨. 답변 생성기(Agent 담당)·검증 2단계(Agent 담당)는 별도 트랙. feature11
+통합(Query LangGraph 그래프 + FastAPI SSE)이 이제 진입 가능 — Agent 노드는 stub로 두고
+end-to-end 흐름을 먼저 검증.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- format / lint(ruff + mypy) / pytest 통과 예상.
+- 신규 16 tests (test_rerank_node.py). 전체 회귀 0건 + 신규 흡수.
+
+### 비고
+
+- 새 의존성 도입 없음 — 5-B-1/9-A/9-B-1 + schemas만 재사용.
+- Source 스키마 변경 없음 (`docs/api-spec.md` 정합 그대로).
+- 9-B-3 노드는 `cross_encoder_rerank` 단일 함수 + 헬퍼 — 11 통합 시 functools.partial
+  로 wiring하고 그래프 노드로 등록.
+
+### 9-B 시리즈 책임 도식 (마무리)
+
+```
+candidates (5-B-2 / 9-B-2 산출)
+       │
+       ├─► 9-B-1 Reranker.score(query, passages) → list[float] in [0, 1]
+       │
+       ├─► chunk_id ↔ score dict 변환
+       │
+       ├─► 9-A select_reranked → RerankResult(top=[(id, score)], is_low_confidence)
+       │      • Top-5 선정 (동점 chunk_id asc 결정론)
+       │      • 5위 < NARROW(0.30) → Top-3 축소
+       │      • 최고 < LOW(0.20) → 저신뢰 분기 (단, RagState엔 별도 X)
+       │
+       └─► 9-B-3 chunk_to_source 매핑
+              • top_chunks: list[Chunk]
+              • sources: list[Source] (score 0~100, 포맷터 임계 정합)
+```
+
+### 남은 TODO
+
+- **feature11 통합** — Query LangGraph 그래프 조립 + FastAPI SSE. Agent 노드(라우터·
+  생성기·검증 2단계)는 stub → 전달 후 교체. 9-B-2·9-B-3은 functools.partial로 wiring.
+- **5-A payload.token_count 추가** — Chunk 재구성 정합 (작은 refactor).
+- **풀 텍스트 lookup 어댑터** — Source.download_url + payload.text_preview 한계 보완.
+- **examples/demo_search.py 갱신** — BM25-lite → 실 5-B + 9-B 노드 호출로 시연.
+- **운영 Qdrant 라이브 smoke** — 5-B + 9-B-2/3 묶어 시각 확인.
