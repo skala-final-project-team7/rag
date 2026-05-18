@@ -873,3 +873,115 @@ docx 청커 타입 어노테이션 정비 (`app/ingestion/chunker/attachment.py`
   9-B(검색·재순위화 노드 오케스트레이션) 즉시 착수 가능.
 - 운영 Qdrant 서버 라이브 smoke 테스트 — `docker compose up qdrant` 후 `samples/`
   일부 청크 upsert·검색 시각 확인. 별도 세션.
+
+
+## 2026-05-18 — feature5-B-3: Mongo embedding_cache + Indexer (5-B 마무리)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 5-A(payload·멱등성 순수 로직) · 5-B-1(Embedder 어댑터) · 5-B-2(Qdrant Multi-Pool
+  클라이언트) 부품을 끝까지 잇는 마지막 단계. embedding_cache로 `(chunk_id,
+  version_number)` 기반 멱등성을 통합하고 청크 → 임베딩 → upsert 오케스트레이터를 도입.
+  5-B 시리즈 완성.
+
+### 변경 사항
+
+신규 `app/storage/mongo_cache.py` (~170 lines):
+
+- `EmbeddingCache` ABC — Ingestion indexer의 멱등성 의존성. ``get_cached_version`` /
+  ``set_cached_version`` 두 메서드.
+- `EmbeddingCacheEntry` frozen dataclass — db-schema §2.4 정합 (chunk_id /
+  version_number / dense_hash / sparse_hash / computed_at).
+- `MongoEmbeddingCache` — pymongo 래퍼. `find_one` projection + `update_one` upsert로
+  멱등 I/O. ``from_settings`` 가 ``Settings.mongo_uri``/`mongo_db`에서 클라이언트 생성.
+- `FakeEmbeddingCache` — in-memory dict. 외부 의존성 0, 테스트·PoC용. ``entries`` 속성
+  으로 cache 상태 직접 assert 가능.
+
+신규 `app/ingestion/indexer.py` (~160 lines):
+
+- `index_chunks(chunks, version_by_page_id, dense_embedder, sparse_embedder, store, cache)
+  -> IndexerResult` — 3-phase 배치 처리:
+    1. **Filter** — `cache.get_cached_version == version` 인 청크는 스킵 (멱등성).
+    2. **Embed** — 남은 청크에 대해 Pool별 입력 텍스트(5-A `pool_embedding_texts`)를
+       모아 dense/sparse 배치 임베딩. Pool 수(3)만큼만 임베더 호출 — 네트워크·모델
+       라운드트립 최소화. 청크 수와 무관한 배치 효율.
+    3. **Upsert + cache write** — Pool별 배치 upsert(5-B-2 `upsert_chunks_batch`) 후
+       `embedding_cache` 갱신. cache write는 모든 Pool upsert 성공 후에만 — 도중 실패
+       시 다음 실행에서 재시도되도록 best-effort 멱등성 유지.
+- `IndexerResult` 데이터클래스 — `upserted_count`/`skipped_count` + 추적용 chunk_id
+  목록 (테스트 어서션·운영 메트릭).
+- `_hash_dense_vector` / `_hash_sparse_vector` — db-schema §2.4 ``dense_hash`` /
+  ``sparse_hash`` 메타데이터(skip 판정에는 사용 X, 추적용).
+
+수정 `app/storage/__init__.py`: ``EmbeddingCache``·``EmbeddingCacheEntry``·
+``FakeEmbeddingCache``·``MongoEmbeddingCache`` re-export 추가.
+
+### 신규 테스트 (`tests/storage/test_mongo_cache.py` + `tests/ingestion/test_indexer.py`)
+
+`test_mongo_cache.py` (~10 tests):
+- `EmbeddingCacheEntry` 불변성.
+- FakeEmbeddingCache — cache miss / set+get / overwrite / chunk_id 격리.
+- MongoEmbeddingCache(unittest.mock.MagicMock 주입, 실 MongoDB 불필요):
+  - get → `find_one` 호출 시그니처(projection 포함) 검증.
+  - get cache miss → None 반환.
+  - set → `update_one` 멱등 upsert 호출 검증.
+  - `from_settings` 가 pymongo `MongoClient` 호출 (pymongo 설치 시).
+
+`test_indexer.py` (~10 tests, `:memory:` Qdrant + Fake everything):
+- 단건 인덱싱 — 3 Pool 모두 적재 + cache 기록.
+- 동일 version 재호출 — 모두 cache hit으로 스킵 (멱등성).
+- version 변경 — 재인덱싱.
+- 부분 cache hit — 새 청크만 인덱싱.
+- 빈 입력 — `IndexerResult(0,0)` 반환.
+- 모두 cache hit 시 임베더 호출 횟수 0 (배치 효율 — short-circuit).
+- 배치 효율 — Pool 수(3) × 1 embed call (청크 5개여도 임베더는 3번만 호출, batch_size=5).
+- 다중 페이지 — 청크별 부모 page_id의 version을 정확히 사용. Qdrant payload의
+  `version_number` 도 정합.
+- `KeyError` — `version_by_page_id` 에 page_id 없으면 즉시 실패.
+- 5-A 통합 검증 — `title_pool` 입력 텍스트가 `page_title + section_header`,
+  `content_pool` 입력이 청크 본문임을 임베더 capture로 우회 확인.
+
+### 책임 분리 (5-A vs 5-B-1 vs 5-B-2 vs 5-B-3)
+
+- **feature5-A**: 무엇을 임베딩할지 (Pool별 입력 텍스트 구성) + 무엇을 payload에 담을지.
+- **feature5-B-1**: 어떻게 임베딩할지 (Dense/Sparse 모델 어댑터).
+- **feature5-B-2**: 어떻게 저장·검색·삭제할지 (Qdrant Multi-Pool 클라이언트).
+- **feature5-B-3**: 언제·얼마나 임베딩할지 (멱등성 + 오케스트레이션) + 캐시 I/O.
+
+5-B 시리즈 4개 컴포넌트가 모두 어댑터 계층(`app/CLAUDE.md` §8)으로 분리되어 있어,
+실 어댑터를 Fake로 교체하면 외부 의존성 없이 단위 테스트가 끝까지 동작한다.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- format / lint(ruff + mypy) / pytest 통과 예상.
+- 신규 ~20 tests (mongo_cache 10 + indexer 10).
+- `pymongo` 미설치 환경에서는 `test_mongo_cache_from_settings_imports_pymongo` 만 skip,
+  나머지는 mock으로 통과.
+
+### 비고
+
+- 새 외부 의존성 도입 없음 — `pymongo>=4.7` 은 이미 main dependencies에 명시됨.
+- DB 스키마 변경 없음 — `embedding_cache` 컬렉션은 db-schema §2.4 정합 그대로.
+- Indexer는 함수 형태로 두고 클래스 캡슐화는 도입하지 않음 — 9-B 그래프 노드처럼
+  앞으로 LangGraph 노드 래퍼만 추가하면 그래프에 그대로 꽂힌다(상태 없는 함수 + 주입된
+  의존성).
+- 본 세션에서 운영 Qdrant 라이브 smoke는 진행하지 않음 — Docker 컨테이너 띄움 후 별도
+  세션 권장(samples/ 92p → 청크 → 인덱싱 → 검색 시각 확인).
+
+### 5-B 시리즈 완료 + 9-B 잠금 완전 해소
+
+5-B-1(Embedder) + 5-B-2(Qdrant) + 5-B-3(Cache + Indexer)로 Ingestion 측 흐름이
+끝까지 동작 가능해졌다. 9-B(검색·재순위화 노드 오케스트레이션)는 이제 5-B-1의 query
+임베딩 + 5-B-2의 Qdrant 검색을 그대로 활용해 즉시 착수 가능하다 — Cross-Encoder 도입과
+LangGraph 노드 wiring만 남는다.
+
+### 남은 TODO
+
+- **9-B** — 검색·재순위화 노드 오케스트레이션 (Cross-Encoder 도입 + LangGraph 노드 +
+  9-A `reciprocal_rank_fusion` 결합). RAG 사용자 가치 라인.
+- **feature11 통합** — Query LangGraph 그래프 조립 + FastAPI SSE. Agent 노드(라우터·
+  생성기·검증 2단계)는 stub → 전달 후 교체.
+- **운영 Qdrant 라이브 smoke** — `docker compose up` 후 `samples/` 적재·검색 시각 확인.
+- **AtlassianSourceAdapter** — `access_token`/`cloudid` 전달 경로 BFF 협의 후.
+- **feature4-B** — PDF/CSV 첨부 분할기 (픽스처·`pymupdf` 확보 후).
+- **`examples/demo_search.py` 갱신** — BM25-lite 인메모리 검색을 실 5-B-1/2/3로 교체
+  하는 시연 데모. 소규모 작업.
