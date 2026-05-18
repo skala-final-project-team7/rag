@@ -18,6 +18,9 @@
     (E5 / BM25 / Qdrant from_settings / CrossEncoderRerankerImpl). 실 모델
     import는 함수 본문 내 lazy로 처리해 embedding extra 미설치 환경에서도
     PoC 경로(build_poc_deps)와 모듈 import는 동작하도록 한다.
+  - 2026-05-18, 풀 텍스트 lookup 후속 — chunk_lookup 어댑터 wiring 추가. PoC는
+    빈 FakeChunkTextLookup(QueryGraphDeps 기본값), 운영은 MongoChunkTextLookup
+    .from_settings로 chunk_lookup 컬렉션(db-schema §2.5)을 가리키도록 한다.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -110,6 +113,7 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     from app.ingestion.embedder.dense import E5DenseEmbedder
     from app.ingestion.embedder.sparse import BM25SparseEmbedder
     from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
+    from app.storage.chunk_lookup import MongoChunkTextLookup
 
     dense = E5DenseEmbedder(settings.dense_embedding_model)
     sparse = BM25SparseEmbedder()
@@ -117,12 +121,16 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     store = QdrantPoolStore.from_settings(settings, dense_dimension=dense.dimension)
     store.bootstrap_collections()
     reranker = CrossEncoderRerankerImpl(settings.cross_encoder_model)
+    # chunk_lookup은 운영 모드에서 MongoDB `chunk_lookup` 컬렉션을 가리킨다 (db-schema §2.5).
+    # 컬렉션이 비어 있어도 fetch가 None을 반환하므로 download_url=None으로 안전 fallback.
+    chunk_lookup = MongoChunkTextLookup.from_settings(settings)
 
     return QueryGraphDeps(
         dense_embedder=dense,
         sparse_embedder=sparse,
         store=store,
         reranker=reranker,
+        chunk_lookup=chunk_lookup,
     )
 
 

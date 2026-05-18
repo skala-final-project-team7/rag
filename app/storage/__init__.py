@@ -8,11 +8,20 @@
 - ``mongo_cache.py`` — ``EmbeddingCache`` ABC + ``MongoEmbeddingCache`` +
   ``FakeEmbeddingCache``. db-schema §2.4의 ``embedding_cache`` 컬렉션 어댑터.
   Ingestion indexer의 ``(chunk_id, version_number)`` 기반 멱등성을 강제한다.
+- ``chunk_lookup.py`` — ``ChunkTextLookup`` ABC + ``MongoChunkTextLookup`` +
+  ``FakeChunkTextLookup`` + ``ChunkLookupRecord``. db-schema §2.5의 ``chunk_lookup``
+  컬렉션 어댑터. 청크 풀 텍스트·첨부 download_url을 chunk_id로 조회한다.
 
 Ingestion·Query 파이프라인은 본 패키지의 추상화만 통해 저장소에 접근하며, 모델·라이브러리
 종속을 격리한다.
 """
 
+from app.storage.chunk_lookup import (
+    ChunkLookupRecord,
+    ChunkTextLookup,
+    FakeChunkTextLookup,
+    MongoChunkTextLookup,
+)
 from app.storage.mongo_cache import (
     EmbeddingCache,
     EmbeddingCacheEntry,
@@ -22,9 +31,13 @@ from app.storage.mongo_cache import (
 from app.storage.qdrant_client import QdrantPoolStore, SearchHit
 
 __all__ = [
+    "ChunkLookupRecord",
+    "ChunkTextLookup",
     "EmbeddingCache",
     "EmbeddingCacheEntry",
+    "FakeChunkTextLookup",
     "FakeEmbeddingCache",
+    "MongoChunkTextLookup",
     "MongoEmbeddingCache",
     "QdrantPoolStore",
     "SearchHit",

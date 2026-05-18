@@ -124,6 +124,23 @@ payload 필드로 복원한다.
 `chunk_id`, `version_number`, `dense_hash`, `sparse_hash`, `computed_at`.
 동일 `chunk_id` + `version_number`는 재임베딩·재upsert 스킵.
 
+### 2.5 `chunk_lookup` (청크 풀 텍스트·첨부 download_url)
+
+청크 단위 풀 텍스트와 첨부 다운로드 URL을 `chunk_id` 키로 조회하는 컬렉션. Qdrant
+payload의 `text_preview`(첫 200자) 한계를 보완하고, `Source.download_url`에 첨부
+청크의 사용자 노출용 URL을 채우기 위해 사용한다 (`app/storage/chunk_lookup.py`).
+
+| 필드 | 타입 | 설명 |
+|---|---|---|
+| `chunk_id` | string (PK / unique index) | 결정론적 청크 식별자 (40자 SHA1 hex) |
+| `text` | string | 청크 풀 텍스트. 답변 생성기·검증기가 200자 한계를 넘는 컨텍스트가 필요할 때 조회 |
+| `download_url` | string \| null | 첨부 청크일 때만 채워지는 사용자 노출용 URL. 본문 청크는 null |
+| `updated_at` | datetime | 적재·갱신 시각 |
+
+**인덱스.** `chunk_id` unique 인덱스 1개로 O(1) 룩업. 본 컬렉션 적재(인덱싱 단계에서
+`chunk_lookup` upsert)는 별도 후속 milestone에서 indexer를 확장한다 — 본 commit은
+어댑터 인터페이스와 운영 wiring만 추가.
+
 ---
 
 ## 3. MySQL

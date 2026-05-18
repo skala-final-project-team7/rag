@@ -12,6 +12,9 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature11 통합 — QueryGraphDeps + build_query_graph +
     run_query (Phase 1: 그래프 조립). FastAPI SSE 라우트는 별도 세션(Phase 2).
+  - 2026-05-18, 풀 텍스트 lookup 후속 — QueryGraphDeps.chunk_lookup 필드 추가
+    (기본 FakeChunkTextLookup). rerank 노드 wiring에 lookup 주입해 첨부 청크의
+    Source.download_url을 채우도록 확장.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, LangGraph 0.2.x
@@ -50,6 +53,7 @@ from app.query.search_node import hybrid_search
 from app.schemas.enums import Intent, LlmModel
 from app.schemas.rag_state import RagState
 from app.schemas.response import QueryResponse
+from app.storage.chunk_lookup import ChunkTextLookup, FakeChunkTextLookup
 from app.storage.qdrant_client import QdrantPoolStore
 
 # history-manager-agent의 LLM provider — runtime 인터페이스 의존성 회피를 위해 Any.
@@ -77,6 +81,9 @@ class QueryGraphDeps:
     sparse_embedder: SparseEmbedder
     store: QdrantPoolStore
     reranker: CrossEncoderReranker
+    # Chunk 풀 텍스트·첨부 download_url lookup (풀 텍스트 lookup 후속, 2026-05-18).
+    # 기본값은 빈 FakeChunkTextLookup — 미주입 환경에서도 안전 동작 (download_url=None).
+    chunk_lookup: ChunkTextLookup = field(default_factory=FakeChunkTextLookup)
     # 멀티턴 히스토리 관리자 LLM provider — None이면 manage_history가
     # FakeHistoryLLMProvider 기본을 사용한다.
     history_provider: HistoryProvider | None = None
@@ -118,7 +125,10 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
         ),
     )
     builder.add_node("empty_retrieval", empty_retrieval_node)
-    builder.add_node("rerank", partial(cross_encoder_rerank, reranker=deps.reranker))
+    builder.add_node(
+        "rerank",
+        partial(cross_encoder_rerank, reranker=deps.reranker, chunk_lookup=deps.chunk_lookup),
+    )
     builder.add_node("generate", deps.generator_node)
     builder.add_node(
         "verify",
