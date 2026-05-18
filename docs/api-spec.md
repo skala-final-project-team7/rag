@@ -33,6 +33,12 @@ API 변경 시 이 문서를 함께 수정한다(루트 `CLAUDE.md` 규칙).
 4. `meta` 이벤트 (1회) — `intent`, `used_llm`, `feedback_enabled`, `latency_ms`
 5. `done` 이벤트
 
+> **PoC 제약** — 답변 토큰 스트리밍은 답변 생성기 Agent 통합 후 활성화된다.
+> feature11 통합 Phase 2 구현(`app/api/routes.py`)은 `token` 이벤트를 1회만 송신해
+> 전체 답변을 한 번에 전달하며, 나머지 이벤트(sources / verification / meta / done)
+> 시퀀스·계약은 동일하게 유지한다. Agent 코드 전달 시 `token` 다중 송신만 확장하면
+> BFF/프론트 호환성 유지.
+
 ### 응답 객체 스키마 (완성형)
 
 ```jsonc

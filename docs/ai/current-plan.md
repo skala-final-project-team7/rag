@@ -426,7 +426,12 @@
 작업 항목:
 
 - [x] (본 담당자) 응답 포맷터 [Pipeline]
-- [ ] Query LangGraph 조립 + FastAPI 라우트(SSE) — Agent 노드 stub → 전달 후 교체
+- [x] Query LangGraph 조립 + Agent stub 3종 — Phase 1 완료 (2026-05-18,
+  `app/pipeline/{stubs,nodes,query_graph}.py`. Agent 코드 전달 시 `QueryGraphDeps`
+  3개 필드만 교체)
+- [x] FastAPI 라우트(SSE) — Phase 2 완료 (2026-05-18,
+  `app/api/{main,routes,errors,deps}.py`. PoC: `:memory:` Qdrant + Fake +
+  samples 자동 인덱싱. token 1회 송신, Agent 통합 시 다중 송신으로 확장)
 
 ---
 
