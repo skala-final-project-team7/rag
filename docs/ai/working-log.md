@@ -1692,3 +1692,81 @@ Pipeline 단계(검색·재순위화·검증 1단계·포맷터)·HTTP 계층(SS
 - 본 fix는 단일 함수 안의 문자열 4곳 + 다이어그램 + 회귀 테스트 1건만 — 매우
   국소적 commit. `chore` 보다는 `fix` 로 표기 권장.
 - **운영 Qdrant 라이브 smoke** — 5-B + 9-B-2/3 묶어 시각 확인.
+
+
+## 2026-05-18 — 5-A 후속: payload.token_count 동봉 + Chunk 재구성 정합
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: feature9-B-2 (`hybrid_search` 노드) 작성 당시 `_chunk_from_search_hit`
+  의 ``token_count`` 는 payload에 필드가 없어 0으로 하드코딩됐다. working-log
+  feature9-B-2 섹션에 명시된 follow-up으로 분리해 두었던 항목. ChunkMetadata는
+  ``token_count`` 를 필수 필드로 정의하므로 인덱싱 전(청커 산출 값)과 재구성 후
+  값이 일치해야 의미가 있다 — Cross-Encoder reranker(9-B-3) 이후 답변 생성기·
+  검증기·포맷터까지 동일 메타를 보도록 정합을 회복한다.
+
+### 변경 사항
+
+수정 `app/ingestion/vector_store.py`:
+
+- `build_point_payload` 에 ``"token_count": metadata.token_count`` 1줄 추가
+  (additive — `extracted_format` 아래, `text_preview` 위).
+- 모듈 docstring 변경 이력에 `2026-05-18, 5-A 후속` 한 항목 추가.
+
+수정 `app/query/search_node.py`:
+
+- `_chunk_from_search_hit` 의 ``token_count=0`` → ``token_count=int(payload.get(
+  "token_count") or 0)``. 신규 인덱스는 payload에서 그대로 복원, legacy 인덱스
+  (payload에 필드 없음)는 0 fallback으로 후방 호환.
+- 함수 docstring 갱신 — "0으로 두고 follow-up" 문장 제거, payload에서 복원하는
+  근거(db-schema §1.2) 명시.
+- 모듈 docstring 변경 이력에 `2026-05-18, 5-A 후속` 항목 추가.
+
+수정 `docs/db-schema.md` §1.2:
+
+- payload 스키마 테이블에 `token_count integer` 행 추가 (`extracted_format` 아래,
+  `text_preview` 위). 설명: `ChunkMetadata.token_count` 그대로 복원해 답변 생성기/
+  검증 단계가 동일 메타를 보도록 한다.
+
+수정 `tests/ingestion/test_vector_store.py`:
+
+- 신규 회귀 보호 테스트 `test_build_point_payload_includes_token_count` 1건 추가
+  — 픽스처 `token_count=120` → payload 그대로 동봉. 다음에 payload 스키마에서
+  필드를 누락하면 즉시 실패한다.
+
+수정 `tests/query/test_search_node.py`:
+
+- 기존 `test_hybrid_search_returns_chunks_with_reconstructed_metadata` 단언
+  ``== 0`` → ``== 120`` 로 갱신 + 주석 갱신 (5-A 후속 사유 명시). 인덱싱한
+  청크의 token_count(120)가 재구성 후 보존됨을 검증.
+
+### 책임 분리 (Pipeline + Storage 영역만)
+
+- 본 commit은 본 담당자 영역 4개 파일 + db-schema 문서 1개. Agent 영역 / API 표면 /
+  app/schemas / app/storage 어댑터 모두 무변경. `app/CLAUDE.md` "담당 범위" 절대
+  규칙 정합.
+
+### 후방 호환성
+
+- 신규 인덱싱은 token_count를 payload에 동봉.
+- legacy 인덱스(token_count 필드 없음)에서 검색해도 `_chunk_from_search_hit` 가
+  ``payload.get("token_count") or 0`` 로 0 fallback — 정상 동작. 운영 환경 migration
+  무필요 (자연스럽게 다음 재색인 시 채워진다).
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- 샌드박스 ruff 0.15.13으로 format `--check` + check 통과 (105 files already
+  formatted, All checks passed).
+- 본 세션 추가/수정 파일 5건 모두 ruff 통과.
+- pytest는 회사 Mac에서 `./scripts/verify.sh` 실행 시 통과 예상 — 신규 1건
+  (`test_build_point_payload_includes_token_count`) + 갱신 1건
+  (`test_hybrid_search_returns_chunks_with_reconstructed_metadata` 단언 값) +
+  기존 회귀 0건. 샌드박스 Python 3.10 한계로 직접 pytest 미실행 (이전 feature
+  패턴 동일).
+
+### 비고
+
+- 5개 파일, +23 -5 lines (`git diff --stat`). 매우 국소적 commit.
+- `db-schema.md` 변경 시 3곳 정합(payload 스키마 + `build_point_payload` +
+  `_chunk_from_search_hit`)을 본 commit 하나에서 모두 처리. 다음 follow-up 후보
+  — 풀 텍스트 lookup 어댑터(Source.text_preview 200자 한계 보완), `build_real_deps`
+  운영 어댑터 부트스트랩, Agent 코드 통합(`QueryGraphDeps` 3개 필드 교체).
