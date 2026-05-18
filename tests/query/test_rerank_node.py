@@ -17,7 +17,6 @@ from app.schemas.chunk import Chunk, ChunkMetadata
 from app.schemas.enums import ExtractedFormat, SourceType
 from app.schemas.rag_state import HistoryDecision, RagState
 
-
 # --- 픽스처·헬퍼 ---
 
 
@@ -180,9 +179,7 @@ def test_no_narrow_when_fifth_score_at_or_above_threshold() -> None:
     ]
     state = _state(candidates=chunks)
     # 5위 == NARROW_SCORE_THRESHOLD 정확히 — 축소 안 됨 (strict less than)
-    reranker = _OrderedScoreReranker(
-        scores=[0.9, 0.8, 0.7, 0.6, NARROW_SCORE_THRESHOLD, 0.0]
-    )
+    reranker = _OrderedScoreReranker(scores=[0.9, 0.8, 0.7, 0.6, NARROW_SCORE_THRESHOLD, 0.0])
     result = cross_encoder_rerank(state, reranker=reranker)
     assert len(result.top_chunks) == 5
 
