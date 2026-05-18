@@ -16,17 +16,22 @@
 
 구현 상태:
 - attachment_analyzer.py  AttachmentAnalysisResult + analyze_attachment [feature6 Phase 1]
+- sync.py                 ReconciliationResult + reconcile_deletions [feature6 Phase 3]
 - chunker/                feature3-A·3-B·4-A 완료 (PDF/CSV = feature4-B 대기)
 - embedding.py / vector_store.py / indexer.py  feature5-A·5-B 완료
-- document_analyzer.py / sync.py / jobs.py  미구현 (계획)
+- document_analyzer.py    미구현 (계획 — Agent 담당자 몫)
+- jobs.py                 app/storage/jobs.py 로 이전 (외부 저장소 어댑터 일관성, feature6 Phase 2)
 """
 
 from app.ingestion.attachment_analyzer import (
     AttachmentAnalysisResult,
     analyze_attachment,
 )
+from app.ingestion.sync import ReconciliationResult, reconcile_deletions
 
 __all__ = [
     "AttachmentAnalysisResult",
+    "ReconciliationResult",
     "analyze_attachment",
+    "reconcile_deletions",
 ]
