@@ -672,3 +672,92 @@ docx 청커 타입 어노테이션 정비 (`app/ingestion/chunker/attachment.py`
 
 - feature4-B(PDF/CSV 청킹) / feature5-B(실제 임베딩·Qdrant) / feature6(Ingestion 그래프) /
   feature9-B / feature11 통합 / AtlassianSourceAdapter — 본 환경 셋업 완료로 이어서 착수 가능.
+
+
+## 2026-05-18 — feature5-B-1: Dense/Sparse Embedder 어댑터 (ABC + Fake + 실 어댑터)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: feature5-A(임베딩 입력·payload·멱등성 순수 로직, 외부 의존성 0)와 db-schema §1.1
+  Qdrant Multi-Pool 명세(dense 1024d Cosine + sparse-bm25 idf) 사이를 잇는 "어떻게
+  임베딩할지" 어댑터 계층을 구현. feature5-B를 3개 마일스톤(5-B-1 Embedder / 5-B-2
+  Qdrant / 5-B-3 Cache+Indexer)으로 분할한 첫 단계.
+- 분할 결정: 9-B(검색·재순위화 노드 오케스트레이션)의 query 임베딩 의존을 가장 적은
+  코드로 해소하는 단위. 외부 서비스 연결 없이 단위 테스트 완비 가능 — 위험 최소.
+
+### 변경 사항
+
+신규 패키지 `app/ingestion/embedder/`:
+
+- `base.py` (~180 lines)
+  - `DenseEmbedder`·`SparseEmbedder` ABC — 기존 `DocumentSourceAdapter` 패턴 정합
+    (ABC + abstractmethod, Protocol 미사용).
+  - `SparseVector` frozen dataclass(slots=True) — Qdrant Named Vector(sparse-bm25)
+    upsert 형식과 정합. `__post_init__`에서 indices/values 길이 동일 강제.
+  - `FakeDenseEmbedder` / `FakeSparseEmbedder` — 결정론적 sha256 해시 기반 구현.
+    실 모델 다운로드(e5-large 약 2.24 GB) 없이 단위 테스트가 통과하도록 한다.
+  - 외부 의존성 0 — 본 모듈만으로 import·테스트 가능.
+- `dense.py` (~90 lines)
+  - `E5DenseEmbedder` — sentence-transformers `SentenceTransformer` 래퍼.
+  - e5 모델 카드 명세 정합: `passage: ` / `query: ` 프리픽스를 어댑터가 강제.
+  - `normalize_embeddings=True`로 L2 정규화 강제 — Cosine 검색 정합
+    (db-schema.md §1.1).
+  - 빈 입력에서는 모델 호출 회피 (불필요한 비용 차단).
+- `sparse.py` (~85 lines)
+  - `BM25SparseEmbedder` — fastembed `SparseTextEmbedding("Qdrant/bm25")` 래퍼.
+  - `query_embed` 메서드가 있으면 사용, 없으면 `embed`로 fallback (fastembed 버전
+    호환).
+  - 모델 출력(SparseEmbedding, numpy array)을 `SparseVector(tuple[int]/tuple[float])`
+    로 변환해 호출자 numpy 의존을 제거.
+  - idf modifier 적용은 Qdrant Collection 설정(`sparse_vectors.modifier="idf"`)이
+    담당 — 본 어댑터는 모델 산출값을 그대로 전달.
+- `__init__.py` (~35 lines)
+  - Protocol/Fake만 re-export. 실 어댑터(`E5DenseEmbedder`/`BM25SparseEmbedder`)는
+    명시적 import 요구 — 의존성 부재 환경(`embedding` extra 미설치)에서도 base는
+    import 가능.
+
+신규 테스트 `tests/ingestion/embedder/` (총 33 unit tests):
+
+- `test_base.py` — 20 tests. SparseVector 불변/길이/empty, FakeDense·Sparse의
+  결정론·정규화(L2 norm = 1.0)·shape·batch·passage/query 분기·빈 입력.
+- `test_dense.py` — 7 tests. `pytest.importorskip("sentence_transformers")`로 미설치
+  환경 스킵. stub SentenceTransformer로 모델 다운로드 회피, 프리픽스·정규화·배치
+  사이즈·dimension·빈 입력 단축 확인.
+- `test_sparse.py` — 6 tests. `pytest.importorskip("fastembed")`로 미설치 환경 스킵.
+  stub SparseTextEmbedding으로 모델 다운로드 회피, query_embed 우선/fallback 분기,
+  numpy→Python 원시 타입 변환, 형식 오류 거부.
+
+### 책임 분리 (5-A vs 5-B-1)
+
+- feature5-A `app/ingestion/embedding.py::pool_embedding_texts` → **무엇을** 임베딩할지
+  (Pool별 입력 텍스트 구성, 순수 로직).
+- feature5-B-1 `app/ingestion/embedder/` → **어떻게** 임베딩할지 (모델 호출·프리픽스·
+  정규화·형식 변환). app/CLAUDE.md §8 어댑터/클라이언트 계층 분리 원칙 준수.
+
+### 검증 결과 (회사 Mac 기준)
+
+- format / lint(ruff + mypy) / pytest 통과. 회귀 없음, 신규 33 unit tests 추가.
+- `embedding` extra 미설치 환경에서는 test_dense·test_sparse가 importorskip로 스킵됨
+  (base 20개만 통과). 설치 환경에서는 stub으로 모델 다운로드 없이 33개 모두 통과.
+- 시크릿/토큰 grep 결과 0건 — BM25 토크나이저의 `tokens`/`token` 변수만 매칭됨(무관).
+
+### 비고
+
+- 기존 패턴 확인 후 채택: `app/adapters/base.py`의 ABC + abstractmethod 스타일을
+  그대로 따라감 (Protocol + runtime_checkable 대안은 codebase 부재로 도입 보류).
+- `pyproject.toml` 변경 없음 — `[embedding]` extra에 `sentence-transformers>=3.0`,
+  `fastembed>=0.3`, `kiwipiepy>=0.17`이 이미 명세돼 있음. 실 어댑터 사용 시 사용자가
+  `pip install -e ".[embedding]"`로 설치한다.
+- `docker-compose.yml` / `.env.example` 변경 없음 — 5-B-2(Qdrant 컨테이너 연결)에서
+  필요.
+- DB 스키마 변경 없음 — Qdrant Collection 생성·payload 인덱스 부착은 5-B-2 책임.
+
+### 남은 TODO
+
+- **5-B-2 (다음 단계)** — `app/storage/qdrant_client.py`: Qdrant Multi-Pool Collection
+  생성(dense 1024d Cosine + sparse-bm25 idf, 3 Pool) + payload 인덱스(`allowed_groups`/
+  `allowed_users`/`space_key`/`labels`/`doc_type`/`page_id`/`attachment_id`/`source_type`/
+  `last_modified`) + Named Vector upsert/search. `:memory:` Qdrant로 통합 테스트.
+- **5-B-3** — `app/storage/mongo_cache.py` + `app/ingestion/indexer.py`: embedding_cache
+  I/O + 청크 인덱싱 오케스트레이터(멱등성 통합).
+- **9-B 의존 해소 진척**: 5-B-1 완료로 query 임베딩 부분 잠금 해제. 5-B-2 후 Qdrant
+  검색까지 잠금 해제되면 9-B 착수 가능.
