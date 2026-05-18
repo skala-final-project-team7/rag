@@ -226,8 +226,8 @@
 
 - [x] (본 담당자) 첨부 분석기 [Pipeline] — Phase 1 완료 (2026-05-18, `4c6c2dc`)
 - [x] (본 담당자) `ingestion_jobs` 기록 헬퍼 [Storage] — Phase 2 완료 (2026-05-18, `152d2e9`)
-- [x] (본 담당자) 삭제 동기화 [Pipeline] — Phase 3 완료 (2026-05-18)
-- [ ] (본 담당자) Ingestion 그래프 조립 — Phase 4 (Phase 1~3 + Agent 노드 stub 종합)
+- [x] (본 담당자) 삭제 동기화 [Pipeline] — Phase 3 완료 (2026-05-18, `8ceec58`)
+- [x] (본 담당자) Ingestion 그래프 조립 — Phase 4 완료 (2026-05-18) — feature6 종결
 - [ ] (Agent 담당자) 문서 분석기 [Agent]
 
 ## Milestone C — Query 파이프라인

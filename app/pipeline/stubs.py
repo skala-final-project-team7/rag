@@ -10,6 +10,9 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature11 통합 — router_stub / generator_stub /
     verify_llm_evaluator_stub. 모두 (state) -> state 또는 (kw) -> verifications 시그니처.
+  - 2026-05-18, feature6 Phase 4 — document_analyzer_stub 추가. Ingestion 그래프의
+    Agent 노드(문서 분석기) 자리에 들어가며 설계서 §8 fallback 정합으로 doc_type="operation"
+    기본값을 채운다. Agent 담당자 코드 전달 시 교체.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -27,8 +30,8 @@
 from app.ingestion.vector_store import CONTENT_POOL, LABEL_POOL, TITLE_POOL
 from app.query.verifier import SentenceCheck
 from app.schemas.chunk import Chunk
-from app.schemas.enums import Intent, LlmModel, VerificationStatus
-from app.schemas.rag_state import RagState
+from app.schemas.enums import DocType, Intent, LlmModel, VerificationStatus
+from app.schemas.rag_state import IngestionState, RagState
 from app.schemas.response import Verification
 
 # 의도별 Pool 가중치 — rag-pipeline-design.md §6 4.5.
@@ -114,3 +117,24 @@ def verify_llm_evaluator_stub(
         )
         for check in suspicious_sentences
     ]
+
+
+def document_analyzer_stub(state: IngestionState) -> IngestionState:
+    """문서 분석기 [Agent] fake — 설계서 §8 fallback 정합으로 doc_type 기본값 채움.
+
+    실 문서 분석기(`docs/rag-pipeline-design.md` §3.3, Agent 담당자 영역)가 GPT-4o-mini
+    Function Calling 으로 스페이스별 doc_type 을 1회 판별·캐싱하는 자리에, 본 stub 은
+    LLM 실패 / confidence < 0.6 fallback 정합으로 ``doc_type = "operation"`` 을 채운다
+    (chunking-strategy.md §6 + design §8).
+
+    Args:
+        state: Ingestion 그래프 상태. ``page`` 만 채워져 진입한다.
+
+    Returns:
+        ``doc_type`` 이 ``"operation"`` 으로 채워진 상태. ``IngestionState.doc_type`` 은
+        ``DocType | AttachmentType | None`` 의미상 본문 doc_type 자리이므로 본 stub 은
+        본문에만 적용된다 (첨부의 attachment_type 은 분석기가 아니라 ``analyze_attachment``
+        가 결정).
+    """
+    state.doc_type = DocType.OPERATION.value
+    return state
