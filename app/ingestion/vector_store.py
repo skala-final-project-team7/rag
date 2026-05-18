@@ -10,6 +10,10 @@
   - 2026-05-15, 최초 작성, feature5-A — Pool 이름 상수 + build_point_payload (순수 로직)
   - 2026-05-17, 코드 리뷰 후속(P2) — doc_type이 enum이 된 후에도 동일 JSON을 직렬화하도록
     .value 변환 명시 (ChunkMetadata.doc_type을 DocType|AttachmentType으로 강제한 결과 반영)
+  - 2026-05-18, feature5-B-2 발견 보정 — Qdrant Point ID는 UUID/uint64만 받으므로
+    SHA1 hex(40자) chunk_id를 Point ID로 직접 사용 불가. 어댑터(app/storage/qdrant_client.py)
+    가 uuid5(NAMESPACE_OID, chunk_id)로 매핑하고, 원본 chunk_id는 payload에 보존하도록
+    payload에 chunk_id 필드 1개 추가 (additive). db-schema §1.2·§1.3 동시 갱신.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -35,8 +39,11 @@ TEXT_PREVIEW_LIMIT = 200
 def build_point_payload(chunk: Chunk, version_number: int) -> dict[str, Any]:
     """Chunk를 Qdrant Point payload로 변환한다 (db-schema.md §1.2).
 
-    세 Pool(title/content/label)이 동일한 payload 스키마를 공유하며, Point id는
-    chunk_id다. `version_number`는 페이지 단위 값이라 ChunkMetadata에 없으므로 부모
+    세 Pool(title/content/label)이 동일한 payload 스키마를 공유한다. Qdrant Point ID는
+    UUID 또는 unsigned int만 허용하므로, 어댑터(``app/storage/qdrant_client.py``)에서
+    ``uuid5(NAMESPACE_OID, chunk_id)`` 로 SHA1 hex chunk_id를 결정론 UUID로 매핑한다.
+    원본 chunk_id는 검색 결과에서 복원할 수 있도록 payload에 함께 저장한다.
+    ``version_number`` 는 페이지 단위 값이라 ChunkMetadata에 없으므로 부모
     PageObject에서 받아 별도 인자로 주입한다 — 재색인 시 멱등성 검사용.
 
     Args:
@@ -49,6 +56,7 @@ def build_point_payload(chunk: Chunk, version_number: int) -> dict[str, Any]:
     """
     metadata = chunk.metadata
     return {
+        "chunk_id": metadata.chunk_id,
         "page_id": metadata.page_id,
         "page_title": metadata.page_title,
         "section_header": metadata.section_header,

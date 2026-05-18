@@ -78,6 +78,14 @@ def test_build_point_payload_common_fields() -> None:
     assert payload["last_modified"] == _LAST_MODIFIED.isoformat()
 
 
+def test_build_point_payload_includes_chunk_id() -> None:
+    # Qdrant Point ID는 UUID/uint64만 받으므로 SHA1 hex chunk_id를 직접 Point ID로 쓸 수
+    # 없다. 어댑터가 uuid5로 매핑하고 원본 chunk_id는 payload에 보존한다 — 검색 결과에서
+    # SearchHit.chunk_id로 복원하기 위해 payload 필드로 동봉된다 (db-schema.md §1.2).
+    payload = build_point_payload(_page_chunk(), version_number=1)
+    assert payload["chunk_id"] == "chunk-abc123"
+
+
 def test_build_point_payload_injects_version_number() -> None:
     # version_number는 ChunkMetadata에 없어 부모 PageObject에서 별도 인자로 주입된다
     assert build_point_payload(_page_chunk(), version_number=7)["version_number"] == 7
