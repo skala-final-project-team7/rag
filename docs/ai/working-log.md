@@ -1260,4 +1260,435 @@ candidates (5-B-2 / 9-B-2 산출)
 - **5-A payload.token_count 추가** — Chunk 재구성 정합 (작은 refactor).
 - **풀 텍스트 lookup 어댑터** — Source.download_url + payload.text_preview 한계 보완.
 - **examples/demo_search.py 갱신** — BM25-lite → 실 5-B + 9-B 노드 호출로 시연.
+
+
+## 2026-05-18 — feature11 통합 Phase 1: Query LangGraph 그래프 조립
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 범위 결정: feature11 통합을 두 단계로 분할 — **Phase 1(본 세션)**: LangGraph 그래프
+  조립 + Agent stub 3종 + end-to-end 통합 테스트. **Phase 2(후속 세션)**: FastAPI
+  SSE 라우트 + httpx in-process 테스트. 1 change-set = 1 session 원칙(루트
+  `CLAUDE.md` "세션 운영 원칙") 정합 + 디버깅 단순성 우선.
+- 배경: 5-B 시리즈(임베더·Qdrant·캐시·Indexer) + 9-B 시리즈(Reranker·검색 노드·
+  재순위화 노드)로 Pipeline 노드가 모두 준비됨. Agent 노드(라우터·답변 생성기·
+  검증 2단계 LLM 평가자)는 별도 담당자 영역 → fake로 단일 모듈에 격리해 교체
+  지점을 한 곳에 모은다.
+
+### 변경 사항
+
+신규 `app/pipeline/stubs.py` (~115 lines, Agent stub 3종):
+
+- `router_stub(state) -> state` — 질의 라우터 [Agent] fake. rag-pipeline-design.md
+  §8 "라우터 LLM 타임아웃 fallback" 정합으로 다음을 채운다:
+    - `intent = OPERATION_GUIDE`
+    - `rewritten_queries = [state.query]` (원본 쿼리 단일)
+    - `pool_weights = {title:0.2, content:0.7, label:0.1}` (운영가이드 가중치)
+    - `target_llm = GPT_4O`
+    - `metadata_filters = None`
+- `generator_stub(state) -> state` — 답변 생성기 [Agent] fake. `top_chunks[0]`
+  존재 시 `[#1] {page_title or attachment_filename} 관련 정보를 다음과 같이
+  안내합니다.` 형태의 검증 가능한 stub 답변. `used_llm = target_llm or GPT_4O`.
+- `verify_llm_evaluator_stub(*, answer, top_chunks, suspicious_sentences) ->
+  list[Verification]` — 검증 2단계 [Agent] fake. 보수적으로 모두 SUPPORTED.
+
+신규 `app/pipeline/nodes.py` (~115 lines, Pipeline 노드 래퍼):
+
+- `empty_retrieval_node(state) -> state` — api-spec.md "표준 분기 응답"
+  RETRIEVAL_EMPTY 처리. 답변을 "권한 범위 내에서 참고할 수 있는 문서를 찾지
+  못했습니다." 표준 메시지로 채우고 sources/verification/top_chunks를 비운다.
+  라우터 intent 보존(없으면 OPERATION_GUIDE fallback), `used_llm`은
+  `target_llm or GPT_4O_MINI` (LLM 미호출이지만 응답 객체 필드 채움).
+- `verify_pipeline_node(state, *, llm_evaluator) -> state` — 답변 검증 1+2단계
+  병합. feature10-Pipeline의 `verify_answer_rules` 호출 → `passed_verifications`
+  PASS 모음 + `suspicious_sentences` 있을 때만 2단계 LLM 평가자 호출 →
+  sentence_id 정렬 후 `state.verification` 으로 병합. 답변 None/빈 문자열이면
+  안전하게 verification 비움.
+- `after_search_branch(state) -> str` — LangGraph conditional edges 분기 키.
+  `candidates` 비어있으면 `"empty"`, 그 외 `"rerank"`.
+- 상수 `RETRIEVAL_EMPTY_ANSWER` — RETRIEVAL_EMPTY 표준 메시지.
+
+신규 `app/pipeline/query_graph.py` (~155 lines, 그래프 조립 + 호출 래퍼):
+
+- `QueryGraphDeps` dataclass — 그래프 의존성 묶음.
+    - Pipeline/Storage: `dense_embedder` / `sparse_embedder` / `store` /
+      `reranker` / `history_provider`(None 가능).
+    - Agent: `router_node` / `generator_node` / `verify_llm_evaluator` — 기본값은
+      stubs.py의 3종. Agent 코드 전달 시 이 3곳만 교체.
+- `build_query_graph(deps) -> CompiledGraph` — LangGraph StateGraph 빌드.
+  엣지 구조:
+  ```
+  history → router → hybrid_search
+                       ├─(0건)─► empty_retrieval ─► END
+                       └─(후보 있음)─► rerank → generate → verify ─► END
+  ```
+  외부 의존성은 `functools.partial`로 노드 시그니처 `(state) -> state`에 wiring.
+- `run_query(state, *, graph, formatter=format_response) -> QueryResponse` —
+  그래프 호출 래퍼. `time.perf_counter_ns()` 로 latency_ms 측정 → graph.invoke →
+  `RagState.model_validate(result_dict)` 로 재구성(LangGraph 0.2.x가 Pydantic
+  state를 dict로 반환) → 포맷터 호출 → QueryResponse 산출. intent/used_llm
+  fallback 처리.
+
+수정 `app/pipeline/__init__.py` — 모듈 docstring 갱신 + `RETRIEVAL_EMPTY_ANSWER` /
+`QueryGraphDeps` / `build_query_graph` / `run_query` / `router_stub` /
+`generator_stub` / `verify_llm_evaluator_stub` / 노드 3종 re-export.
+
+### 신규 테스트
+
+`tests/pipeline/test_stubs.py` (~155 lines, 9 unit tests):
+- router_stub: intent / pool_weights / target_llm fallback 정합, history_decision
+  보존, in-place mutation.
+- generator_stub: [#1] 인용 마커 포함 답변, target_llm 정합, 빈 top_chunks 방어.
+- verify_llm_evaluator_stub: suspicious → SUPPORTED 매핑, 빈 입력.
+
+`tests/pipeline/test_nodes.py` (~190 lines, 10 unit tests):
+- empty_retrieval_node: 표준 메시지, intent fallback, used_llm fallback,
+  in-place.
+- verify_pipeline_node: 1단계 전부 PASS면 2단계 미호출(spy), 의심 있을 때 2단계
+  병합, NOT_SUPPORTED passthrough, 빈 답변/None 안전, in-place.
+- after_search_branch: candidates 유무에 따른 분기 키.
+
+`tests/pipeline/test_query_graph.py` (~270 lines, 8 통합 tests):
+- `:memory:` Qdrant + Fake 임베더·Reranker로 외부 컨테이너 없이 end-to-end.
+- 정상 흐름 (sources/verification 채움, score 0~100, latency_ms>=0).
+- 라우터 stub intent / target_llm 검증.
+- RETRIEVAL_EMPTY: 빈 store + ACL 불일치 두 케이스 — answer 표준 메시지 + sources
+  비움 + feedback_enabled=False.
+- 저신뢰 분기 (`_AlwaysLowReranker` 0.1 → Source.score=10 < 20) →
+  feedback_enabled=False, answer는 차단 메시지 아님.
+- 검증 차단 분기 (custom generator + custom evaluator → NOT_SUPPORTED 100%) →
+  answer가 BLOCKED_ANSWER_MESSAGE로 교체, feedback_enabled=False.
+- ACL 미주입 (None / 빈 dict) → ACLViolationError 정상 발생.
+
+### 책임 분리 (그래프 노드 ↔ Agent ↔ Pipeline)
+
+- **본 담당자 영역(Pipeline)**: `empty_retrieval_node` / `verify_pipeline_node` /
+  `after_search_branch` (이번 추가) + 9-B-2/9-B-3 노드(이전 완료) + 포맷터
+  (이전 완료) + ACL 데코레이터(feature7 완료) + history 어댑터(feature8 통합).
+- **Agent 담당자 영역(현재 stub)**: `router_stub` / `generator_stub` /
+  `verify_llm_evaluator_stub`. 교체는 `QueryGraphDeps`의 3개 필드만 바꿈.
+- **그래프 조립**: `build_query_graph` 가 양쪽 노드를 단일 위치에서 배선.
+  Agent 코드와 Pipeline 코드는 RagState 필드 계약과 LangGraph 엣지로만 연결되며
+  서로 직접 import 하지 않는다.
+
+### RagState 계약 (변경 없음)
+
+스키마 변경 없음 — `intent` / `rewritten_queries` / `pool_weights` /
+`target_llm` / `metadata_filters` / `acl_filter` / `candidates` / `top_chunks` /
+`sources` / `verification` / `answer` / `used_llm` / `latency_ms` /
+`history_decision` 모두 기존 필드 그대로 사용. `latency_ms` 는 `run_query`
+wrapper가 그래프 외부에서 측정한 값을 포맷터에 직접 전달한다(RagState 미저장).
+
+### 표준 분기 응답 통합 (api-spec.md)
+
+| 분기 | 동작 | 그래프 처리 |
+|---|---|---|
+| RETRIEVAL_EMPTY | LLM 미호출 표준 메시지 | `after_search_branch` → empty_retrieval_node → END |
+| LOW_CONFIDENCE | Source.score < 20 → feedback_enabled=False | 포맷터 `_is_low_confidence` 자동 분기 (그래프 무변경) |
+| VERIFICATION_BLOCKED | NOT_SUPPORTED > 50% → 답변 차단 | 포맷터 `_not_supported_ratio` 자동 분기 (그래프 무변경) |
+| UNAUTHORIZED(JWT 실패) | 401 (api-spec.md) | API 라우트 책임 — Phase 2 |
+| UPSTREAM_LLM_ERROR | 5xx 또는 fallback | Agent 코드 책임 — 본 세션 범위 외 |
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- 본 세션 추가 파일 8건 모두 ruff format / ruff check 통과 확인 (샌드박스 ruff).
+- pytest는 회사 Mac에서 `./scripts/verify.sh` 실행 시 통과 예상 — 신규
+  27 tests (stubs 9 + nodes 10 + query_graph 8). LangGraph 0.2.x StateGraph +
+  Pydantic state + `RagState.model_validate(dict)` 패턴이 표준 동작.
+- 샌드박스 Python 3.10 한계로 직접 pytest 미실행 (이전 feature1/2와 동일).
+  코드는 3.11 기준 그대로 유지.
+
+### 비고
+
+- 새 의존성 도입 없음 — `langgraph>=0.2,<0.3` 은 이미 main dependencies.
+- `app/query/*` 의 기존 파일은 일절 수정하지 않음(본 담당자 영역 보존).
+- `app/schemas/*` 변경 없음(필드 충분, RagState 확장 불요).
+- 다른 팀원 영역(`app/llm/`, `app/query/router.py`, `app/query/generator.py`)에는
+  파일을 만들지 않음 — Agent 코드 격리 원칙 유지.
+- `app/query/rerank_node.py` / `tests/query/test_rerank_node.py` 에 사용자가 직전에
+  적용한 ruff format 차이(줄바꿈 합치기 2곳)가 commit `ba13414` 시점 형태와 다른
+  채로 워킹 디렉토리에 남아 있었으나 사용자 결정에 따라 git restore로 폐기. 본
+  세션 commit 범위 외. 회사 Mac에서 `./scripts/format.sh` 실행 시 ruff format이
+  자동으로 다시 합칠 것이며 별도 commit으로 처리 권장.
+
+### feature11 통합 Phase 1 완료 + Phase 2 진입 가능
+
+Pipeline 단계의 비-Agent 부품이 LangGraph 그래프 한 곳에서 모두 wiring되어
+end-to-end 흐름이 동작함을 통합 테스트로 검증. Agent 담당자가 라우터·답변
+생성기·검증 2단계 LLM 평가자 코드를 전달하면 `QueryGraphDeps`의 3개 필드만
+교체해 즉시 활용 가능. FastAPI SSE 라우트(Phase 2)는 본 그래프 위에 얹는
+얇은 계층(JWT extract → run_query → SSE 송신)으로 후속 세션에서 추가.
+
+### 남은 TODO
+
+- **feature11 통합 Phase 2** — FastAPI SSE 라우트 (`app/api/{main,routes,errors,
+  deps}.py`) + httpx in-process 테스트. `run_query` 위에 얇게 얹는다.
+- **Agent 코드 통합** — Agent 담당자 전달 후 `QueryGraphDeps.router_node` /
+  `.generator_node` / `.verify_llm_evaluator` 3곳 교체 + 회귀 테스트.
+- **5-A payload.token_count 추가** — Chunk 재구성 정합 (작은 refactor).
+- **풀 텍스트 lookup 어댑터** — Source.download_url + payload.text_preview 한계 보완.
+- **examples/demo_search.py 갱신** — BM25-lite → 실 5-B + 9-B + Query 그래프 호출.
+- **운영 Qdrant 라이브 smoke** — `docker compose up` 후 samples 적재 + run_query 시연.
+
+
+## 2026-05-18 — feature11 통합 Phase 2: FastAPI SSE 라우트 (feature11 마무리)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: Phase 1(Query LangGraph 그래프)이 끝-끝 동작함을 통합 테스트로 검증했고,
+  Agent 코드 전달 전이라도 BFF가 호출할 수 있는 HTTP 진입점이 필요하다.
+  `run_query` 위에 얇은 계층(JWT 추출 → ACL filter → run_query → SSE 송신)을
+  얹어 `POST /api/v1/rag/query` 를 구현한다.
+- 분할 결정점:
+  - **SSE 이벤트 시퀀스**: api-spec.md 그대로 `token + sources + verification +
+    meta + done` 5종 송신. PoC는 token을 1회로(전체 답변) 송신 — Agent 통합 시
+    token만 다중 송신으로 확장 가능한 구조. BFF/프론트 호환성 유지.
+  - **DI 기본값**: PoC `:memory:` Qdrant + Fake everything + samples 자동 인덱싱.
+    외부 컨테이너·모델 없이 서버가 즉시 응답.
+
+### 변경 사항
+
+신규 `app/api/errors.py` (~75 lines):
+
+- `ErrorCode` StrEnum — `UNAUTHORIZED` / `RETRIEVAL_EMPTY` / `LOW_CONFIDENCE` /
+  `UPSTREAM_LLM_ERROR` / `VERIFICATION_BLOCKED` (api-spec.md 정합).
+- `ErrorDetail` / `ErrorResponse` Pydantic 모델 — `{ "success": false, "error":
+  { "code": "...", "message": "..." } }` 응답 형식.
+- `HTTP_STATUS_BY_CODE` 매핑 — UNAUTHORIZED=401, UPSTREAM_LLM_ERROR=502 (4xx/5xx
+  로 변환되는 코드만 등록. RETRIEVAL_EMPTY 등 표준 분기는 200 SSE 내부 처리).
+- `error_response(code, message)` 헬퍼.
+
+신규 `app/api/deps.py` (~100 lines):
+
+- `build_poc_deps(settings=None) -> QueryGraphDeps` — PoC 부트스트랩.
+    1. FakeDenseEmbedder(64차원) + FakeSparseEmbedder.
+    2. `QdrantPoolStore.in_memory(settings, dense_dimension=64)` + 3 Pool
+       컬렉션 부트스트랩.
+    3. `JsonFixtureSourceAdapter(samples_dir)` → PageObject → `chunk_page`
+       → `index_chunks` (FakeEmbeddingCache).
+    4. `QueryGraphDeps` 반환 (Agent 노드 3종 stub 기본값).
+- `_ingest_samples` 헬퍼 — samples 디렉토리에서 청크 생성·인덱싱. samples가
+  없으면(빈 디렉토리) 조용히 패스 — `RETRIEVAL_EMPTY` 분기 검증 가능.
+
+신규 `app/api/routes.py` (~150 lines):
+
+- `QueryRequest` Pydantic 모델 — `query` / `conversation_id?` / `jwt`
+  (api-spec.md Request Body).
+- `get_graph(request)` — FastAPI Depends. `request.app.state.graph` 반환.
+  테스트는 `dependency_overrides[get_graph]` 로 교체.
+- `GraphDep = Annotated[Any, Depends(get_graph)]` — bugbear B008 회피 패턴.
+- `_sse_payload(response)` — `QueryResponse` → 5종 SSE 이벤트 시퀀스 (`token` /
+  `sources` / `verification` / `meta` / `done`). Pydantic `model_dump(mode="json")`
+  으로 datetime/enum 직렬화.
+- `_event_stream` — sse-starlette `EventSourceResponse` 입력용 async generator.
+- `query_route(payload, graph)`:
+    1. `extract_principal(jwt)` — `PrincipalExtractionError` → 401 UNAUTHORIZED
+       (`_error_json` JSON 응답).
+    2. `build_acl_filter(user_id, groups)` → `RagState` 구성.
+    3. `run_query(state, graph)` → `QueryResponse`. ACLViolationError /
+       그 외 Exception → 502 UPSTREAM_LLM_ERROR (보수적).
+    4. 정상 응답 → `EventSourceResponse(_event_stream(response))`.
+
+신규 `app/api/main.py` (~70 lines):
+
+- `_lifespan(app)` async context — `build_poc_deps` → `build_query_graph` →
+  `app.state.graph` / `app.state.deps` 보관. teardown은 `:memory:` 클라이언트라
+  GC 위임.
+- `create_app() -> FastAPI` 팩토리 — 테스트·운영 공통 진입점.
+- `/healthz` 헬스 라우트 — `{"status": "ok"}`.
+- 모듈 레벨 `app = create_app()` — `uvicorn app.api.main:app` 진입점.
+
+수정 `app/api/__init__.py` — docstring 갱신 + ErrorCode / ErrorDetail /
+ErrorResponse / app / create_app / error_response re-export.
+
+수정 `docs/api-spec.md` — "SSE 이벤트 순서" 절에 PoC 제약 NOTE 추가 (token 1회
+송신, Agent 통합 시 다중 송신 확장 예정).
+
+### 신규 테스트 `tests/api/test_query_route.py` (~255 lines, 7 통합 tests)
+
+`httpx.AsyncClient(transport=ASGITransport(app))` in-process — 외부 서버 없이
+ASGI 직접 호출. lifespan은 `dependency_overrides[get_graph]`로 우회하고 그래프는
+테스트에서 직접 컴파일.
+
+- **헬스**: `GET /healthz` → 200 + `{"status": "ok"}`.
+- **정상 흐름**: `POST /api/v1/rag/query` → 200 + `text/event-stream` + 이벤트
+  시퀀스 `[token, sources, verification, meta, done]` 정합 + sources score
+  0~100 int + meta intent=`운영가이드` / used_llm=`gpt-4o` / latency_ms>=0.
+- **RETRIEVAL_EMPTY**: 빈 그래프 + 유효 JWT → 200 SSE + token에 "권한 범위" +
+  sources=[] + meta.feedback_enabled=False.
+- **UNAUTHORIZED (JWT 형식)**: `"not-a-jwt"` → 401 + `{"success": false,
+  "error": {"code": "UNAUTHORIZED", "message": ...}}`.
+- **UNAUTHORIZED (sub 누락)**: 정상 형식이나 `sub` 클레임 없음 → 401.
+- **422 (요청 검증)**: query 필드 누락 → FastAPI 기본 422 (Pydantic).
+- **ACL 불일치**: JWT groups가 인덱싱된 allowed_groups와 불일치 → RETRIEVAL_EMPTY
+  분기 (200 SSE + 표준 메시지).
+
+`_make_jwt(sub, groups)` 헬퍼 — base64url payload만 채운 stub JWT. 서명은 BFF
+책임이므로 미검증 정책 정합.
+`_parse_sse(body)` 헬퍼 — SSE 본문에서 (event, data) 시퀀스 추출.
+
+### 책임 분리 (Phase 2 vs Phase 1 vs Agent 영역)
+
+- **Phase 2 (본 세션)**: HTTP 계층(요청 검증·JWT 추출·ACL 필터 생성·SSE 송신·
+  Error 매핑) + PoC 부트스트랩. 비즈니스 로직 0 — 모두 Phase 1 그래프 위에 얇게.
+- **Phase 1 (이전 세션)**: LangGraph 그래프 조립 + Pipeline 노드 + Agent stub.
+  `run_query(state, graph)` 호출 한 줄로 모든 분기 처리.
+- **Agent 영역(미정)**: `QueryGraphDeps.router_node` / `.generator_node` /
+  `.verify_llm_evaluator` 3곳. 본 세션과 무관.
+
+### 표준 분기 응답 매핑 (api-spec.md)
+
+| 분기 | HTTP | 응답 형식 | 처리 위치 |
+|---|---|---|---|
+| 정상 흐름 | 200 | SSE 5종 | run_query → routes._sse_payload |
+| RETRIEVAL_EMPTY | 200 | SSE (token=표준 메시지) | 그래프 empty_retrieval_node + 포맷터 |
+| LOW_CONFIDENCE | 200 | SSE (meta.feedback_enabled=false) | 포맷터 `_is_low_confidence` |
+| VERIFICATION_BLOCKED | 200 | SSE (token=BLOCKED_ANSWER_MESSAGE) | 포맷터 `_not_supported_ratio` |
+| UNAUTHORIZED | 401 | ErrorResponse JSON | routes — extract_principal 예외 |
+| UPSTREAM_LLM_ERROR | 502 | ErrorResponse JSON | routes — 그래프 예외 광범위 캐치 |
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- 본 세션 추가 파일 7건 모두 ruff format / ruff check 통과 (샌드박스 ruff).
+- pytest는 회사 Mac에서 `./scripts/verify.sh` 실행 시 통과 예상 — 신규
+  7 tests (test_query_route.py). LangGraph 0.2.x + FastAPI 0.111 + sse-starlette
+  + httpx ASGITransport 표준 동작.
+- 샌드박스 Python 3.10 한계로 직접 pytest 미실행 (이전 feature 패턴 동일).
+
+### 비고
+
+- 새 의존성 도입 없음 — `fastapi>=0.111` / `sse-starlette>=2.1` / `httpx>=0.27`
+  모두 main dependencies.
+- `app/pipeline/*` / `app/query/*` / `app/schemas/*` 변경 0 (본 담당자 영역 보존).
+- 실 어댑터(E5 / Qdrant from_settings / Cross-Encoder) 부트스트랩(`build_real_deps`)
+  은 별도 follow-up으로 분리. 운영 전환 시 환경 토글 추가.
+
+### feature11 통합 완료 + Agent 통합 진입 가능
+
+Pipeline 단계(검색·재순위화·검증 1단계·포맷터)·HTTP 계층(SSE 라우트·Error 매핑·
+헬스 체크)·PoC 부트스트랩이 모두 본 담당자 영역에서 끝까지 동작. 회사 Mac에서
+`uvicorn app.api.main:app` 으로 즉시 띄울 수 있으며, `samples/` 92페이지가
+자동 인덱싱되어 PoC 검색이 가능하다. Agent 담당자 코드 전달 시 `QueryGraphDeps`
+의 3개 필드만 교체하면 라우터 + 답변 생성기 + 검증 2단계 LLM 평가자가 즉시
+활성화된다.
+
+### 남은 TODO
+
+- **Agent 코드 통합** — Agent 담당자 전달 후 `QueryGraphDeps.router_node` /
+  `.generator_node` / `.verify_llm_evaluator` 3곳 교체 + 회귀 테스트 + token
+  다중 송신(SSE 스트리밍) 확장.
+- **`build_real_deps`** — 운영 어댑터 부트스트랩 (E5 + Qdrant from_settings +
+  Cross-Encoder 실 모델). 환경 토글 `RAG_USE_REAL_ADAPTERS=true` 권장.
+- **5-A payload.token_count 추가** — Chunk 재구성 정합 (작은 refactor).
+- **풀 텍스트 lookup 어댑터** — Source.download_url + payload.text_preview 한계 보완.
+- **examples/demo_search.py 갱신** — BM25-lite → 실 5-B + 9-B + Query 그래프 호출.
+- **운영 Qdrant 라이브 smoke** — `docker compose up` + `build_real_deps` 시연.
+
+
+## 2026-05-18 — examples/demo_search.py 갱신 (feature11 통합 후속)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: feature11 통합(Phase 1 + Phase 2) 완료 후, BM25-lite + 인메모리 ACL
+  매칭으로 시연하던 `examples/demo_search.py` 가 더 이상 실제 동작 흐름을
+  반영하지 못한다. Phase 2 부품(`build_poc_deps` + `build_query_graph` +
+  `run_query`)을 그대로 호출하는 CLI 데모로 교체해 Agent 코드 전달 전 시각적
+  검증 도구로 사용한다.
+
+### 변경 사항
+
+수정 `examples/demo_search.py` (~210 lines, 전면 재작성):
+
+- 제거: ``BM25Lite`` / ``_build_pool_indexes`` / ``_matches_acl`` /
+  ``_format_source_card`` 헬퍼 일체 (인메모리 검색 시연 흔적).
+- 추가: ``main(argv) -> int`` 진입점. 3-phase 진행 로그 + SSE 5종 페이로드
+  콘솔 시각화.
+    1. ``build_poc_deps()`` — :memory: Qdrant + Fake everything + samples 자동
+       인덱싱 (app/api/deps.py 재사용).
+    2. ``build_query_graph(deps)`` — LangGraph StateGraph 컴파일.
+    3. ``build_acl_filter(user, groups)`` + ``RagState`` → ``run_query`` →
+       ``QueryResponse`` 결과 출력.
+- 출력 형식 — SSE 이벤트와 1:1 매핑되어 BFF 응답을 그대로 콘솔에 펼친 모습:
+    - ``[meta]`` intent / used_llm / feedback_enabled / latency_ms
+    - ``[answer]`` token 페이로드 (PoC 1회 송신)
+    - ``[sources]`` 출처 카드 (rank / score / space_key / title / 섹션 /
+      미리보기 / URL)
+    - ``[verification]`` 문장별 결과 + PASS/SUPPORTED/NOT_SUPPORTED 카운트 요약
+    - ``[표준 분기 응답]`` — RETRIEVAL_EMPTY / LOW_CONFIDENCE /
+      VERIFICATION_BLOCKED 분기 도달 시 가시화
+- CLI 인자 단순화: ``query`` (positional) / ``--user`` / ``--groups``
+  (ADR-0002 ``space:`` prefix) / ``--conversation-id``. 기존 ``--intent``,
+  ``--top-k`` 는 라우터 stub + Top-5 내장에 의해 의미가 사라져 제거.
+
+### 책임 분리 (시연 vs 운영)
+
+- ``examples/demo_search.py``: 본 담당자 영역 시연 도구. 한 줄 호출
+  (``python -m examples.demo_search "..."``)로 그래프 끝-끝 동작 확인.
+- ``app/api/main.py`` (Phase 2): 운영 진입점. ``uvicorn`` 기반 SSE 라우트.
+
+본 데모는 FastAPI 서버 없이 즉시 동작하므로 회사 Mac에서 ``./scripts/verify.sh``
+이전 단계 sanity check로 사용 가능.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- ruff format / ruff check 통과 (샌드박스).
+- 본 데모는 시연 도구라 별도 단위 테스트 없음 — `python -m examples.demo_search
+  "EKS 노드 장애"` 등 manual smoke로 검증한다. samples 92페이지 인덱싱 후 응답
+  까지 수 초 내 완료 예상 (Fake 임베더 + :memory: Qdrant).
+
+### 비고
+
+- 신규 의존성 도입 없음. ``app.api.deps`` / ``app.pipeline.query_graph`` /
+  ``app.query.acl`` 모두 기존 부품.
+- 본 commit은 `examples/demo_search.py` 단일 파일 변경. `app/*`/`docs/api-spec.md`
+  변경 없음 (CLAUDE.md "담당 범위" 정합).
+
+
+## 2026-05-18 — fix(rag): query_graph 노드명 'history' → 'manage_history' (LangGraph state key 충돌)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 회사 Mac에서 `./scripts/test.sh` 실행 결과 `pytest` 가 15건 실패
+  (test_query_graph 8 failed + test_query_route 7 errors). 기존 회귀 0건
+  (420 passed) — feature11 통합 그래프 빌드 단계만 실패.
+- 원인: LangGraph 1.x StateGraph는 **노드명과 state field가 동일 네임스페이스를
+  공유**한다. `RagState.history: list[HistoryTurn]` 필드가 이미 있는 상태에서
+  ``builder.add_node("history", manage_history)`` 를 호출하면
+  ``ValueError: 'history' is already being used as a state key`` 발생.
+  설계서/문서/이전 Plan에는 "history" 노드명을 사용했으나 실 LangGraph 제약과
+  충돌. 1.x에서 강화된 제약으로 보이며 0.2.x에서는 검출 안 됐을 수 있음.
+
+### 변경 사항
+
+수정 `app/pipeline/query_graph.py`:
+
+- 노드명 `"history"` → `"manage_history"` 4곳 일괄 교체 (등록 / 진입점 /
+  엣지). 다른 노드명(`router`/`hybrid_search`/`empty_retrieval`/`rerank`/
+  `generate`/`verify`)은 RagState 필드와 무충돌이라 그대로 유지.
+- docstring "그래프 구조" 다이어그램의 `history` → `manage_history`.
+- 노드명 네임스페이스 제약을 코드 주석으로 명시 (회귀 방지).
+
+수정 `tests/pipeline/test_query_graph.py`:
+
+- 신규 회귀 보호 테스트
+  `test_build_query_graph_compiles_without_node_state_key_collision` — 그래프
+  컴파일 자체가 통과하는지만 단언. 향후 노드 추가 시 RagState 필드와 같은 이름을
+  쓰면 본 테스트가 즉시 실패해 회귀를 차단한다.
+
+수정 `examples/demo_search.py`:
+
+- 진행 로그의 그래프 구조 안내 `history → ...` → `manage_history → ...`.
+
+### 검증
+
+- ruff format / check 통과 (3 파일).
+- 본 fix는 노드명 4번 교체 + 회귀 테스트 1건 추가만 — 노드 함수 로직·시그니처
+  변경 없음. 회사 Mac에서 `./scripts/test.sh` 재실행 시 15건 실패 → 통과 + 1건
+  신규 통과 (총 +16) 예상.
+
+### 비고
+
+- RagState 필드 21종 중 ``history`` 1개만 노드명과 충돌했다. 다른 필드
+  (``query`` / ``user_id`` / ``intent`` / ``candidates`` / ``top_chunks`` /
+  ``answer`` / ``sources`` / ``verification`` 등)와 노드명 (``router`` /
+  ``hybrid_search`` / ``empty_retrieval`` / ``rerank`` / ``generate`` /
+  ``verify``) 사이에는 교집합 없음 — 운 좋게 한 곳만 영향.
+- 본 fix는 단일 함수 안의 문자열 4곳 + 다이어그램 + 회귀 테스트 1건만 — 매우
+  국소적 commit. `chore` 보다는 `fix` 로 표기 권장.
 - **운영 Qdrant 라이브 smoke** — 5-B + 9-B-2/3 묶어 시각 확인.

@@ -1,0 +1,116 @@
+"""Agent stub 3종 — 라우터·답변 생성기·검증 2단계 LLM 평가자 fake [Agent stub].
+
+--------------------------------------------------
+작성자 : 최태성
+작성목적 : feature11 통합 — Agent 담당자가 추후 전달하는 라우터·답변 생성기·검증
+          2단계 LLM 평가자를 그래프 조립 단계에서 fake로 대체한다. Agent 코드 전달
+          시 교체 지점이 한 곳에 모이도록 본 모듈에 격리한다 (`app/CLAUDE.md` §1
+          Agent 분류, `docs/ai/current-plan.md` feature8·10·11 통합 메모).
+작성일 : 2026-05-18
+변경사항 내역 (날짜, 변경목적, 변경내용 순)
+  - 2026-05-18, 최초 작성, feature11 통합 — router_stub / generator_stub /
+    verify_llm_evaluator_stub. 모두 (state) -> state 또는 (kw) -> verifications 시그니처.
+--------------------------------------------------
+[호환성]
+  - Python 3.11.x
+  - 외부 의존성 0 — Pydantic + StrEnum만 사용.
+  - NOTE: 본 모듈은 PoC·테스트용 fake다. 실제 Agent 코드가 전달되면 다음 두 위치에서
+          한 줄씩 교체한다:
+            * `app/pipeline/query_graph.py` 의 `build_query_graph` — router/generator
+              노드 등록
+            * `QueryGraphDeps.verify_llm_evaluator` 주입 — 검증 2단계
+          본 파일 자체는 Agent 코드를 포함하지 않는다 (담당 영역 분리 — `app/CLAUDE.md`
+          "담당 범위를 벗어난 파일은 수정하지 않는다").
+--------------------------------------------------
+"""
+
+from app.ingestion.vector_store import CONTENT_POOL, LABEL_POOL, TITLE_POOL
+from app.query.verifier import SentenceCheck
+from app.schemas.chunk import Chunk
+from app.schemas.enums import Intent, LlmModel, VerificationStatus
+from app.schemas.rag_state import RagState
+from app.schemas.response import Verification
+
+# 의도별 Pool 가중치 — rag-pipeline-design.md §6 4.5.
+# router_stub은 OPERATION_GUIDE 가중치를 fallback으로 사용한다 (rag-pipeline-design.md §8).
+_OPERATION_POOL_WEIGHTS: dict[str, float] = {
+    TITLE_POOL: 0.2,
+    CONTENT_POOL: 0.7,
+    LABEL_POOL: 0.1,
+}
+
+
+def router_stub(state: RagState) -> RagState:
+    """질의 라우터 [Agent] fake — rag-pipeline-design.md §8 안전 기본값을 따른다.
+
+    실 라우터(`feat: query_router_agent` Agent 담당자 영역)가 GPT-4o-mini Function
+    Calling으로 intent / Query Rewriter / Filter Builder / Pool 가중치를 동시에
+    채우는 자리에, 본 stub은 LLM 타임아웃 fallback 정합으로 다음 값을 채운다:
+      - `intent = OPERATION_GUIDE`
+      - `rewritten_queries = [state.query]` (원본 쿼리 단일)
+      - `pool_weights = OPERATION_GUIDE 가중치(0.2 / 0.7 / 0.1)`
+      - `target_llm = GPT_4O` (답변 생성기 기본 모델)
+      - `metadata_filters = None` (빈 필터)
+
+    `history_decision` 등 상류 노드 결과는 보존한다 (덮어쓰지 않는다).
+    """
+    state.intent = Intent.OPERATION_GUIDE
+    state.rewritten_queries = [state.query]
+    state.pool_weights = dict(_OPERATION_POOL_WEIGHTS)
+    state.target_llm = LlmModel.GPT_4O
+    state.metadata_filters = None
+    return state
+
+
+def generator_stub(state: RagState) -> RagState:
+    """답변 생성기 [Agent] fake — top_chunks가 있으면 [#1] 인용을 단 stub 답변을 만든다.
+
+    실 답변 생성기(GPT-4o + 의도별 프롬프트 + Function Calling, Agent 담당자 영역)가
+    답변 텍스트와 sentence_to_citations를 산출하는 자리에, 본 stub은 검증 1단계가
+    동작하도록 [#1] 인용 마커를 포함하는 결정론 stub 답변을 만든다. `top_chunks`가
+    비어 있으면 빈 답변 — 그래프 흐름에서는 검색 0건 분기로 우회되므로 도달하지
+    않지만, 노드 자체의 방어 처리로 안전하게 둔다.
+
+    `used_llm`은 라우터가 결정한 `target_llm`을 그대로 따르며, 없으면 GPT_4O 기본.
+    """
+    if state.top_chunks:
+        top = state.top_chunks[0]
+        title = top.metadata.attachment_filename or top.metadata.page_title
+        state.answer = f"[#1] {title} 관련 정보를 다음과 같이 안내합니다."
+    else:
+        state.answer = ""
+    state.used_llm = state.target_llm or LlmModel.GPT_4O
+    return state
+
+
+def verify_llm_evaluator_stub(
+    *,
+    answer: str,
+    top_chunks: list[Chunk],
+    suspicious_sentences: list[SentenceCheck],
+) -> list[Verification]:
+    """검증 2단계 LLM 평가자 [Agent] fake — 의심 문장 모두 SUPPORTED로 판정한다.
+
+    실 2단계 평가자(GPT-4o-mini, Agent 담당자 영역)가 의심 문장의 SUPPORTED /
+    NOT_SUPPORTED를 판정하는 자리에, 본 stub은 보수적으로 모두 SUPPORTED를 반환해
+    파이프라인 흐름이 동작함을 보인다. NOT_SUPPORTED 차단 분기는 별도 fake로 시뮬한다.
+
+    Args:
+        answer: 생성기가 만든 답변 텍스트 (시그니처 정합 — 실 평가자가 사용).
+        top_chunks: 인용 청크 — 실 평가자가 근거 대조에 사용한다.
+        suspicious_sentences: 1단계 규칙 매칭에서 의심으로 FLAG된 문장.
+
+    Returns:
+        suspicious_sentences와 같은 길이·sentence_id 정합의 Verification 목록.
+    """
+    # answer / top_chunks는 실 평가자가 사용할 시그니처 정합 — fake는 사용하지 않는다.
+    del answer
+    del top_chunks
+    return [
+        Verification(
+            sentence_id=check.sentence_id,
+            status=VerificationStatus.SUPPORTED,
+            cited_chunks=list(check.cited_chunks),
+        )
+        for check in suspicious_sentences
+    ]
