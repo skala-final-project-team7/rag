@@ -461,3 +461,77 @@ def test_all_pools_can_be_independently_used(
         )
         hits = store.search(pool_name, acl_filter=_acl_for(["space:CLOUD"]), dense_vector=d_vec)
         assert hits and hits[0].chunk_id == "a" * 40
+
+
+# --- scroll_page_ids / scroll_attachment_ids (feature6 Phase 3) ---
+
+
+def _index_chunk(
+    store: QdrantPoolStore,
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    chunk: Chunk,
+) -> None:
+    """CONTENT_POOL 만 적재 — scroll 메서드는 CONTENT_POOL 하나만 스캔하므로 충분."""
+    [d_vec] = dense.encode_passages([chunk.text])
+    [s_vec] = sparse.encode_passages([chunk.text])
+    store.upsert_chunk(
+        CONTENT_POOL, chunk, version_number=1, dense_vector=d_vec, sparse_vector=s_vec
+    )
+
+
+def test_scroll_page_ids_returns_unique_set_of_body_page_ids(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """본문 청크의 page_id를 unique set으로 반환 — 같은 page_id 중복 청크는 1회만 등장."""
+    _index_chunk(store, dense, sparse, _chunk(chunk_id="a" * 40, page_id="P1", chunk_index=0))
+    _index_chunk(store, dense, sparse, _chunk(chunk_id="b" * 40, page_id="P1", chunk_index=1))
+    _index_chunk(store, dense, sparse, _chunk(chunk_id="c" * 40, page_id="P2", chunk_index=0))
+
+    assert store.scroll_page_ids() == {"P1", "P2"}
+
+
+def test_scroll_page_ids_excludes_attachment_chunks(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """첨부 청크는 source_type=attachment 라 scroll_page_ids 에 포함되지 않는다."""
+    _index_chunk(store, dense, sparse, _chunk(chunk_id="a" * 40, page_id="P1"))
+    _index_chunk(
+        store,
+        dense,
+        sparse,
+        _chunk(chunk_id="b" * 40, page_id="P1", attachment_id="P1-att-0", chunk_index=1),
+    )
+
+    # 첨부 청크의 page_id 도 "P1" 이지만 source_type=attachment 라 scroll_page_ids 결과에서 제외.
+    # 다만 본문 청크의 P1 은 포함 — 결과 set 자체는 {"P1"} 1개.
+    assert store.scroll_page_ids() == {"P1"}
+
+
+def test_scroll_attachment_ids_returns_unique_set_of_attachment_ids(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """첨부 청크의 attachment_id 를 unique set 으로 반환 — 본문 청크는 제외."""
+    _index_chunk(store, dense, sparse, _chunk(chunk_id="a" * 40, page_id="P1"))  # 본문
+    _index_chunk(
+        store,
+        dense,
+        sparse,
+        _chunk(chunk_id="b" * 40, page_id="P1", attachment_id="ATT-1", chunk_index=1),
+    )
+    _index_chunk(
+        store,
+        dense,
+        sparse,
+        _chunk(chunk_id="c" * 40, page_id="P2", attachment_id="ATT-2"),
+    )
+
+    assert store.scroll_attachment_ids() == {"ATT-1", "ATT-2"}
+
+
+def test_scroll_methods_return_empty_set_on_empty_collection(
+    store: QdrantPoolStore,
+) -> None:
+    """청크 0건이면 두 scroll 결과 모두 빈 set — 빈 컬렉션 회귀 보호."""
+    assert store.scroll_page_ids() == set()
+    assert store.scroll_attachment_ids() == set()

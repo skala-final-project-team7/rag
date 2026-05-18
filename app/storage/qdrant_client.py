@@ -12,6 +12,9 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature5-B-2 — QdrantPoolStore + SearchHit. Qdrant Point ID
     제약(UUID/uint64) 흡수를 위해 uuid5(NAMESPACE_OID, chunk_id)로 결정론 매핑.
+  - 2026-05-18, feature6 Phase 3 — scroll_page_ids / scroll_attachment_ids 메서드 추가.
+    설계서 §3.7 Reconciliation Phase 1 흐름의 ``set_B_pages`` / ``set_B_attaches``
+    추출에 사용된다. CONTENT_POOL 하나만 스캔(3 Pool 동일 청크 적재 정합).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -364,6 +367,64 @@ class QdrantPoolStore:
         return Filter(must=must_conditions)  # type: ignore[arg-type]
 
     # --- Delete ---
+
+    # --- Reconciliation scroll (feature6 Phase 3) ---
+
+    def scroll_page_ids(self, *, batch_size: int = 1000) -> set[str]:
+        """본문 청크의 ``page_id`` unique set을 반환한다 — 삭제 동기화용 (설계서 §3.7).
+
+        CONTENT_POOL 한 곳만 스캔한다 — 3 Pool에 동일 청크가 모두 적재되므로 한 Pool
+        만 봐도 충분하다 (적재 멱등성, `app/CLAUDE.md` §4). source_type=page 필터로
+        본문 청크만 추출, payload-only scroll로 벡터 미로드 (메모리 효율).
+
+        Args:
+            batch_size: 한 번에 가져올 Point 수. 기본 1000. 운영(수십만 청크) 튜닝
+                지점.
+
+        Returns:
+            적재된 본문 청크의 page_id unique set. 빈 컬렉션이면 빈 set.
+        """
+        return self._scroll_payload_field("page_id", source_type="page", batch_size=batch_size)
+
+    def scroll_attachment_ids(self, *, batch_size: int = 1000) -> set[str]:
+        """첨부 청크의 ``attachment_id`` unique set을 반환한다 — 삭제 동기화용 (설계서 §3.7).
+
+        ``scroll_page_ids`` 와 동일 패턴이나 source_type=attachment 필터를 적용하고
+        ``attachment_id`` payload 필드를 추출한다.
+
+        Returns:
+            적재된 첨부 청크의 attachment_id unique set. 빈 컬렉션이면 빈 set.
+        """
+        return self._scroll_payload_field(
+            "attachment_id", source_type="attachment", batch_size=batch_size
+        )
+
+    def _scroll_payload_field(self, field: str, *, source_type: str, batch_size: int) -> set[str]:
+        """CONTENT_POOL 을 source_type 필터로 페이지네이션 scroll, payload 필드 unique set 추출."""
+        collection_name = _pool_name_to_collection(self._settings, CONTENT_POOL)
+        scroll_filter = Filter(
+            must=[FieldCondition(key="source_type", match=MatchValue(value=source_type))]
+        )
+        unique: set[str] = set()
+        offset: Any = None
+        while True:
+            records, next_offset = self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=scroll_filter,
+                limit=batch_size,
+                offset=offset,
+                with_payload=[field],
+                with_vectors=False,
+            )
+            for record in records:
+                payload = record.payload or {}
+                value = payload.get(field)
+                if value is not None:
+                    unique.add(str(value))
+            if next_offset is None:
+                break
+            offset = next_offset
+        return unique
 
     def delete_by_page_id(self, page_id: str) -> None:
         """``page_id`` 가 일치하는 모든 Point를 세 Pool에서 삭제한다 (문서 단위 삭제)."""
