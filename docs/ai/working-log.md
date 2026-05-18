@@ -1060,3 +1060,94 @@ LangGraph 노드 wiring만 남는다.
   9-A `select_reranked` → `top_chunks` Top-5 + 저신뢰 분기).
 - **9-B 의존 완전 해소** — 9-B-1 후 Cross-Encoder 측 잠금까지 해소됨 → 9-B-2/3 즉시
   착수 가능.
+
+
+## 2026-05-18 — feature9-B-2: hybrid_search LangGraph 노드 (query → 3 Pool RRF → candidates)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 5-B-1(Embedder) + 5-B-2(Qdrant) + 9-A(RRF 순수 로직)를 LangGraph 노드 형태로
+  잇는다. RagState의 `query` (+선택적 `rewritten_queries`)를 받아 dense·sparse 임베딩 →
+  3 Pool ACL 필터 검색 → RRF + Pool 가중 합산 + Top-20 선정 → `candidates` 채움까지
+  한 단계로 처리. ACL 미주입 호출은 `@enforce_acl` 가드(feature7)로 시스템 단에서 거부.
+
+### 변경 사항
+
+신규 `app/query/search_node.py` (~215 lines):
+
+- `hybrid_search(state, *, dense_embedder, sparse_embedder, store, top_k=20)` —
+  외부 노드 (`(state) -> state` 표준 시그니처). 의존성은 키워드 인자로 주입 —
+  LangGraph 그래프 조립(feature11)에서 `functools.partial` 또는 클로저로 wiring.
+- `_hybrid_search_acl_guarded(state, *, acl_filter, ...)` — `@enforce_acl` 가드를 통과한
+  내부 본문. `state.acl_filter`를 명시 인자로 받아 호출 전 데코레이터가 유효성 검증.
+- 알고리즘 5-phase:
+    1. **query 텍스트 결정**: `rewritten_queries` 있으면 그것들, 없으면 `[state.query]`.
+       라우터(feature8)가 채울 multi-query 확장과 정합.
+    2. **배치 임베딩**: dense·sparse 각각 한 번씩 — query 수 무관 임베더 호출 2회.
+    3. **3 Pool × N query × {dense, sparse} 검색**: `QdrantPoolStore.search` 직접 호출.
+       검색 결과는 chunk_id 기준 SearchHit 풀에 누적 (Chunk 재구성용).
+    4. **9-A 결합**: `fuse_and_rank(pool_rankings, pool_weights, limit=top_k)`. query별
+       ranking은 `dense_q{idx}` / `sparse_q{idx}` 키로 분리해 RRF가 동등하게 합치도록 함.
+    5. **Chunk 재구성**: `_chunk_from_search_hit(hit)` — `payload`(db-schema §1.2 20필드)
+       → `Chunk(text=text_preview, metadata=ChunkMetadata(...))`. `token_count=0` default
+       (별도 follow-up으로 payload에 token_count 추가 필요).
+- `_coerce_metadata_filters` — `dict[str, Any]` → `dict[str, str | list[str]]` 강건 변환.
+  잘못된 타입은 무시 (라우터 산출 신뢰성 보장 안 됨).
+- `_DEFAULT_POOL_WEIGHTS` — 라우터가 `pool_weights`를 안 채운 경우 등가 fallback.
+- `_chunk_from_search_hit` 헬퍼 + 보조 파서(doc_type DocType↔AttachmentType,
+  extracted_format, optional_str, datetime ISO).
+
+수정 `tests/query/reranker/test_base.py`: ruff/linter follow-up — unused `import pytest`
+제거 (9-B-1 push 후 사용자 mac에서 자동 적용된 변경).
+
+### 신규 테스트 `tests/query/test_search_node.py` (~340 lines, 14 통합 tests)
+
+`:memory:` Qdrant + Fake 임베더 + FakeEmbeddingCache 조합으로 외부 컨테이너·모델
+없이 끝-끝 검증:
+
+- **정상 동작**: candidates 채움, in-place mutation, Chunk 재구성 필드 정합
+  (page_id/page_title/section_header/space_key/source_type/doc_type/text_preview/
+  token_count=0), top_k 제한.
+- **ACL 강제**: acl_filter=None → ACLViolationError, acl_filter={} (무효) →
+  ACLViolationError, ACL 매칭 그룹만 결과 포함 (CCC 청크 제외), 매칭 없으면 빈 후보.
+- **multi-query**: rewritten_queries 모두 한 번에 배치 임베딩 (spy로 호출 시점 검증),
+  rewritten_queries 비어 있으면 query 단일 사용.
+- **pool_weights**: None → 등가 fallback 동작, 명시 가중치 정상 사용.
+- **metadata_filters**: doc_type 단일 값(MatchValue)으로 좁힘, list 값(MatchAny) 다중
+  매칭, 비-str/list 타입(int 등)은 무시 — 잘못된 라우터 출력에 강건.
+
+### 책임 분리 (9-A vs 9-B-2)
+
+- **feature9-A** — 순수 결합 로직 (RRF / merge_pools / select_top_candidates /
+  fuse_and_rank). 외부 의존성 0.
+- **feature9-B-2** — query 임베딩(5-B-1) + Qdrant 검색(5-B-2)을 9-A 로직과 잇고,
+  RagState 입출력 + ACL 강제 + Chunk 재구성을 담당하는 노드 wiring.
+
+### 책임 경계 (9-B-2 vs 9-B-3 vs 추후)
+
+- 9-B-2는 candidates(Top-20)까지. **Cross-Encoder 재순위화는 9-B-3** 책임.
+- Chunk 재구성의 `text`는 payload의 `text_preview` (첫 200자). 풀 텍스트가 필요한
+  단계(예: 답변 생성 LLM)는 별도 chunk lookup 어댑터 추가(후속).
+- payload에 `token_count` 가 없어 0 default. **5-A 영역 `build_point_payload`에
+  token_count 추가**가 작은 후속 fix로 권장.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- format / lint(ruff + mypy) / pytest 통과 예상.
+- 신규 14 tests (test_search_node.py). 전체 회귀 0건 + 신규 흡수.
+
+### 비고
+
+- `hybrid_search` 노드의 외부 의존성(dense/sparse/store)은 키워드 인자로 노출 —
+  LangGraph 통합 시 `functools.partial`로 wiring 권장 (feature11 통합 단계에서 확정).
+- 새 의존성 도입 없음 — 모든 부품 기존 5-B-1·5-B-2·9-A·7·1·schemas 재사용.
+- DB 스키마 변경 없음. payload에 token_count 추가는 별도 follow-up.
+
+### 남은 TODO
+
+- **9-B-3** — `cross_encoder_rerank` 노드. candidates → 9-B-1 score → 9-A
+  `select_reranked` → `top_chunks` Top-5 + 저신뢰 분기. 본 9-B-2의 출력을 바로
+  소비. 짧은 작업.
+- **5-A payload.token_count 추가** — Chunk 재구성 정합. 작은 refactor commit.
+- **풀 텍스트 lookup 어댑터** — payload.text_preview 200자 한계를 넘는 단계가 필요해질 때.
+- **examples/demo_search.py 갱신** — BM25-lite → 9-B-2 노드 호출로 시연 데모 교체.
+- **운영 Qdrant 라이브 smoke** — 5-B + 9-B-2 묶어 시각 확인.
