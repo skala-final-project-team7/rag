@@ -3,8 +3,6 @@
 FakeCrossEncoderReranker의 결정론·점수 범위·shape 계약을 확인한다. 외부 의존성 0.
 """
 
-import pytest
-
 from app.query.reranker.base import CrossEncoderReranker, FakeCrossEncoderReranker
 
 
