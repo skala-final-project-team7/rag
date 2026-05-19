@@ -55,6 +55,14 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
+# feature17b — Golden Set 자동 평가용 (ROUGE-L + BERTScore). bert-score 가
+# transformers/torch 의존성을 가져오므로 embedding extras 와 함께 설치 권장.
+# 사용법: pip install -e ".[evaluation]"
+evaluation = [
+    "evaluate>=0.4.0",
+    "rouge-score>=0.1.2",
+    "bert-score>=0.3.13",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
