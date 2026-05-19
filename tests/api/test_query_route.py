@@ -323,7 +323,12 @@ def _streaming_client(
         # generator_provider 가 None 이 아니어야 streaming 분기 활성. 본 fake 는
         # 실제로는 호출되지 않으며 stream_openai_answer monkeypatch 만 사용된다.
         generator_provider=object(),
-        generator_config=SimpleNamespace(model="gpt-4o", temperature=0.2, timeout_seconds=45),
+        generator_config=SimpleNamespace(
+            model="gpt-4o",
+            fallback_model="gpt-4o-mini",  # feature15 — _streaming_event_stream 이 참조
+            temperature=0.2,
+            timeout_seconds=45,
+        ),
     )
     streaming_graph = build_query_graph_for_streaming(deps)
 
