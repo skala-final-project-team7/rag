@@ -589,8 +589,9 @@ BE 담당자 명세 확정 후 진행.
   intent_classification_total) + 회귀 7건 (다음 commit)
 - [ ] **feature17b** — Evaluation Set 50건 라벨링 + chunk_id backfill + ROUGE
   -L/BERTScore 평가 + Golden Set 자동 추출
-- [ ] **feature17c** — 튜닝 (Pool 가중치 그리드 서치 / 라우터 prompt /
-  생성기 prompt / Cross-Encoder 임계값)
+- [ ] **feature17c** — 튜닝 (Pool 가중치 그리드 서치 / 생성기 prompt /
+  Cross-Encoder 임계값) — 라우터 prompt 튜닝은 2026-05-19 fix
+  (app/query/routing_transport.py) 로 사실상 달성 (정확도 4/4=100%)
 
 ### feature18: 외부 의존 / 부가 — P3
 

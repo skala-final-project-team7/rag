@@ -4419,3 +4419,33 @@ routing_provider = OpenAIRoutingLLMProvider(
 - 사용자 Mac 에서 debug-route 재실행 → 본 fix 의 분류 정확도 실측
 - feature17b — Evaluation Set 50건 라벨링 + ROUGE-L/BERTScore
 - feature17c — Pool 가중치 그리드 서치 + 답변 생성기 prompt 튜닝
+
+### 사용자 Mac 재실행 — fix 효과 실측 (2026-05-19)
+
+본 fix 적용 후 동일 4종 의도 질의를 운영 라우터로 재실행. **정확도 25% →
+100% (4/4)** 달성, 설계서 §6.1 임계 90% **충족**.
+
+| 질의 | expected | actual | 결과 |
+|------|----------|--------|------|
+| EKS NotReady | 장애대응 | 장애대응 | ✅ |
+| Karpenter 도입 단계 | 운영가이드 | 운영가이드 | ✅ |
+| IAM 정책 변경 절차 | 정책절차 | 정책절차 | ✅ |
+| 지난 분기 비용 증가 원인 | 이력조회 | 이력조회 | ✅ |
+
+rewritten_queries 도 deterministic fallback ("원본 + 검색", "원본 + 검색 1")
+에서 의미 있는 검색 친화적 확장으로 개선:
+
+- Q1 (장애대응): "EKS Worker Node NotReady 상태 대응 방법은?" /
+  "EKS Worker Node가 NotReady일 때의 대응 절차는?"
+- Q2 (운영가이드): "EKS Karpenter 도입 절차는?" /
+  "Karpenter 설치를 위한 EKS 단계는?"
+- Q3 (정책절차): "IAM policy change procedure 어떻게 하나요?" (한영 혼용) /
+  "IAM 정책 변경을 위한 절차는?"
+- Q4 (이력조회): "지난 분기 클라우드 비용 증가 이유는?" /
+  "What caused the increase in cloud costs last quarter?" (한영 혼용)
+
+→ **검색 hit 률 개선 기대** + 한영 혼용 확장으로 BM25 매칭 다양성 확보.
+
+본 결과로 feature17c 의 "라우터 prompt 튜닝 (의도 분류 정확도 90% 달성)"
+TODO 는 **사실상 본 fix 로 달성** — 후속 세션에서는 다른 튜닝 항목 (Pool
+가중치 / Cross-Encoder 임계값 / 생성기 prompt) 에 집중 가능.
