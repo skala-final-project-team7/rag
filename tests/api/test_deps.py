@@ -258,6 +258,10 @@ def test_build_real_deps_passes_openai_api_key_to_all_providers(
     routing_init = patched_real_adapters["routing_provider_init"]
     assert routing_init is not None
     assert routing_init["api_key_provided"] is True
+    # feature17a 후속 — transport callable (build_openai_routing_transport 결과) 가
+    # 명시 주입돼 vendoring 패키지의 _default_transport 를 대체한다.
+    assert routing_init["transport"] is not None
+    assert callable(routing_init["transport"])
     # 검증기 — AnswerVerificationConfig.openai_api_key 에 채워서 전달 (env fallback 회피).
     verifier_init = patched_real_adapters["verifier_provider_init"]
     assert verifier_init is not None

@@ -60,6 +60,12 @@
     생성기는 이미 명시 주입 중. CLAUDE.md 절대 규칙 "Secret 은 ``app/config.py``
     에서 환경 변수로 주입" 정합 + ``.env`` 의 ``OPENAI_API_KEY`` 중복 환경변수
     제거.
+  - 2026-05-19, feature17a 후속 라우터 prompt 보강 — OpenAIRoutingLLMProvider
+    에 ``build_openai_routing_transport`` 를 주입한다. agent 의 빈약한 default
+    transport 가 만든 system prompt ("You classify RAG query routing intent.")
+    를 본 저장소가 만든 4종 의도 정의·예시·구분 기준·출력 schema 강제 prompt
+    로 교체해 의도 분류 정확도 보강 (feature16 발견 #2 fix). vendoring 패키지
+    무수정 보존 정합.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -169,6 +175,7 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     from app.ingestion.embedder.sparse import BM25SparseEmbedder
     from app.query.openai_transport import build_openai_chat_transport
     from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
+    from app.query.routing_transport import build_openai_routing_transport
     from app.storage.chunk_lookup import MongoChunkTextLookup
     from query_routing_agent.config import QueryRoutingConfig
     from query_routing_agent.llm import OpenAIRoutingLLMProvider
@@ -187,14 +194,17 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # 주입" 정합 — provider 가 ``os.environ.get("OPENAI_API_KEY")`` fallback 을 거치지
     # 않도록 직접 주입한다 (feature12, 2026-05-19).
     openai_api_key = settings.openai_api_key.get_secret_value()
-    # 라우터는 운영 모드에서 OpenAI provider 를 사용한다. ``__init__(config, api_key)``
-    # 로 settings 의 키를 직접 주입한다 (이전 ``from_config`` 의 env fallback 제거).
-    # api_key 가 비어 있으면 RoutingProviderError 즉시 발생 — 운영 lifespan 진입 직전에
-    # 누락이 명확히 드러난다. GPT-4o-mini (app/CLAUDE.md §5 라우팅 정책).
+    # 라우터는 운영 모드에서 OpenAI provider 를 사용한다. ``__init__(config, api_key,
+    # transport)`` 로 settings 키 + 본 저장소가 보강한 transport 를 직접 주입한다.
+    # build_openai_routing_transport 가 4종 의도 정의·예시·구분 기준·출력 schema 를
+    # system prompt 로 강제해 분류 정확도를 보강한다 (feature16 발견 #2 fix).
+    # vendoring 한 query_routing_agent 의 ``_default_transport`` 를 대체 — agent 무수정
+    # 보존 + 본 저장소가 prompt 책임. GPT-4o-mini (app/CLAUDE.md §5 라우팅 정책).
     routing_config = QueryRoutingConfig(model="gpt-4o-mini")
     routing_provider = OpenAIRoutingLLMProvider(
         config=routing_config,
         api_key=openai_api_key,
+        transport=build_openai_routing_transport(api_key=openai_api_key),
     )
     # 답변 검증 2단계 평가자도 운영 모드는 OpenAI 직접 호출 — agent OpenAIEvaluator
     # Provider 는 자체 urllib transport (default) 가 있어 transport 미주입 OK.
