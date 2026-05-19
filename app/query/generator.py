@@ -12,6 +12,11 @@
 작성일 : 2026-05-19
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-19, 최초 작성, Agent 통합 2/4 — manage_generator 어댑터 노드
+  - 2026-05-19, Mode B 시연 fix — LangGraph 가 노드 시그니처의 ``config`` 키워드
+    를 자체 ``RunnableConfig`` (dict) 로 자동 주입하는 충돌 발견. ``config`` 인자
+    를 placeholder 로 유지하고 agent ``AnswerGenerationConfig`` 는 ``generation
+    _config`` keyword-only 인자로 분리. 외부 wiring (``query_graph.py`` partial)
+    도 ``generation_config=`` 로 갱신.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -111,9 +116,10 @@ _DEFAULT_FAKE_RESPONSE: dict[str, Any] = {
 
 def manage_generator(
     state: RagState,
+    config: Any = None,  # noqa: ARG001 — LangGraph 가 RunnableConfig dict 를 주입할 자리. 무시.
     *,
     provider: AnswerLLMProvider | None = None,
-    config: AnswerGenerationConfig | None = None,
+    generation_config: AnswerGenerationConfig | None = None,
 ) -> RagState:
     """답변 생성기 노드 — top_chunks 로 답변·sources·used_llm 을 채운다.
 
@@ -131,12 +137,17 @@ def manage_generator(
         state: Query 파이프라인 상태. ``query`` / ``user_id`` / ``conversation_id`` /
             ``intent`` / ``rewritten_queries`` / ``top_chunks`` / ``target_llm`` /
             ``history_decision`` 을 읽는다.
+        config: LangGraph 가 노드에 자동 주입하는 ``RunnableConfig`` (dict). 본
+            어댑터는 사용하지 않으며 무시한다 — keyword name 충돌 회피 목적의
+            placeholder. agent 의 ``AnswerGenerationConfig`` 는 ``generation_config``
+            인자로 받는다 (LangGraph 가 ``config`` 키워드를 자체 RunnableConfig 로
+            override 하기 때문에 분리).
         provider: 답변 생성 LLM provider. None 이면 FakeAnswerLLMProvider 를 쓴다
-            (PoC·테스트). agent OpenAIAnswerLLMProvider 는 transport callable 주입
-            을 요구하므로 운영 모드에서도 본 세션은 fake 자동 — Plan v2 §3 B 참조.
-        config: 답변 생성 실행 설정. None 이면 기본값 (model="configurable",
-            temperature=0.2, timeout_seconds=45, max_contexts=5, max_answer_
-            sentences=8) 사용.
+            (PoC·테스트). 운영은 OpenAIAnswerLLMProvider + ``build_openai_chat_
+            transport`` 주입 — ``build_real_deps`` 가 wiring.
+        generation_config: 답변 생성 실행 설정. None 이면 기본값 (model=
+            "configurable", temperature=0.2, timeout_seconds=45, max_contexts=5,
+            max_answer_sentences=8) 사용.
 
     Returns:
         ``answer`` / ``sources`` / ``used_llm`` 가 채워진 RagState. ``[#N]`` 인용
@@ -150,7 +161,7 @@ def manage_generator(
         state.used_llm = state.target_llm or LlmModel.GPT_4O
         return state
 
-    selected_config = config or AnswerGenerationConfig()
+    selected_config = generation_config or AnswerGenerationConfig()
     selected_provider = provider or FakeAnswerLLMProvider(response=_DEFAULT_FAKE_RESPONSE)
 
     payload = _build_generation_input_payload(state)

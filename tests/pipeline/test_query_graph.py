@@ -16,7 +16,7 @@ from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import index_chunks
 from app.pipeline.nodes import RETRIEVAL_EMPTY_ANSWER
 from app.pipeline.query_graph import QueryGraphDeps, build_query_graph, run_query
-from app.pipeline.stubs import verify_llm_evaluator_stub
+from app.pipeline.stubs import generator_stub, verify_llm_evaluator_stub
 from app.query.acl import ACLViolationError, build_acl_filter
 from app.query.formatter import BLOCKED_ANSWER_MESSAGE
 from app.query.reranker.base import CrossEncoderReranker, FakeCrossEncoderReranker
@@ -171,15 +171,19 @@ def test_run_query_normal_flow_populates_sources_and_verification(
 ) -> None:
     """ACL 매칭 청크가 있으면 sources / verification이 채워지고 정상 응답이 나온다.
 
-    Agent 통합 3/4 (2026-05-19) 정합 — QueryGraphDeps.verify_llm_evaluator 의
-    default 가 manage_verifier_evaluator 로 변경되었다. 본 PoC 정상 흐름 테스트는
-    검증 1단계가 "EKS" 같은 구조적 토큰을 의심으로 잡았을 때 default fake
-    evaluator (LOW_CONFIDENCE → NOT_SUPPORTED 보수적 매핑)가 BLOCKED 정책을
-    trigger 하지 않도록, stub 의 "all SUPPORTED" 동작을 명시 주입한다. 본래
-    의도(검증 2단계 자체가 아닌 정상 흐름 시나리오)와 정합.
+    Agent 통합 3/4 + LangGraph generation_config rename (2026-05-19) 정합 —
+    generator_node / verify_llm_evaluator 모두 stub 명시 주입으로 PoC 정상 흐름
+    시나리오를 검증한다. (default 가 agent 어댑터로 바뀌었으므로 stub 의 [#1]
+    마커·all SUPPORTED 동작에 의존하는 본 회귀 테스트는 stub 명시 주입 패턴 정합.)
     """
     graph = build_query_graph(
-        _deps(dense, sparse, populated_store, verify_llm_evaluator=verify_llm_evaluator_stub)
+        _deps(
+            dense,
+            sparse,
+            populated_store,
+            generator_node=generator_stub,
+            verify_llm_evaluator=verify_llm_evaluator_stub,
+        )
     )
     response = run_query(_initial_state(query="alpha"), graph=graph)
     # 답변은 generator_stub이 [#1] 마커를 단 stub 답변.

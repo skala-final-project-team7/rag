@@ -320,7 +320,11 @@ def test_custom_config_max_contexts_limits_top_contexts() -> None:
     chunks = [_make_chunk(chunk_id=f"chunk-{i}") for i in range(5)]
     provider = FakeAnswerLLMProvider(response=_fake_response())
     state = _state(top_chunks=chunks)
-    manage_generator(state, provider=provider, config=AnswerGenerationConfig(max_contexts=2))
+    manage_generator(
+        state,
+        provider=provider,
+        generation_config=AnswerGenerationConfig(max_contexts=2),
+    )
     assert len(provider.requests) == 1
     # prompt 의 context_count 가 max_contexts 로 제한된다.
     assert provider.requests[0].prompt.context_count == 2
