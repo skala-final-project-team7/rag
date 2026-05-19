@@ -34,6 +34,12 @@
     build_poc_deps 는 QueryGraphDeps 기본값(routing_provider=None → fake provider 자동)
     그대로 사용 — 외부 API 키 없이 PoC 경로 동작 유지. build_real_deps 는
     OpenAIRoutingLLMProvider 를 lazy import 해 OPENAI_API_KEY 환경변수 기반으로 주입.
+  - 2026-05-19, Agent 통합 2/4 — answer-generation-agent 어댑터 wiring.
+    build_poc_deps 와 build_real_deps 모두 QueryGraphDeps 기본값(generator_provider=
+    None → FakeAnswerLLMProvider 자동) 그대로 사용. agent 의 OpenAIAnswerLLMProvider
+    는 transport callable 주입을 요구(agent 패키지에 실 HTTP transport 없음)하므로
+    본 세션은 운영 모드에서도 fake 자동 wiring — Plan v2 §3 B / 다음 단계 이관
+    (working-log.md 미구현 섹션 참조).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+

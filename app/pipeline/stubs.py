@@ -16,6 +16,10 @@
   - 2026-05-18, Agent 통합 1/4 — query-routing-agent 어댑터(``app/query/router.py``)
     가 라우터 자리에 wiring 완료. router_stub 자체는 회귀 보호·PoC fallback 용도로
     보존 (QueryGraphDeps.router_node 의 default 는 manage_router 로 변경).
+  - 2026-05-19, Agent 통합 2/4 — answer-generation-agent 어댑터(``app/query/
+    generator.py``)가 답변 생성기 자리에 wiring 완료. generator_stub 자체는 회귀
+    보호용으로 보존 (QueryGraphDeps.generator_node 의 default 는 manage_generator
+    로 변경).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -24,9 +28,10 @@
           같이 교체된다:
             * router_stub → ``app/query/router.py`` 의 ``manage_router`` (Agent 통합 1/4
               완료, 2026-05-18). 본 stub 은 회귀 보호용으로 보존.
-            * generator_stub → Agent 답변 생성기 (대기 중)
-            * verify_llm_evaluator_stub → Agent 검증 2단계 평가자 (대기 중)
-            * document_analyzer_stub → Agent 문서 분석기 (대기 중)
+            * generator_stub → ``app/query/generator.py`` 의 ``manage_generator``
+              (Agent 통합 2/4 완료, 2026-05-19). 본 stub 은 회귀 보호용으로 보존.
+            * verify_llm_evaluator_stub → Agent 검증 2단계 평가자 (Agent 통합 3/4 대기)
+            * document_analyzer_stub → Agent 문서 분석기 (Agent 통합 4/4 대기)
           본 파일 자체는 Agent 코드를 포함하지 않는다 (담당 영역 분리 — `app/CLAUDE.md`
           "담당 범위를 벗어난 파일은 수정하지 않는다").
 --------------------------------------------------
@@ -72,6 +77,12 @@ def router_stub(state: RagState) -> RagState:
 
 def generator_stub(state: RagState) -> RagState:
     """답변 생성기 [Agent] fake — top_chunks가 있으면 [#1] 인용을 단 stub 답변을 만든다.
+
+    Agent 통합 2/4 완료 (2026-05-19) — 실 답변 생성기는 ``app/query/generator.py`` 의
+    ``manage_generator`` 어댑터로 wiring 되었다. 본 stub 은 회귀 보호용으로 보존된다.
+    QueryGraphDeps.generator_node 의 default 는 manage_generator 로 변경되었으나,
+    호출자가 deps.generator_node=generator_stub 를 명시 주입하면 그래프 흐름이
+    기존과 동일하게 동작함을 보장한다.
 
     실 답변 생성기(GPT-4o + 의도별 프롬프트 + Function Calling, Agent 담당자 영역)가
     답변 텍스트와 sentence_to_citations를 산출하는 자리에, 본 stub은 검증 1단계가

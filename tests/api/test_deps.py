@@ -165,6 +165,11 @@ def test_build_real_deps_wires_real_adapter_classes(
     # 가 manage_router 기본값일 때 partial 로 노드에 주입되는 경로).
     assert deps.routing_provider is not None
     assert deps.routing_config is not None
+    # 답변 생성기 provider / config 는 본 세션(Agent 통합 2/4)에서 fake 자동 wiring
+    # 으로 유지된다 (Plan v2 §3 B). agent OpenAIAnswerLLMProvider 의 transport
+    # 미주입 한계로 build_real_deps 도 None 유지 — 회귀 보호.
+    assert deps.generator_provider is None
+    assert deps.generator_config is None
 
 
 def test_build_real_deps_passes_model_names_from_settings(
@@ -253,6 +258,10 @@ def test_build_poc_deps_uses_fake_adapters_unchanged() -> None:
     assert isinstance(deps.dense_embedder, FakeDenseEmbedder)
     assert isinstance(deps.sparse_embedder, FakeSparseEmbedder)
     assert isinstance(deps.reranker, FakeCrossEncoderReranker)
+    # 답변 생성기 provider / config 는 PoC 에서도 None 유지 (manage_generator 가
+    # FakeAnswerLLMProvider 자동 주입). Agent 통합 2/4 회귀 보호.
+    assert deps.generator_provider is None
+    assert deps.generator_config is None
 
 
 def test_build_poc_deps_shares_chunk_lookup_with_ingest_samples(

@@ -2975,3 +2975,298 @@ query_routing_agent 복사) — ``history_manager_agent`` 패턴 정합:
 - **Agent 통합 4/4 — 문서 분석기** (Ingestion 그래프).
 - **운영 라이브 smoke** — Agent 통합 모두 끝낸 후 docker compose + RAG_USE_REAL_ADAPTERS=true
   로 끝-끝 검증.
+
+
+## 2026-05-19 — Agent 통합 2/4: answer-generation-agent vendoring + 어댑터 노드
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: Agent 통합 1/4 (`25f16b5`) 직후 진척도 ~97%. Agent 담당자가 `ai-agent/
+  answer-generation-agent/` 를 전달, 본 세션에서 `generator_stub` 자리에 실 Agent
+  코드를 wiring 한다 (`docs/ai/current-plan.md` Agent 통합 메모 정합). 직전 세션의
+  `query-routing-agent` vendoring 패턴을 그대로 복제 (신규 패턴 도입 0). 설계서
+  §4.6 답변 생성기 (의도별 task prompt + GPT-4o + [#N] 인용 마커 + Function
+  Calling)·기획서 §6.3·6.4 (③ 답변 생성 에이전트) 정합.
+
+### 변경 사항
+
+**Vendoring (무수정 보존)**
+
+신규 `answer_generation_agent/` (17 파일, ai-agent/answer-generation-agent/src/
+answer_generation_agent 복사) — `query_routing_agent` / `history_manager_agent`
+패턴 정합:
+
+- `app/` / `config/` / `generation/` / `schemas/` / `scripts/` 모두 무수정 복사.
+  `tests/` 는 가져오지 않음 (직전 세션과 동일 정책 — Agent 담당자 저장소에서 이미
+  검증됐다는 가정).
+- `__init__.py` 표준 모듈 구조 — `from answer_generation_agent.generation.
+  answer_generation import …` 같은 absolute import 가 rag 저장소 루트에서 동작
+  (Python path 정합).
+
+**pyproject.toml 갱신**
+
+- `[tool.setuptools.packages.find].include` 에 `answer_generation_agent*` 추가.
+- `[tool.ruff].extend-exclude` 에 `answer_generation_agent` + `tests/
+  answer_generation_agent` 추가.
+- `[tool.mypy].exclude` + `[[tool.mypy.overrides]] module = "answer_generation_agent
+  .*" follow_imports = "skip"` 추가.
+
+**어댑터 노드 신설 — `app/query/generator.py` (~280 lines)**
+
+- `manage_generator(state, *, provider=None, config=None) -> RagState` — vendoring
+  한 agent 의 in-process 로직 함수를 순차 호출:
+    1. `normalize_generation_input(payload, max_contexts)` →
+       `NormalizedGenerationInputResult`
+    2. `AnswerGenerationService(provider).generate(normalized, config)` →
+       `AnswerGenerationResult` (prompt 빌더 + LLM provider 호출까지 포함)
+    3. `map_citations(generation_result, normalized)` → `CitationMappingResult`
+    4. `build_answer_output(normalized, generation, citation)` → `AnswerOutput`
+- RagState ↔ agent 스키마 변환:
+    - `_INTENT_TO_TASK_PROMPT` — Intent 4종 → TaskPromptType 매핑표
+      (rag-pipeline-design.md §4.6.2 / §6.6 표 정합):
+        - INCIDENT_RESPONSE → TIMELINE
+        - OPERATION_GUIDE → STEP_BY_STEP
+        - POLICY_PROCEDURE → EVIDENCE_FIRST
+        - HISTORY_LOOKUP → HISTORY_SUMMARY
+    - `_INTENT_TO_AGENT_LABEL` — Intent → agent IntentLabel (영어 snake_case)
+      매핑 (router.py 의 역방향). Intent None 시 "unknown" fallback.
+    - `_build_generation_input_payload` — RagState 의 `query` / `user_id` /
+      `conversation_id` / `intent` / `rewritten_queries` / `metadata_filters` /
+      `pool_weights` / `history_decision` 을 agent GenerationInput dict 로 변환.
+    - `_chunk_to_top_context_payload` — RAG Chunk → agent TopContext dict 변환.
+      `context_id` 는 `ctx-{index:03d}-{chunk_id[:8]}` 합성 (검증 1단계 `[#N]`
+      마커 N(1-based 순번)과 의미상 연결). `rerank_score` 는 입력 순서 보존을 위해
+      `1 - 0.001 * index` 부여 (agent normalize 의 sort_key 정합).
+    - `_synthesize_conversation_id` / `_synthesize_routing_id` — 결정론 합성
+      (sha1 16자) — SSE 라우트에서 conversation_id None 으로 들어오는 싱글턴 경로
+      를 안전 fallback 없이 흡수.
+    - `_compose_answer_with_citations` — AnswerOutput.sentences 를 순회하며
+      `"{text} [#N1][#N2]"` 형식으로 답변 재조립. context_id → N 매핑은
+      `used_context_ids` 의 등장 순서(1-based, agent answer_output_builder 의
+      `_build_sources` 순서와 정합). insufficient_context / failed 상태는 agent
+      안내문 그대로 사용. sentences 가 비고 answer 만 있는 경우 끝에 `[#1]` 1회
+      부착 — 검증 1단계 동작 보장.
+    - `_agent_sources_to_rag_sources` — agent GeneratedSource → rag Source 변환.
+      chunk.metadata 의 정보 (attachment_filename / attachment_mime / source_type
+      / webui_link / last_modified) 보존. score 는 rerank_score(0~1) × 100 의 0~100
+      정수 (api-spec.md Source.score). chunk 매칭 실패한 fallback citation source 는
+      안전을 위해 skip.
+- LLM provider default: `FakeAnswerLLMProvider` (PoC·테스트, `_DEFAULT_FAKE_RESPONSE`
+  주입). agent 의 `OpenAIAnswerLLMProvider` 는 `transport=None` 시
+  `ProviderConfigurationError` 를 던지므로 본 세션은 운영 모드도 fake 자동 wiring
+  (Plan v2 §3 B / 사용자 결정).
+- 안전 fallback: provider 실패·정규화 실패 시 `_apply_fallback` — stub 정합 `[#1]
+  {title} 관련 정보를 다음과 같이 안내합니다.` (설계서 §4.6.5 "plain text 폴백,
+  출처 매핑은 검증기 1단계 결과로 대체" 정합).
+- `used_llm` — `state.target_llm` 우선, 없으면 GPT_4O (설계서 §4.6.3 — 라우터가
+  GPT-4o-mini 동적 라우팅한 경우 그 결정 보존).
+
+**그래프 wiring — `app/pipeline/query_graph.py`**
+
+- `QueryGraphDeps` 갱신:
+    - `generator_provider: GeneratorProvider | None = None` 추가
+    - `generator_config: GeneratorConfig | None = None` 추가
+    - `generator_node` default 를 `generator_stub` → `manage_generator` 로 변경.
+- `build_query_graph` 갱신:
+    - `deps.generator_node is manage_generator` 일 때만 `functools.partial` 로
+      `provider` / `config` 주입 (router 패턴 정합). 외부 사용자 정의 generator_node
+      는 captured 가 이미 있다고 가정하고 그대로 등록.
+- import 정리 — `generator_stub` 제거, `app.query.generator.manage_generator` 추가.
+
+**부트스트랩 — `app/api/deps.py`**
+
+- 모듈 docstring 변경 이력에 Agent 통합 2/4 단락 추가.
+- `build_poc_deps` / `build_real_deps` 본체 변경 없음 — QueryGraphDeps 기본값
+  (generator_provider=None → FakeAnswerLLMProvider 자동) 그대로. 사용자 결정
+  (Plan v2 §3 B) — agent OpenAIAnswerLLMProvider 는 transport 미주입 한계로 본
+  세션은 운영 모드도 fake 자동 wiring 유지.
+
+**Stub 갱신 — `app/pipeline/stubs.py`**
+
+- 모듈 docstring 변경 이력에 Agent 통합 2/4 단락 추가.
+- `generator_stub` docstring 에 "Agent 통합 2/4 완료" 표시 + 회귀 보호용 보존 명시.
+- `generator_stub` 본체 변경 없음 — 회귀 테스트·외부 명시 주입(`deps.generator_node
+  =generator_stub`) 경로 보장.
+
+**Re-export — `app/query/__init__.py`**
+
+- 패키지 docstring 구현 상태 단락에 `generator.py — manage_generator` 한 줄 추가
+  ([Agent 통합 2/4] 표시).
+- `manage_generator` re-export + `__all__` 알파벳 순 갱신.
+
+### 신규 회귀 테스트 `tests/query/test_generator.py` (~270 lines, 13 tests)
+
+- `test_empty_top_chunks_returns_empty_answer` — top_chunks 비면 stub 정합 빈 답변
+  (그래프 검색 0건 분기에서는 도달 X) 방어 처리 회귀 보호.
+- `test_default_fake_provider_produces_cited_answer` — provider=None 분기
+  (FakeAnswerLLMProvider 자동 주입) 회귀 보호. 답변에 `[#1]` 인용 마커 합성 확인.
+- `test_used_llm_prefers_state_target_llm_over_default` — 라우터가 동적 라우팅한
+  `target_llm` 우선 (§4.6.3).
+- `test_used_llm_defaults_to_gpt_4o_when_state_target_unset` — target_llm None 시
+  GPT_4O 기본.
+- `test_state_query_is_not_mutated` — 비파괴적 호출 회귀 보호.
+- `test_intent_maps_to_task_prompt_type` (parametrize ×4) — Intent 4종 → agent
+  prompt builder 에 정확한 task_prompt_type 전달 검증. provider.requests 의
+  developer_prompt 에 task type 마커가 포함되는지 단언 (§4.6.2 / §6.6 표).
+- `test_citation_markers_synthesized_in_answer` — agent sentences[*].citations 가
+  used_context_ids 순서(1-based)로 `[#N]` 마커 합성됨을 회귀 보호 (§4.6.1).
+- `test_verify_answer_rules_compatibility` — 생성기 답변이 검증 1단계
+  (`verify_answer_rules`) 입력으로 정상 동작 (PASS 떨어짐) 회귀 보호.
+- `test_sources_built_from_top_chunks` — GeneratedSource → Source 변환 — score 0~100
+  정수, space_key 보존, source_type 매핑.
+- `test_attachment_source_metadata_preserved` — 첨부 청크의 attachment_filename /
+  attachment_mime / SourceType.ATTACHMENT 보존.
+- `test_provider_failure_falls_back_safely` — AnswerProviderError 발생 시 안전
+  fallback (stub-like [#1] 답변).
+- `test_invalid_llm_payload_falls_back_safely` — agent parse_llm_response 실패 시
+  안전 fallback.
+- `test_missing_conversation_id_synthesizes_deterministic_id` — SSE 라우트
+  conversation_id None 경로 안전 흡수.
+- `test_history_decision_contextualized_question_used` — history_decision 의
+  contextualized_question 이 agent user_prompt 에 전달 회귀 보호.
+- `test_custom_config_max_contexts_limits_top_contexts` — config.max_contexts 가
+  agent normalization 컨텍스트 제한에 반영.
+
+### `tests/api/test_deps.py` 회귀 보호 추가
+
+- `test_build_real_deps_wires_real_adapter_classes` — `deps.generator_provider is
+  None` + `deps.generator_config is None` 단언 추가 (Plan v2 §3 B 정합 — 운영
+  모드도 fake 자동 wiring 유지).
+- `test_build_poc_deps_uses_fake_adapters_unchanged` — 동일 단언 추가 (PoC 정합).
+
+### 본 세션 미구현 (Plan v2 §3 — 다음 단계 이관, 설계서 §4.6 정합)
+
+다음 항목들은 본 세션 범위를 벗어나며, `app/query/generator.py` docstring §[본
+세션 미구현]·`docs/ai/working-log.md` 본 단락에 일관 기록되어 다음 세션에서 누락
+없이 이어받게 한다.
+
+- **(A) SSE 토큰 스트리밍** (설계서 §4.6.4 / 기획서 KPI "P95 5초", "토큰당
+  25~40ms") — agent MVP 는 `streaming_supported=False`, 전체 답변을 동기 반환.
+  본 세션의 `manage_generator` 도 1회 호출·1회 반환. SSE 라우트 (`app/api/routes
+  .py`)는 token 이벤트를 1회만 송신 (전체 답변) — 직전 세션 동작 그대로 유지.
+  - 다음 단계: agent streaming API 추가 (Agent 담당자 영역) OR 본 저장소가
+    OpenAI Streaming API → AnswerLLMResult chunk 어댑터 transport 추가 → SSE
+    라우트 multi-token 송신으로 확장 (B 와 함께 진행 권장).
+
+- **(B) 운영 OpenAI HTTP transport** (설계서 §4.6.3 GPT-4o 운영 호출) — agent 의
+  `OpenAIAnswerLLMProvider` 는 `transport=None` 시 `ProviderConfigurationError` 를
+  던진다. 본 세션은 `build_real_deps` 도 PoC 와 동일하게 fake 자동 wiring → 운영
+  모드에서 실 OpenAI 호출 안됨.
+  - 다음 단계: Agent 담당자가 transport 제공 OR 본 저장소가 `openai>=1.30` (이미
+    의존성 보유) 기반 transport callable 작성 후 주입.
+
+- **(C) Rate Limit Fallback — GPT-4o-mini 다운그레이드** (설계서 §4.6.5) — agent
+  에 `select_generation_model(use_fallback=True)` 인터페이스만 있고 retry
+  orchestrator 없음. 본 세션은 LLM 실패 시 안전 fallback (stub-like)만 수행.
+  - 다음 단계: B 운영 transport 도입 후 retry orchestrator 추가 + `verification
+    .note` 기록.
+
+- **(D) Function Calling 스키마 강제** (설계서 §4.6.1) — agent 는 prompt
+  instruction 으로 JSON schema 요청. OpenAI `tools=` 미설정. Agent 담당자 영역 —
+  본 저장소가 수정하지 않음.
+  - 다음 단계: Agent 담당자가 tool definition 추가.
+
+- **(E) 자연어 출처 인용 패턴** — `[스페이스명]…` / `첨부 파일 [filename]에
+  따르면…` (설계서 §4.6.1 v0.2.2 신설). agent prompt template 에 미반영. Agent
+  담당자 영역 — 본 저장소가 수정하지 않음.
+  - 다음 단계: Agent 담당자가 prompt template 갱신.
+
+- **(F) 검증 2단계 LLM 평가자 통합** (설계서 §4.7.2) — `verify_llm_evaluator_stub`
+  그대로. Agent 통합 3/4 별도 세션.
+
+- **(G) 의도별 task prompt 4종 정합 검증** (설계서 §6.6 표) — agent prompt
+  template 4종 (`timeline/step_by_step/evidence_first/history_summary`) 이 설계서
+  §6.6 표와 정합되지만, 본 세션에서는 매핑만 검증하고 prompt 본문 비교는 하지
+  않음. 평가 세션 또는 Agent 담당자 영역 prompt 튜닝 단계에서 §6.6 표와 1:1 점검.
+
+### 책임 분리 (본 담당자 영역만)
+
+- 본 commit 은 본 담당자 영역 8 파일 (2 new — `app/query/generator.py` + `tests/
+  query/test_generator.py` / 6 modified — `pyproject.toml` + `app/pipeline/
+  query_graph.py` + `app/pipeline/stubs.py` + `app/query/__init__.py` + `app/api/
+  deps.py` + `tests/api/test_deps.py`) + vendoring 17 파일 (무수정) + 본
+  docs/ai/working-log.md = 총 27 파일.
+- Agent 패키지 (`answer_generation_agent/**`) — **무수정 보존**. ai-agent 저장소
+  원본을 그대로 복사.
+- 기존 stub (`generator_stub`) **보존** — 회귀 테스트·외부 명시 주입 경로 보장.
+- `app/api/routes.py` 미변경 — A (SSE token streaming) 미구현으로 본 세션 범위 외.
+- `docs/architecture.md` / `docs/api-spec.md` / `docs/db-schema.md` / `docs/
+  rag-pipeline-design.md` / `docs/chunking-strategy.md` 변경 없음 — 외부 API
+  표면·아키텍처·스키마 동일.
+
+### 정합성 검증 (오버튜닝 회피)
+
+- `app/CLAUDE.md` "담당 범위를 벗어난 파일은 수정하지 않는다" 절대 규칙 정합 —
+  Agent 패키지 자체 0 수정 ✓
+- `app/CLAUDE.md` §5 LLM 라우팅 — 답변 생성기는 GPT-4o 기본, 라우터 결정 시
+  GPT-4o-mini 동적 라우팅 (`used_llm = state.target_llm or GPT_4O`) ✓
+- `app/CLAUDE.md` §3 보안 — ACL 필터는 라우터 영역에서 metadata_filter.acl 로
+  단순 전달되며 본 어댑터는 ACL 판정에 관여하지 않음 ✓
+- rag-pipeline-design.md §4.6.1 "모든 문장에 근거 청크 번호를 [#1], [#2] 형식으로
+  명시" — `_compose_answer_with_citations` 가 sentences → answer 재조립 시점에
+  부착 ✓
+- rag-pipeline-design.md §4.6.2 / §6.6 의도별 task prompt — Intent 4종 → agent
+  TaskPromptType 1:1 매핑 ✓
+- rag-pipeline-design.md §4.6.3 GPT-4o 기본 + 동적 라우팅 — `target_llm` 우선 ✓
+- rag-pipeline-design.md §4.6.5 plain text 폴백 — `_apply_fallback` 이 stub 정합
+  `[#1] {title}` 답변 부여 (검증기 1단계 동작 보장) ✓
+- 기존 패턴 재사용 — `query_routing_agent` vendoring + `manage_router` 어댑터
+  패턴을 그대로 `answer_generation_agent` + `manage_generator` 로 복제. 신규 패턴
+  도입 0 ✓
+- 새 의존성 도입 0 — `answer_generation_agent` 는 표준 라이브러리 + dataclasses
+  만 사용. `pyproject.toml` 변경은 setuptools/ruff/mypy 대상 등록만 ✓
+
+### 후방 호환성
+
+- 신규 어댑터 + Agent 패키지 vendoring + 기존 generator_stub 보존 — 기존 회귀
+  테스트 0건 영향. `test_run_query_normal_flow_populates_sources_and_verification`
+  등 query_graph end-to-end 회귀는 새 default(`manage_generator + FakeAnswer
+  LLMProvider`)와 호환 (`[#1]` 마커·sources 채움·BLOCKED 아님 동작 유지).
+- `QueryGraphDeps` 신규 필드 2종 (`generator_provider` / `generator_config`) 모두
+  default None — 기존 호출자(`build_poc_deps` 직접 호출, 테스트 등) 무변경 통과.
+- `app/api/deps.py` 시그니처 변경 없음.
+- `tests/pipeline/test_query_graph.py` 의 외부 명시 주입 경로
+  (`generator_node=_generator_with_suspicious`)는 `is manage_generator` 분기로
+  `else` 경로 (그대로 등록)가 동작 — 기존 패턴 그대로 호환.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- 샌드박스 ruff 0.15.13 으로 format `--check` (117 files already formatted) + check
+  (All checks passed!) 통과.
+- pytest 는 `./scripts/verify.sh` 실행 시 통과 예상 — 신규 16 케이스
+  (test_generator) + 기존 회귀 0건 + test_deps.py 회귀 추가 (PoC + real 2건).
+  샌드박스 Python 3.10 한계 (agent StrEnum import 불가)로 직접 pytest 미실행
+  (직전 세션 패턴 동일).
+
+### Agent 통합 진척도 (4 stub 중 2 종료)
+
+| stub | 현재 상태 |
+|---|---|
+| `router_stub` | ✅ Agent 통합 1/4 완료 (manage_router) |
+| `generator_stub` | ✅ **본 commit 으로 wiring 완료** (manage_generator) |
+| `verify_llm_evaluator_stub` | ⏳ Agent 통합 3/4 대기 |
+| `document_analyzer_stub` | ⏳ Agent 통합 4/4 대기 |
+
+### 비고
+
+- 본 commit 이 끝나면 본 담당자 영역 ~97% → **~98%**.
+- 본 commit 의 변경 영향 파일 = 8 본 담당자 + 17 vendoring + 1 working-log = 26 파일.
+  `git diff --stat HEAD` 로 정확히 검증.
+
+### 후속 TODO (다음 세션 후보 — 우선순위)
+
+1. **Agent 통합 3/4 — 검증 2단계 LLM 평가자** — `verify-agent` 패키지가 전달되면
+   동일 패턴으로 `app/pipeline/nodes.py` 의 `verify_pipeline_node` 가 호출하는
+   `llm_evaluator` 자리에 어댑터 wiring.
+2. **Agent 통합 4/4 — 문서 분석기** (Ingestion 그래프) — `document-analyzer-agent`
+   패키지가 전달되면 `app/pipeline/ingestion_graph.py` 의 `document_analyzer_node`
+   에 wiring.
+3. **(A+B) SSE 토큰 스트리밍 + 운영 OpenAI HTTP transport** — Agent 통합 4종 모두
+   끝낸 후 (또는 별도 세션에서) 함께 진행. `openai>=1.30` 기반 streaming transport
+   callable → `OpenAIAnswerLLMProvider(transport=...)` 주입 → SSE 라우트 multi-
+   token 송신 확장 + `build_real_deps` 에 wiring.
+4. **(C) Rate Limit fallback (GPT-4o-mini 다운그레이드 + verification.note 기록)**
+   — B 운영 transport 도입 후.
+5. **(D+E) Function Calling 강제 + 자연어 출처 인용 패턴** — Agent 담당자 보고 사항.
+6. **(G) 의도별 task prompt 4종 정합 검증** — 평가 세션에서 §6.6 표와 1:1 점검.
+7. **운영 라이브 smoke** — Agent 통합 4종 + A·B 모두 끝낸 후 docker compose +
+   `RAG_USE_REAL_ADAPTERS=true` 로 끝-끝 검증.

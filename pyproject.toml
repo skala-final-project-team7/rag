@@ -57,19 +57,28 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 # history_manager_agent: ai-agent 저장소에서 vendoring한 History Manager Agent 패키지
 # query_routing_agent: ai-agent 저장소에서 vendoring한 Query Routing Agent 패키지
-include = ["app*", "history_manager_agent*", "query_routing_agent*"]
+# answer_generation_agent: ai-agent 저장소에서 vendoring한 Answer Generation Agent 패키지
+include = [
+    "app*",
+    "history_manager_agent*",
+    "query_routing_agent*",
+    "answer_generation_agent*",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# vendoring한 외부 코드(History Manager Agent / Query Routing Agent)는 RAG 저장소
-# lint/format 대상에서 제외 — 원본을 무수정 보존한다. 통합 어댑터
-# (app/query/history.py, app/query/router.py)는 정상적으로 검사된다.
+# vendoring한 외부 코드(History Manager Agent / Query Routing Agent / Answer
+# Generation Agent)는 RAG 저장소 lint/format 대상에서 제외 — 원본을 무수정 보존
+# 한다. 통합 어댑터(app/query/history.py, app/query/router.py, app/query/
+# generator.py)는 정상적으로 검사된다.
 extend-exclude = [
     "history_manager_agent",
     "tests/history_manager_agent",
     "query_routing_agent",
     "tests/query_routing_agent",
+    "answer_generation_agent",
+    "tests/answer_generation_agent",
 ]
 
 [tool.ruff.lint]
@@ -83,14 +92,17 @@ asyncio_mode = "auto"
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-# vendoring한 외부 코드(History Manager Agent / Query Routing Agent)는 mypy 검사
-# 대상에서 제외 — ruff 설정(extend-exclude)과 대칭. 원본을 무수정 보존한다.
-# 통합 어댑터(app/query/history.py, app/query/router.py)는 정상적으로 검사된다.
+# vendoring한 외부 코드(History Manager Agent / Query Routing Agent / Answer
+# Generation Agent)는 mypy 검사 대상에서 제외 — ruff 설정(extend-exclude)과 대칭.
+# 원본을 무수정 보존한다. 통합 어댑터(app/query/history.py, app/query/router.py,
+# app/query/generator.py)는 정상적으로 검사된다.
 exclude = [
     "history_manager_agent/",
     "tests/history_manager_agent/",
     "query_routing_agent/",
     "tests/query_routing_agent/",
+    "answer_generation_agent/",
+    "tests/answer_generation_agent/",
 ]
 
 [[tool.mypy.overrides]]
@@ -99,4 +111,8 @@ follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 module = "query_routing_agent.*"
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = "answer_generation_agent.*"
 follow_imports = "skip"
