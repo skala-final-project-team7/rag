@@ -548,7 +548,8 @@ BE 담당자 명세 확정 후 진행.
 
 작업 항목:
 
-- [ ] Rate Limit fallback 분기
+- [x] Rate Limit fallback 분기 — non-streaming (manage_generator) +
+  streaming (_streaming_event_stream) 양쪽 + 회귀 3건 (다음 commit)
 
 ### feature16: 운영 라이브 smoke — P3
 
@@ -603,10 +604,9 @@ BE 담당자 명세 확정 후 진행.
 ## 완료 현황 (2026-05-19 종료 시점)
 
 - **본 담당자 (Pipeline + Storage) 영역 진척도**: **~100%** (운영성·관측성·streaming
-  까지 완성)
+  + Rate Limit fallback 까지 완성)
 - **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
-  Mode B 시연 검증 + Milestone D feature12 + feature14)**
-- **잔여 (Milestone D)**: feature13 / feature15 / feature16 / feature17 / feature18
-- **즉시 진행 가능 (외부 협의 불필요)**: feature15 / feature16 / feature17 /
-  feature18(부분)
+  Mode B 시연 검증 + Milestone D feature12 + feature14 + feature15)**
+- **잔여 (Milestone D)**: feature13 / feature16 / feature17 / feature18
+- **즉시 진행 가능 (외부 협의 불필요)**: feature16 / feature17 / feature18(부분)
 - **외부 협의 대기**: feature13 (BE 명세), feature18(Data Agent / Agent 담당자 영역)

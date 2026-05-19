@@ -280,6 +280,93 @@ def test_invalid_llm_payload_falls_back_safely() -> None:
     assert "[#1]" in result.answer
 
 
+# --- feature15: Rate Limit fallback (§4.6.5) ---
+
+
+class _SequencedProvider:
+    """순차 응답을 반환하는 fake provider — 첫 호출은 raise, 두 번째 호출은 정상.
+
+    feature15 회귀용. agent ``AnswerLLMProvider`` 프로토콜에 정합 — ``generate
+    _answer(request)`` 와 ``provider_name`` / ``has_credentials`` 만 충족하면 된다.
+    """
+
+    provider_name = "sequenced_fake"
+
+    def __init__(self, responses: list[object]) -> None:
+        # responses 는 Exception 또는 정상 응답 dict 의 시퀀스.
+        from answer_generation_agent.generation.answer_generation import (
+            FakeAnswerLLMProvider as _Fake,
+        )
+
+        self._delegates = [
+            r if isinstance(r, Exception) else _Fake(response=r)  # type: ignore[arg-type]
+            for r in responses
+        ]
+        self._call_index = 0
+
+    def has_credentials(self) -> bool:
+        return True
+
+    def generate_answer(self, request: object) -> object:
+        index = self._call_index
+        self._call_index += 1
+        delegate = self._delegates[index]
+        if isinstance(delegate, Exception):
+            raise delegate
+        return delegate.generate_answer(request)  # type: ignore[attr-defined]
+
+
+def test_rate_limit_error_triggers_fallback_model_retry() -> None:
+    """1차 호출 RateLimitError → fallback_model 로 1회 재시도 후 정상 응답.
+
+    feature15 회귀 보호 — 설계서 §4.6.5 정합. provider 가 첫 호출에 ``error_type=
+    'rate_limit_error'`` 를 raise 하면 manage_generator 가 use_fallback_model=True
+    로 재호출해 fallback_model (GPT-4o-mini) 로 답변을 생성한다.
+    """
+    rate_limit_error = AnswerProviderError(
+        message="rate limit exceeded",
+        retryable=True,
+        error_type="rate_limit_error",
+    )
+    success_response = _fake_response(answer="장애 대응 절차를 안내합니다.")
+    provider = _SequencedProvider(responses=[rate_limit_error, success_response])
+    config = AnswerGenerationConfig(model="gpt-4o", fallback_model="gpt-4o-mini")
+    state = _state()
+    result = manage_generator(state, provider=provider, generation_config=config)
+    # 1회 재시도 후 정상 답변 채워짐 (안전 fallback 의 stub-like 답변이 아님).
+    assert result.answer
+    assert "장애 대응 절차" in result.answer
+    # provider 가 정확히 2회 호출됐는지 — 첫 호출 raise + 재시도 1회.
+    assert provider._call_index == 2
+    # used_llm 이 fallback model (GPT_4O_MINI) 로 정합화 (다운그레이드 인지).
+    assert result.used_llm is LlmModel.GPT_4O_MINI
+
+
+def test_non_rate_limit_error_does_not_trigger_fallback() -> None:
+    """rate_limit_error 가 아닌 다른 AnswerProviderError 는 안전 fallback 으로 흡수.
+
+    feature15 회귀 보호 — server_error/auth_error 등에 fallback_model 재시도는
+    무의미하므로 기존 _apply_fallback (stub-like [#1] 답변) 로 떨어진다. provider
+    가 1회만 호출돼야 한다 (재시도 없음).
+    """
+    server_error = AnswerProviderError(
+        message="server error",
+        retryable=True,
+        error_type="server_error",
+    )
+    provider = _SequencedProvider(responses=[server_error, _fake_response()])
+    config = AnswerGenerationConfig(model="gpt-4o", fallback_model="gpt-4o-mini")
+    state = _state()
+    result = manage_generator(state, provider=provider, generation_config=config)
+    # provider 가 1회만 호출됐다 — fallback_model 재시도 없음.
+    assert provider._call_index == 1
+    # 답변은 _apply_fallback 의 stub-like [#1] 답변.
+    assert result.answer is not None
+    assert "[#1]" in result.answer
+    # used_llm 은 정상 분기 GPT_4O (fallback 트리거 안 됨).
+    assert result.used_llm is LlmModel.GPT_4O
+
+
 # --- conversation_id None 시 결정론 합성 ---
 
 

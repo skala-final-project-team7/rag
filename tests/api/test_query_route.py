@@ -353,12 +353,147 @@ def _streaming_client(
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
+def _streaming_client_with_stream_callable(
+    populated_graph: Any,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_callable: Any,
+) -> httpx.AsyncClient:
+    """feature15 streaming fallback 회귀용 — stream_openai_answer 를 임의 callable 로
+    monkeypatch 한 라우트 클라이언트. _streaming_client 와 동일 패턴이지만 호출 측에서
+    더 복잡한 분기를 검증할 수 있도록 monkeypatch 값을 외부에서 주입한다.
+    """
+    from types import SimpleNamespace
+
+    from app.api import routes as routes_module
+    from app.pipeline.query_graph import build_query_graph_for_streaming
+
+    settings = Settings(_env_file=None)  # type: ignore[arg-type]
+    dense = FakeDenseEmbedder(dimension=8)
+    sparse = FakeSparseEmbedder()
+    store = QdrantPoolStore.in_memory(settings, dense_dimension=8)
+    store.bootstrap_collections()
+    index_chunks(
+        [
+            _chunk(chunk_id="a" * 40, text="alpha bravo charlie"),
+            _chunk(chunk_id="b" * 40, text="bravo delta echo"),
+        ],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=FakeEmbeddingCache(),
+    )
+    deps = QueryGraphDeps(
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        reranker=FakeCrossEncoderReranker(),
+        generator_provider=object(),
+        generator_config=SimpleNamespace(
+            model="gpt-4o",
+            fallback_model="gpt-4o-mini",
+            temperature=0.2,
+            timeout_seconds=45,
+        ),
+    )
+    streaming_graph = build_query_graph_for_streaming(deps)
+
+    monkeypatch.setattr(routes_module, "stream_openai_answer", stream_callable)
+
+    from pydantic import SecretStr
+
+    settings_with_key = settings.model_copy(update={"openai_api_key": SecretStr("sk-test")})
+
+    app = create_app()
+    app.state.deps = deps
+    app.state.settings = settings_with_key
+    app.state.streaming_graph = streaming_graph
+    app.state.graph = populated_graph
+    app.dependency_overrides[get_graph] = lambda: populated_graph
+    transport = ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_true_rate_limit_falls_back_to_fallback_model(
+    populated_graph: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """feature15 streaming Rate Limit fallback — 1차 RateLimitError → fallback_model 재시도.
+
+    stream_openai_answer 첫 호출 (primary_model=gpt-4o) 에서 RateLimitError raise,
+    두 번째 호출 (fallback_model=gpt-4o-mini) 에서 정상 token chunk yield → 라우트가
+    정상 SSE 응답 송신 + meta.used_llm = gpt-4o-mini 노출.
+    """
+    # openai.RateLimitError 생성 — sentinel response/body 만 채우고 status_code=429.
+    from openai import RateLimitError
+
+    from app.query.openai_streaming import StreamingTokenChunk
+
+    # RateLimitError 시그니처 — message + response (httpx.Response) + body. 본 테스트는
+    # 메시지·status_code 만 검증하므로 minimal Response 객체로 인스턴스화.
+    fake_response = httpx.Response(429, request=httpx.Request("POST", "https://api.openai.com"))
+    rate_limit_error = RateLimitError(
+        message="rate limit exceeded", response=fake_response, body=None
+    )
+
+    call_count = {"n": 0}
+
+    def _stream_with_rate_limit_then_success(**kwargs: Any) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            assert kwargs["model"] == "gpt-4o"
+
+            # primary_model 호출 — 토큰 1개 yield 후 raise (UI 가 부분 답변 송신을
+            # 받았다가 빈 token 으로 clear 되는 흐름까지 검증).
+            def _gen() -> Any:
+                yield StreamingTokenChunk(text="(부분)")
+                raise rate_limit_error
+
+            return _gen()
+        # fallback_model 호출 — 정상 token yield.
+        assert kwargs["model"] == "gpt-4o-mini"
+
+        def _gen_fb() -> Any:
+            yield StreamingTokenChunk(text="정상")
+            yield StreamingTokenChunk(text="[#1]")
+
+        return _gen_fb()
+
+    client = _streaming_client_with_stream_callable(
+        populated_graph,
+        monkeypatch=monkeypatch,
+        stream_callable=_stream_with_rate_limit_then_success,
+    )
+    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
+    async with client as c:
+        resp = await c.post("/api/v1/rag/query", json=body)
+    assert resp.status_code == 200
+
+    events = _parse_sse(resp.text)
+    # stream_openai_answer 가 정확히 2회 호출됐다 — primary 1회 + fallback 1회.
+    assert call_count["n"] == 2
+    token_payloads = [data for name, data in events if name == "token"]
+    # (부분) + (빈 clear) + 정상 + [#1] = 4 회 token (또는 차단 분기 추가 1회). 최소 3회.
+    assert len(token_payloads) >= 3
+    # 빈 clear token 이 송신됐다 — UI 가 부분 답변을 덮어쓸 수 있도록.
+    assert "" in token_payloads
+    # meta.used_llm 이 fallback_model (gpt-4o-mini) 로 노출 — 다운그레이드 인지.
+    meta = json.loads(dict(events)["meta"])
+    assert meta["used_llm"] == "gpt-4o-mini"
+
+
 @pytest.mark.asyncio
 async def test_query_route_stream_true_emits_multiple_token_chunks(
     populated_graph: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """운영 streaming — token chunk 가 다중 송신되고 후행 4 이벤트 시퀀스 정합."""
-    streaming_tokens = ["답변 ", "시작 ", "[#1]"]
+    """운영 streaming — token chunk 가 다중 송신되고 후행 4 이벤트 시퀀스 정합.
+
+    NOTE: ``_parse_sse`` 가 ``data:`` 라인을 ``.strip()`` 으로 정규화하므로 본 회귀
+    에서는 trailing/leading 공백 없는 토큰을 사용해 단언 정합화한다 (SSE 공백 보존
+    여부는 본 회귀 범위 외).
+    """
+    streaming_tokens = ["답변", "시작", "[#1]"]
     client = _streaming_client(
         populated_graph,
         monkeypatch=monkeypatch,
