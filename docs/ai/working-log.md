@@ -3270,3 +3270,239 @@ answer_generation_agent 복사) — `query_routing_agent` / `history_manager_age
 6. **(G) 의도별 task prompt 4종 정합 검증** — 평가 세션에서 §6.6 표와 1:1 점검.
 7. **운영 라이브 smoke** — Agent 통합 4종 + A·B 모두 끝낸 후 docker compose +
    `RAG_USE_REAL_ADAPTERS=true` 로 끝-끝 검증.
+
+
+## 2026-05-19 — Agent 통합 3/4: answer-verification-agent vendoring + 어댑터 노드
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: Agent 통합 2/4 (`5861057`) 직후 진척도 ~98%. Agent 담당자가 `ai-agent/
+  answer-verification-agent/` 를 전달, 본 세션에서 `verify_llm_evaluator_stub`
+  자리에 실 Agent 코드를 wiring 한다. 직전 세션과 다른 점은 본 저장소가 검증
+  1단계(`verify_answer_rules`)를 이미 Pipeline 으로 수행 중이므로 agent 의
+  rule-based / sentence parser / overall label 집계 등 중복 책임은 사용하지
+  않는다. agent 의 LLM evaluator(`AnswerEvaluatorProvider.evaluate_sentence`)만
+  in-process 로 호출한다. 설계서 §4.7.2 (검증 2단계 LLM 평가자 GPT-4o-mini, FLAG
+  문장 한정)·기획서 ④ 답변 검증 정합.
+
+### 변경 사항
+
+**Vendoring (무수정 보존)**
+
+신규 `answer_verification_agent/` (26 파일, ai-agent/answer-verification-agent/
+src/answer_verification_agent 복사) — `query_routing_agent` /
+`answer_generation_agent` 패턴 정합:
+
+- `app/` / `config/` / `evaluator/` / `qca/` / `regeneration/` / `schemas/` /
+  `scripts/` / `storage/` / `verification/` / `workflow.py` 모두 무수정 복사.
+  `tests/` 는 가져오지 않음 (직전 세션과 동일 정책).
+
+**pyproject.toml 갱신**
+
+- `[tool.setuptools.packages.find].include` 에 `answer_verification_agent*` 추가.
+- `[tool.ruff].extend-exclude` 에 `answer_verification_agent` + `tests/
+  answer_verification_agent` 추가.
+- `[tool.mypy].exclude` + `[[tool.mypy.overrides]] module = "answer_verification_
+  agent.*" follow_imports = "skip"` 추가.
+
+**어댑터 노드 신설 — `app/query/verifier_evaluator.py` (~220 lines)**
+
+- `manage_verifier_evaluator(*, answer, top_chunks, suspicious_sentences,
+  provider=None, config=None) -> list[Verification]` — stub 시그니처 그대로
+  유지 (keyword 전용 — `verify_pipeline_node` 의 `llm_evaluator` 호출 정합).
+- agent in-process 호출:
+    1. `_chunks_to_normalized_contexts(top_chunks)` → `list[NormalizedContext]`
+       (context_id 합성은 `app/query/generator.py` 와 동일 패턴 — 두 어댑터의
+       일관성 보장).
+    2. suspicious_sentences 순회하며:
+       - `_sentence_check_to_target(check, top_chunks)` → `SuspiciousSentence
+         Target` (1-based `cited_chunks` 의 정수 → context_id 문자열로 환원).
+       - `provider.evaluate_sentence(target, normalized_contexts)` →
+         `SentenceEvaluation`.
+       - `_LABEL_MAP` 으로 agent `SentenceLabel` → rag `VerificationStatus`:
+            * SUPPORTED → SUPPORTED
+            * UNSUPPORTED → NOT_SUPPORTED
+            * LOW_CONFIDENCE → NOT_SUPPORTED (사용자 결정 — Plan v2 보수적 매핑)
+            * NOT_CHECKED → NOT_SUPPORTED (보수적)
+- 안전 fallback: `EvaluatorProviderError` 발생 시 stub 정합 SUPPORTED 로 흡수
+  (stub 의 "all SUPPORTED" 기본 동작과 정합 — provider 실패의 alert 는 호출자
+  책임).
+- LLM provider default: `FakeEvaluatorProvider` (PoC·테스트). 운영은
+  `OpenAIEvaluatorProvider` — agent `_default_transport` (urllib 기반) 가 OpenAI
+  Chat Completions 를 직접 호출하므로 transport 미주입 OK
+  (answer-generation-agent 와 차이점 — 운영 즉시 wiring 가능).
+
+**그래프 wiring — `app/pipeline/query_graph.py`**
+
+- `QueryGraphDeps` 갱신:
+    - `verifier_provider: VerifierProvider | None = None` 추가
+    - `verifier_config: VerifierConfig | None = None` 추가
+    - `verify_llm_evaluator` default 를 `verify_llm_evaluator_stub` →
+      `manage_verifier_evaluator` 로 변경.
+- `build_query_graph` 갱신:
+    - `deps.verify_llm_evaluator is manage_verifier_evaluator` 일 때만
+      `functools.partial` 로 `provider` / `config` 주입 (router/generator 패턴
+      정합). 외부 사용자 정의 verify_llm_evaluator 는 captured 가 이미 있다고
+      가정하고 그대로 등록.
+- import 정리 — `verify_llm_evaluator_stub` 제거 (stubs 모듈에서 import 안 함),
+  `app.query.verifier_evaluator.manage_verifier_evaluator` 추가.
+
+**부트스트랩 — `app/api/deps.py`**
+
+- 모듈 docstring 변경 이력에 Agent 통합 3/4 단락 추가.
+- `build_poc_deps` 본체 변경 없음 — QueryGraphDeps 기본값 (verifier_provider=
+  None → FakeEvaluatorProvider 자동) 그대로.
+- `build_real_deps` 본체:
+    - lazy import 추가: `from answer_verification_agent.config import
+      AnswerVerificationConfig`, `from answer_verification_agent.evaluator.
+      providers import OpenAIEvaluatorProvider`
+    - `AnswerVerificationConfig(evaluator_model="gpt-4o-mini")` 생성
+      (app/CLAUDE.md §5 라우팅 정책 + 설계서 §4.7.2).
+    - `OpenAIEvaluatorProvider(config=verifier_config)` 로 인스턴스화 — agent
+      자체 urllib transport 사용. OPENAI_API_KEY 누락 시 EvaluatorProviderError
+      즉시 발생.
+    - 반환 `QueryGraphDeps` 에 `verifier_provider` / `verifier_config` 추가 인자.
+
+**Stub 갱신 — `app/pipeline/stubs.py`**
+
+- 모듈 docstring 변경 이력에 Agent 통합 3/4 단락 추가.
+- `verify_llm_evaluator_stub` docstring 에 "Agent 통합 3/4 완료" 표시 + 회귀
+  보호용 보존 명시.
+- `verify_llm_evaluator_stub` 본체 변경 없음.
+
+**Re-export — `app/query/__init__.py`**
+
+- 패키지 docstring 구현 상태 단락에 `verifier_evaluator.py — manage_verifier_
+  evaluator` 한 줄 추가 ([Agent 통합 3/4] 표시).
+- `manage_verifier_evaluator` re-export + `__all__` 알파벳 순 갱신.
+
+### 신규 회귀 테스트 `tests/query/test_verifier_evaluator.py` (~230 lines, 11 tests)
+
+- `test_empty_suspicious_sentences_returns_empty_list` — suspicious 비면 provider
+  호출 없이 빈 list (stub 정합).
+- `test_default_fake_provider_returns_low_confidence_mapped_to_not_supported` —
+  scripted 없는 FakeEvaluatorProvider 의 기본 LOW_CONFIDENCE → NOT_SUPPORTED
+  보수적 매핑 회귀 보호.
+- `test_supported_label_maps_to_supported` — SUPPORTED → SUPPORTED.
+- `test_unsupported_label_maps_to_not_supported` — UNSUPPORTED → NOT_SUPPORTED.
+- `test_low_confidence_maps_to_not_supported_conservative` — LOW_CONFIDENCE →
+  NOT_SUPPORTED (Plan v2 보수적 매핑 — 환각 차단 우선).
+- `test_multiple_suspicious_sentences_invoke_evaluator_n_times` — N 문장 →
+  evaluator N 회 호출, sentence_id 정합.
+- `test_cited_chunks_preserved_in_verification_output` — cited_chunks 보존
+  (api-spec.md 정합).
+- `test_provider_failure_falls_back_to_supported` — EvaluatorProviderError 발생
+  시 stub 정합 SUPPORTED 안전 fallback.
+- `test_empty_top_chunks_still_evaluates` — top_chunks 비어도 evaluator 호출 시도
+  (agent prompt builder 가 "No valid cited context" 안내문 채움).
+- `test_signature_matches_stub_keyword_only` — positional 호출 시 TypeError
+  (verify_pipeline_node 정합 회귀 보호).
+- `test_custom_config_is_validated` — config 유효성 검증 강제.
+
+### `tests/api/test_deps.py` 회귀 보호 추가
+
+- `patched_real_adapters` fixture 에 `OpenAIEvaluatorProvider` monkeypatch 추가
+  — sentinel `_FakeOpenAIEvaluator` 로 대체해 OPENAI_API_KEY 환경변수 없이도
+  build_real_deps wiring 검증 가능. `verifier_provider_init` 캡처.
+- `test_build_real_deps_wires_real_adapter_classes` 에 `deps.verifier_provider
+  is not None` + `evaluator_model == "gpt-4o-mini"` 단언 추가.
+- `test_build_poc_deps_uses_fake_adapters_unchanged` 에 `deps.verifier_provider
+  is None` + `deps.verifier_config is None` 단언 추가.
+
+### 본 세션 미구현 (Plan v2 §3 — 다음 단계 이관, 설계서 §4.7 정합)
+
+`app/query/verifier_evaluator.py` docstring §[본 세션 미구현]·`docs/ai/
+working-log.md` 본 단락에 일관 기록되어 다음 세션에서 누락 없이 이어받게 한다.
+
+- **(A) agent rule-based verifier 사용** — 본 저장소 `verify_answer_rules` 와
+  중복이므로 사용하지 않음. 다음 단계: 두 구현의 정합 (같은 의심 판정) 평가
+  세션에서 비교.
+- **(B) agent sentence parser** — 본 저장소 generator 가 이미 `[#N]` 마커를 합성
+  하므로 사용하지 않음.
+- **(C) agent overall label / score 집계** — 본 저장소 `app/query/formatter.py`
+  가 NOT_SUPPORTED 비율 기반 BLOCKED 정책을 이미 수행. agent 집계는 사용 안 함.
+- **(D) UI warning metadata / QCA / regeneration recommendation** — api-spec.md
+  에 없는 확장 영역. 다음 단계: BFF/저장소 책임 확정 후.
+- **(E) `verification.note` 답변 생성기 다운그레이드 기록** (설계서 §4.6.5) —
+  답변 생성기 (B) 운영 transport 도입 후 같이.
+- **(F) all-sentence evaluation mode** (`evaluate_suspicious_only=False`) —
+  비용 우선 정책으로 본 세션은 suspicious only. 다음 단계: 평가 세션에서
+  비용/정확도 trade-off 측정 후 결정.
+- **(G) agent rule-based 정합 검증** — 본 저장소 1단계와 agent 1단계가 같은 의심
+  판정을 내리는지 평가 세션에서 비교.
+
+### 책임 분리 (본 담당자 영역만)
+
+- 본 commit 은 본 담당자 영역 8 파일 (2 new — `app/query/verifier_evaluator.py`
+  + `tests/query/test_verifier_evaluator.py` / 6 modified — `pyproject.toml` +
+  `app/pipeline/query_graph.py` + `app/pipeline/stubs.py` + `app/query/__init__.
+  py` + `app/api/deps.py` + `tests/api/test_deps.py`) + vendoring 26 파일
+  (무수정) + 본 docs/ai/working-log.md = 총 35 파일.
+- Agent 패키지 (`answer_verification_agent/**`) — **무수정 보존**.
+- 기존 stub (`verify_llm_evaluator_stub`) **보존** — 회귀 테스트·외부 명시 주입
+  경로 보장.
+- `app/query/verifier.py` (Pipeline 1단계), `app/pipeline/nodes.py` (`verify_
+  pipeline_node`), `app/query/formatter.py` (BLOCKED 정책) 미변경.
+- `docs/architecture.md` / `docs/api-spec.md` / `docs/db-schema.md` / `docs/
+  rag-pipeline-design.md` / `docs/chunking-strategy.md` 변경 없음.
+
+### 정합성 검증 (오버튜닝 회피)
+
+- `app/CLAUDE.md` "담당 범위를 벗어난 파일은 수정하지 않는다" 정합 ✓
+- `app/CLAUDE.md` §5 LLM 라우팅 — 검증 2단계는 GPT-4o-mini ✓
+- `app/CLAUDE.md` §3 보안·정확성 — "답변 검증을 우회하거나 비활성화하지 않는다"
+  정합 (stub → 실 어댑터로 교체, 검증 자체는 유지) ✓
+- rag-pipeline-design.md §4.7.2 — "GPT-4o-mini 에 Top-5 청크 전체와 의심 문장을
+  전달" → 본 어댑터는 top_chunks 전체를 NormalizedContext 로 변환해 전달, agent
+  prompt builder 가 cited 만 선별 (False Negative 방지 책임은 agent 측) ✓
+- 설계서 §3 "정확성 우선" 원칙 정합 — LOW_CONFIDENCE → NOT_SUPPORTED 보수적
+  매핑으로 환각 차단 우선 ✓
+- 기존 패턴 재사용 — Agent 통합 1/4, 2/4 의 vendoring + 어댑터 + partial wiring
+  패턴 그대로 복제 ✓
+- 새 의존성 도입 0 ✓
+
+### 후방 호환성
+
+- 신규 어댑터 + Agent 패키지 vendoring + 기존 verify_llm_evaluator_stub 보존 —
+  기존 회귀 테스트 0건 영향. `tests/pipeline/test_query_graph.py` 의
+  `_evaluator_all_not_supported` (외부 명시 주입) 경로는 `is manage_verifier_
+  evaluator` 분기로 `else` 경로 (그대로 등록) 동작.
+- `QueryGraphDeps` 신규 필드 2종 (`verifier_provider` / `verifier_config`) 모두
+  default None.
+- `app/api/deps.py` 시그니처 변경 없음.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- 샌드박스 ruff 0.15.13 으로 format `--check` + check 모두 통과.
+- pytest 는 `./scripts/verify.sh` 실행 시 통과 예상 — 신규 11 케이스
+  (test_verifier_evaluator) + test_deps 회귀 추가 + 기존 회귀 0건. 565 → ~576
+  예상.
+
+### Agent 통합 진척도 (4 stub 중 3 종료)
+
+| stub | 현재 상태 |
+|---|---|
+| `router_stub` | ✅ Agent 통합 1/4 완료 (manage_router) |
+| `generator_stub` | ✅ Agent 통합 2/4 완료 (manage_generator) |
+| `verify_llm_evaluator_stub` | ✅ **본 commit 으로 wiring 완료** (manage_verifier_evaluator) |
+| `document_analyzer_stub` | ⏳ Agent 통합 4/4 대기 (data-ingestion-agent) |
+
+### 비고
+
+- 본 commit 이 끝나면 본 담당자 영역 ~98% → **~99%** (Query 그래프 4 Agent 노드
+  중 3 종 완료, Ingestion 그래프 Agent 노드 1 종만 남음).
+- 본 commit 의 변경 영향 파일 = 8 본 담당자 + 26 vendoring + 1 working-log = 35
+  파일. `git diff --stat HEAD` 로 정확히 검증.
+
+### 후속 TODO (다음 세션 후보 — 우선순위)
+
+1. **Agent 통합 4/4 — data-ingestion-agent (문서 분석기)** — Ingestion 그래프의
+   `document_analyzer_node` 자리에 wiring. Query 그래프와 별개로 본 담당자 영역
+   완성도에 중요.
+2. **(A+B) SSE 토큰 스트리밍 + 운영 OpenAI HTTP transport** — Agent 통합 4/4
+   완료 후 답변 생성기 운영 wiring 완료를 위해 진행.
+3. **(C) Rate Limit fallback** (답변 생성기) — B 도입 후.
+4. **(G) agent rule-based 정합 검증** — 본 저장소 1단계와 agent 1단계 비교 (평가
+   세션).
+5. **(F) all-sentence evaluation mode** — 비용/정확도 trade-off 평가 후 결정.
+6. **운영 라이브 smoke** — Agent 통합 4종 + 운영 transport 모두 끝낸 후 docker
+   compose + `RAG_USE_REAL_ADAPTERS=true` 로 끝-끝 검증.

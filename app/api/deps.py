@@ -40,6 +40,13 @@
     는 transport callable 주입을 요구(agent 패키지에 실 HTTP transport 없음)하므로
     본 세션은 운영 모드에서도 fake 자동 wiring — Plan v2 §3 B / 다음 단계 이관
     (working-log.md 미구현 섹션 참조).
+  - 2026-05-19, Agent 통합 3/4 — answer-verification-agent 어댑터 wiring.
+    build_poc_deps 는 QueryGraphDeps 기본값(verifier_provider=None →
+    FakeEvaluatorProvider 자동) 그대로 사용 — 외부 API 키 없이 PoC 경로 동작.
+    build_real_deps 는 OpenAIEvaluatorProvider 를 lazy import 해 OPENAI_API_KEY
+    환경변수 기반으로 주입 (agent 자체 urllib HTTP transport 가 있어 운영 즉시
+    호출 가능 — answer-generation-agent 와 차이점). 모델은 GPT-4o-mini (설계서
+    §4.7.2 / app/CLAUDE.md §5 라우팅 정책).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -141,6 +148,8 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
 
     # 실 어댑터 import는 lazy — embedding extra 미설치 환경에서도 build_poc_deps와
     # 본 모듈 import는 동작해야 한다. import 실패 시 호출자에게 ImportError 전파.
+    from answer_verification_agent.config import AnswerVerificationConfig
+    from answer_verification_agent.evaluator.providers import OpenAIEvaluatorProvider
     from app.ingestion.embedder.dense import E5DenseEmbedder
     from app.ingestion.embedder.sparse import BM25SparseEmbedder
     from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
@@ -163,6 +172,12 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # 분류한다.
     routing_config = QueryRoutingConfig(model="gpt-4o-mini")
     routing_provider = OpenAIRoutingLLMProvider.from_config(routing_config)
+    # 답변 검증 2단계 평가자도 운영 모드는 OpenAI 직접 호출 — agent OpenAIEvaluator
+    # Provider 는 자체 urllib transport (default) 가 있어 transport 미주입 OK.
+    # OPENAI_API_KEY 환경변수가 없으면 EvaluatorProviderError 즉시 발생 (운영 lifespan
+    # 진입 직전에 누락 명확히 드러남). GPT-4o-mini (설계서 §4.7.2).
+    verifier_config = AnswerVerificationConfig(evaluator_model="gpt-4o-mini")
+    verifier_provider = OpenAIEvaluatorProvider(config=verifier_config)
 
     return QueryGraphDeps(
         dense_embedder=dense,
@@ -172,6 +187,8 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
         chunk_lookup=chunk_lookup,
         routing_provider=routing_provider,
         routing_config=routing_config,
+        verifier_provider=verifier_provider,
+        verifier_config=verifier_config,
     )
 
 

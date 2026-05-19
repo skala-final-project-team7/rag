@@ -20,6 +20,10 @@
     generator.py``)가 답변 생성기 자리에 wiring 완료. generator_stub 자체는 회귀
     보호용으로 보존 (QueryGraphDeps.generator_node 의 default 는 manage_generator
     로 변경).
+  - 2026-05-19, Agent 통합 3/4 — answer-verification-agent 어댑터(``app/query/
+    verifier_evaluator.py``)가 검증 2단계 LLM 평가자 자리에 wiring 완료.
+    verify_llm_evaluator_stub 자체는 회귀 보호용으로 보존 (QueryGraphDeps
+    .verify_llm_evaluator 의 default 는 manage_verifier_evaluator 로 변경).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -30,7 +34,9 @@
               완료, 2026-05-18). 본 stub 은 회귀 보호용으로 보존.
             * generator_stub → ``app/query/generator.py`` 의 ``manage_generator``
               (Agent 통합 2/4 완료, 2026-05-19). 본 stub 은 회귀 보호용으로 보존.
-            * verify_llm_evaluator_stub → Agent 검증 2단계 평가자 (Agent 통합 3/4 대기)
+            * verify_llm_evaluator_stub → ``app/query/verifier_evaluator.py`` 의
+              ``manage_verifier_evaluator`` (Agent 통합 3/4 완료, 2026-05-19).
+              본 stub 은 회귀 보호용으로 보존.
             * document_analyzer_stub → Agent 문서 분석기 (Agent 통합 4/4 대기)
           본 파일 자체는 Agent 코드를 포함하지 않는다 (담당 영역 분리 — `app/CLAUDE.md`
           "담당 범위를 벗어난 파일은 수정하지 않는다").
@@ -109,6 +115,13 @@ def verify_llm_evaluator_stub(
     suspicious_sentences: list[SentenceCheck],
 ) -> list[Verification]:
     """검증 2단계 LLM 평가자 [Agent] fake — 의심 문장 모두 SUPPORTED로 판정한다.
+
+    Agent 통합 3/4 완료 (2026-05-19) — 실 2단계 평가자는 ``app/query/
+    verifier_evaluator.py`` 의 ``manage_verifier_evaluator`` 어댑터로 wiring 되었다.
+    본 stub 은 회귀 보호용으로 보존된다. QueryGraphDeps.verify_llm_evaluator 의
+    default 는 manage_verifier_evaluator 로 변경되었으나, 호출자가
+    ``deps.verify_llm_evaluator=verify_llm_evaluator_stub`` 를 명시 주입하면 그래프
+    흐름이 기존과 동일하게 동작함을 보장한다.
 
     실 2단계 평가자(GPT-4o-mini, Agent 담당자 영역)가 의심 문장의 SUPPORTED /
     NOT_SUPPORTED를 판정하는 자리에, 본 stub은 보수적으로 모두 SUPPORTED를 반환해

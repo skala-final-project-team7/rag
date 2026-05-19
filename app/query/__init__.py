@@ -25,7 +25,10 @@
 - generator.py  manage_generator — 답변 생성기 통합 어댑터 노드
                 [Agent 통합 2/4] (vendoring한 answer_generation_agent 패키지를 RagState에 연결)
 - verifier.py   verify_answer_rules / RuleVerificationResult — 답변 검증 1단계 규칙 매칭
-                [feature10-Pipeline] (2단계 LLM 평가자 [Agent]는 별도 담당자 추가)
+                [feature10-Pipeline]
+- verifier_evaluator.py  manage_verifier_evaluator — 답변 검증 2단계 LLM 평가자
+                통합 어댑터 [Agent 통합 3/4] (vendoring한 answer_verification_agent
+                패키지의 evaluator 모듈을 SentenceCheck → Verification 으로 변환)
 - formatter.py  format_response — 검증된 답변·출처·검증 결과를 QueryResponse로 변환
                 [feature11-Pipeline]
 """
@@ -50,6 +53,7 @@ from app.query.search import (
     select_top_candidates,
 )
 from app.query.verifier import RuleVerificationResult, SentenceCheck, verify_answer_rules
+from app.query.verifier_evaluator import manage_verifier_evaluator
 
 __all__ = [
     "ACLViolationError",
@@ -66,6 +70,7 @@ __all__ = [
     "manage_generator",
     "manage_history",
     "manage_router",
+    "manage_verifier_evaluator",
     "merge_pools",
     "reciprocal_rank_fusion",
     "select_reranked",
