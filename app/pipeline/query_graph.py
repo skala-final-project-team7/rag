@@ -211,7 +211,7 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
             partial(
                 manage_generator,
                 provider=deps.generator_provider,
-                config=deps.generator_config,
+                generation_config=deps.generator_config,
             ),
         )
     else:
