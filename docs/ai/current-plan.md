@@ -565,7 +565,10 @@ BE 담당자 명세 확정 후 진행.
 
 작업 항목:
 
-- [ ] 운영 smoke 시나리오 실행 + 결과 working-log 기록
+- [x] 운영 smoke 시나리오 실행 + 결과 working-log 기록 — 4종 의도 +
+  streaming 1건 + /metrics 수집. 발견 1건 (Prometheus histogram bucket
+  협소) 후속 fix. 발견 2~3건 (라우터 의도 오분류 / non-streaming P95) 은
+  feature17 / BFF 권고로 이관 (다음 commit)
 
 ### feature17: 평가 세션 (F + G) — P3
 
@@ -604,9 +607,9 @@ BE 담당자 명세 확정 후 진행.
 ## 완료 현황 (2026-05-19 종료 시점)
 
 - **본 담당자 (Pipeline + Storage) 영역 진척도**: **~100%** (운영성·관측성·streaming
-  + Rate Limit fallback 까지 완성)
+  + Rate Limit fallback + 운영 라이브 smoke 검증 완료)
 - **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
-  Mode B 시연 검증 + Milestone D feature12 + feature14 + feature15)**
-- **잔여 (Milestone D)**: feature13 / feature16 / feature17 / feature18
-- **즉시 진행 가능 (외부 협의 불필요)**: feature16 / feature17 / feature18(부분)
+  Mode B 시연 검증 + Milestone D feature12 + feature14 + feature15 + feature16)**
+- **잔여 (Milestone D)**: feature13 / feature17 / feature18
+- **즉시 진행 가능 (외부 협의 불필요)**: feature17 / feature18(부분)
 - **외부 협의 대기**: feature13 (BE 명세), feature18(Data Agent / Agent 담당자 영역)
