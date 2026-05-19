@@ -27,6 +27,12 @@
     회귀 보호용으로 보존. SSE 토큰 스트리밍 (설계서 §4.6.4)·운영 OpenAI transport
     (§4.6.3)·Rate Limit fallback (§4.6.5)은 본 세션 미구현 — generator.py 미구현
     섹션 + working-log 참조.
+  - 2026-05-19, Agent 통합 3/4 — answer-verification-agent vendoring +
+    manage_verifier_evaluator 어댑터 교체. QueryGraphDeps 의 verify_llm_evaluator
+    기본값을 verify_llm_evaluator_stub → manage_verifier_evaluator 로 변경.
+    LLM provider/Config 주입을 위해 verifier_provider/verifier_config 필드 추가
+    (router/generator 와 동일 partial 패턴). verify_llm_evaluator_stub 은 회귀
+    보호용으로 보존.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, LangGraph 0.2.x
@@ -52,9 +58,6 @@ from app.pipeline.nodes import (
     empty_retrieval_node,
     verify_pipeline_node,
 )
-from app.pipeline.stubs import (
-    verify_llm_evaluator_stub,
-)
 from app.query.formatter import format_response
 from app.query.generator import manage_generator
 from app.query.history import manage_history
@@ -62,6 +65,7 @@ from app.query.rerank_node import cross_encoder_rerank
 from app.query.reranker.base import CrossEncoderReranker
 from app.query.router import manage_router
 from app.query.search_node import hybrid_search
+from app.query.verifier_evaluator import manage_verifier_evaluator
 from app.schemas.enums import Intent, LlmModel
 from app.schemas.rag_state import RagState
 from app.schemas.response import QueryResponse
@@ -83,6 +87,13 @@ RoutingConfig = Any
 # 가 None 일 때 FakeAnswerLLMProvider + 기본 AnswerGenerationConfig 를 사용한다.
 GeneratorProvider = Any
 GeneratorConfig = Any
+
+# answer-verification-agent 의 LLM provider / config — runtime 인터페이스 의존성 회피
+# 를 위해 Any. 실제 타입은 AnswerEvaluatorProvider / AnswerVerificationConfig.
+# manage_verifier_evaluator 가 None 일 때 FakeEvaluatorProvider + 기본
+# AnswerVerificationConfig 를 사용한다.
+VerifierProvider = Any
+VerifierConfig = Any
 
 # 노드 시그니처 (모두 (RagState) -> RagState)
 QueryNode = Callable[[RagState], RagState]
@@ -125,14 +136,22 @@ class QueryGraphDeps:
     generator_provider: GeneratorProvider | None = None
     generator_config: GeneratorConfig | None = None
 
+    # 답변 검증 2단계 LLM 평가자 provider / config — None 이면
+    # manage_verifier_evaluator 가 FakeEvaluatorProvider + 기본
+    # AnswerVerificationConfig 를 사용한다. agent OpenAIEvaluatorProvider 는
+    # 자체 urllib HTTP transport (default) 가 있어 운영 모드는 즉시 wiring 가능.
+    verifier_provider: VerifierProvider | None = None
+    verifier_config: VerifierConfig | None = None
+
     # --- Agent 노드 ---
     # router_node 는 manage_router (query-routing-agent 어댑터) 가 기본값.
     # generator_node 는 manage_generator (answer-generation-agent 어댑터) 가 기본값.
-    # provider 가 None 이면 fake provider 가 자동 주입되어 외부 API 키 없이 PoC 경로
-    # 동작. verify_llm_evaluator 는 아직 stub — Agent 통합 3/4 (검증 2단계) 대기.
+    # verify_llm_evaluator 는 manage_verifier_evaluator (answer-verification-agent
+    # 어댑터) 가 기본값. provider 가 None 이면 fake provider 가 자동 주입되어 외부
+    # API 키 없이 PoC 경로 동작.
     router_node: QueryNode = field(default=manage_router)
     generator_node: QueryNode = field(default=manage_generator)
-    verify_llm_evaluator: VerifyEvaluator = field(default=verify_llm_evaluator_stub)
+    verify_llm_evaluator: VerifyEvaluator = field(default=manage_verifier_evaluator)
 
 
 def build_query_graph(deps: QueryGraphDeps) -> Any:
@@ -197,9 +216,22 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
         )
     else:
         builder.add_node("generate", deps.generator_node)
+    # 검증 2단계 평가자도 manage_verifier_evaluator 기본값일 때만 verifier_provider /
+    # verifier_config 를 functools.partial 로 주입한다 (router/generator 패턴 정합).
+    # 외부 사용자 정의 verify_llm_evaluator 는 captured 가 이미 있다고 가정하고 그대로
+    # 등록.
+    verifier_callable: VerifyEvaluator
+    if deps.verify_llm_evaluator is manage_verifier_evaluator:
+        verifier_callable = partial(
+            manage_verifier_evaluator,
+            provider=deps.verifier_provider,
+            config=deps.verifier_config,
+        )
+    else:
+        verifier_callable = deps.verify_llm_evaluator
     builder.add_node(
         "verify",
-        partial(verify_pipeline_node, llm_evaluator=deps.verify_llm_evaluator),
+        partial(verify_pipeline_node, llm_evaluator=verifier_callable),
     )
 
     # 엣지 — 단일 경로 + 검색 0건 분기.

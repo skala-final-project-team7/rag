@@ -73,13 +73,14 @@ class _FakeRealReranker(CrossEncoderReranker):
 
 @pytest.fixture()
 def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """build_real_deps가 호출하는 실 어댑터 5종을 모두 가짜로 대체한다.
+    """build_real_deps가 호출하는 실 어댑터 6종을 모두 가짜로 대체한다.
 
     실 어댑터들은 build_real_deps 함수 본문 내 lazy import이므로 원본 모듈
     (``app.ingestion.embedder.dense`` 등)의 클래스 자체를 교체한다. Qdrant
     ``from_settings`` 도 :memory: 클라이언트로 우회해 외부 컨테이너 없이 검증.
     Query Routing Agent 의 ``OpenAIRoutingLLMProvider.from_config`` 도 sentinel
-    객체를 반환하는 가짜로 대체해 OPENAI_API_KEY 환경변수 없이 회귀 보호.
+    객체를 반환하는 가짜로 대체해 OPENAI_API_KEY 환경변수 없이 회귀 보호. Answer
+    Verification Agent 의 ``OpenAIEvaluatorProvider`` 도 sentinel 로 대체.
     """
     from query_routing_agent.llm import OpenAIRoutingLLMProvider
 
@@ -89,6 +90,7 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "reranker_init": None,
         "store_from_settings": None,
         "routing_provider_init": None,
+        "verifier_provider_init": None,
     }
 
     def _fake_dense_factory(*args: Any, **kwargs: Any) -> _FakeRealDense:
@@ -118,6 +120,14 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         captured["routing_provider_init"] = {"config": config, "kwargs": kwargs}
         return object()
 
+    class _FakeOpenAIEvaluator:
+        """OpenAIEvaluatorProvider 대체 — API key 검증·실 HTTP transport 회피."""
+
+        def __init__(self, *, config: Any, transport: Any | None = None) -> None:
+            captured["verifier_provider_init"] = {"config": config, "transport": transport}
+            self.config = config
+
+    import answer_verification_agent.evaluator.providers as verifier_providers_module
     import app.ingestion.embedder.dense as dense_module
     import app.ingestion.embedder.sparse as sparse_module
     import app.query.reranker.cross_encoder as reranker_module
@@ -131,6 +141,7 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "from_config",
         classmethod(_fake_routing_provider_from_config),
     )
+    monkeypatch.setattr(verifier_providers_module, "OpenAIEvaluatorProvider", _FakeOpenAIEvaluator)
 
     return captured
 
@@ -170,6 +181,15 @@ def test_build_real_deps_wires_real_adapter_classes(
     # 미주입 한계로 build_real_deps 도 None 유지 — 회귀 보호.
     assert deps.generator_provider is None
     assert deps.generator_config is None
+    # 답변 검증 2단계 평가자 provider / config 는 Agent 통합 3/4 에서 OpenAIEvaluator
+    # Provider 로 주입된다 (agent 자체 urllib HTTP transport 가 있어 즉시 wiring).
+    # GPT-4o-mini 모델로 설정 (설계서 §4.7.2 / app/CLAUDE.md §5 라우팅 정책).
+    verifier_init = patched_real_adapters["verifier_provider_init"]
+    assert verifier_init is not None
+    assert verifier_init["config"].evaluator_model == "gpt-4o-mini"
+    assert deps.verifier_provider is not None
+    assert deps.verifier_config is not None
+    assert deps.verifier_config.evaluator_model == "gpt-4o-mini"
 
 
 def test_build_real_deps_passes_model_names_from_settings(
@@ -262,6 +282,11 @@ def test_build_poc_deps_uses_fake_adapters_unchanged() -> None:
     # FakeAnswerLLMProvider 자동 주입). Agent 통합 2/4 회귀 보호.
     assert deps.generator_provider is None
     assert deps.generator_config is None
+    # 답변 검증 2단계 평가자 provider / config 는 PoC 에서 None 유지
+    # (manage_verifier_evaluator 가 FakeEvaluatorProvider 자동 주입). Agent 통합 3/4
+    # 회귀 보호.
+    assert deps.verifier_provider is None
+    assert deps.verifier_config is None
 
 
 def test_build_poc_deps_shares_chunk_lookup_with_ingest_samples(

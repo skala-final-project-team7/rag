@@ -16,6 +16,7 @@ from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import index_chunks
 from app.pipeline.nodes import RETRIEVAL_EMPTY_ANSWER
 from app.pipeline.query_graph import QueryGraphDeps, build_query_graph, run_query
+from app.pipeline.stubs import verify_llm_evaluator_stub
 from app.query.acl import ACLViolationError, build_acl_filter
 from app.query.formatter import BLOCKED_ANSWER_MESSAGE
 from app.query.reranker.base import CrossEncoderReranker, FakeCrossEncoderReranker
@@ -168,8 +169,18 @@ def test_run_query_normal_flow_populates_sources_and_verification(
     sparse: FakeSparseEmbedder,
     populated_store: QdrantPoolStore,
 ) -> None:
-    """ACL 매칭 청크가 있으면 sources / verification이 채워지고 정상 응답이 나온다."""
-    graph = build_query_graph(_deps(dense, sparse, populated_store))
+    """ACL 매칭 청크가 있으면 sources / verification이 채워지고 정상 응답이 나온다.
+
+    Agent 통합 3/4 (2026-05-19) 정합 — QueryGraphDeps.verify_llm_evaluator 의
+    default 가 manage_verifier_evaluator 로 변경되었다. 본 PoC 정상 흐름 테스트는
+    검증 1단계가 "EKS" 같은 구조적 토큰을 의심으로 잡았을 때 default fake
+    evaluator (LOW_CONFIDENCE → NOT_SUPPORTED 보수적 매핑)가 BLOCKED 정책을
+    trigger 하지 않도록, stub 의 "all SUPPORTED" 동작을 명시 주입한다. 본래
+    의도(검증 2단계 자체가 아닌 정상 흐름 시나리오)와 정합.
+    """
+    graph = build_query_graph(
+        _deps(dense, sparse, populated_store, verify_llm_evaluator=verify_llm_evaluator_stub)
+    )
     response = run_query(_initial_state(query="alpha"), graph=graph)
     # 답변은 generator_stub이 [#1] 마커를 단 stub 답변.
     assert response.answer
@@ -240,8 +251,22 @@ def test_run_query_low_confidence_sets_feedback_enabled_false(
     sparse: FakeSparseEmbedder,
     populated_store: QdrantPoolStore,
 ) -> None:
-    """Cross-Encoder 최고 점수가 LOW_CONFIDENCE_SCORE(20) 미만이면 feedback_enabled=False."""
-    graph = build_query_graph(_deps(dense, sparse, populated_store, reranker=_AlwaysLowReranker()))
+    """Cross-Encoder 최고 점수가 LOW_CONFIDENCE_SCORE(20) 미만이면 feedback_enabled=False.
+
+    Agent 통합 3/4 정합 — 저신뢰 시나리오의 본래 의도는 LOW_CONFIDENCE 분기
+    (낮은 score → feedback_enabled=False)이지 BLOCKED 분기가 아니므로 stub 의
+    "all SUPPORTED" 검증 결과를 명시 주입해 BLOCKED 정책이 trigger 되지 않도록
+    한다.
+    """
+    graph = build_query_graph(
+        _deps(
+            dense,
+            sparse,
+            populated_store,
+            reranker=_AlwaysLowReranker(),
+            verify_llm_evaluator=verify_llm_evaluator_stub,
+        )
+    )
     response = run_query(_initial_state(), graph=graph)
     # raw 0.1 → Source.score = round(0.1 * 100) = 10 < 20.
     assert all(s.score < 20 for s in response.sources)
