@@ -4521,6 +4521,71 @@ scripts import ...` 패턴으로 import 가능.
 - **feature17c** — 평가 결과 기반 튜닝 (Pool 가중치 / 생성기 prompt / Cross-
   Encoder 임계값). 라우터 prompt 는 직전 commit 으로 달성됨.
 
+---
+
+## 2026-05-19 — feature17b Claude bootstrap 라벨링 (40건 추가)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: `samples/evaluation_set.json` 에 Claude bootstrap 라벨링 40건 추가.
+  시드 10건 (사람 작성) + bootstrap 40건 = **총 50건**. 설계서 §6.2 비율 정합.
+  사용자 검수 후 LLM-as-Judge 순환 문제를 회피한 채 회귀 평가 baseline 으로
+  활용 가능.
+
+### 분포 (설계서 §6.2 / §3.3.B 정합)
+
+| 의도 | 목표 | 실제 | 결과 |
+|------|------|------|------|
+| 장애대응 | 35% | 17건 (34%) | ✓ |
+| 운영가이드 | 30% | 15건 (30%) | ✓ |
+| 정책절차 | 20% | 10건 (20%) | ✓ |
+| 이력조회 | 15% | 8건 (16%) | ✓ |
+| 첨부 활용 (v0.2.2) | ≥ 8건 | **8건** | ✓ |
+
+### Claude bootstrap 라벨링 한계 명시
+
+- 각 항목에 `label_source` 필드 추가: `human` (시드 10건) / `claude_bootstrap`
+  (추가 40건).
+- **LLM-as-Judge 순환 문제 회피** — Claude 가 만든 평가 데이터셋으로 동일
+  계열 LLM (GPT-4o) 평가는 객관성 한계. bootstrap 회귀 baseline (직전 vs 다음
+  버전 모델 비교) 용도까지가 권장 범위. 최종 Golden Set 채택은 사용자 피드백
+  추가 검증 필요.
+- 각 query 는 samples 페이지의 실 콘텐츠에 직접 매핑됨 — bootstrap 항목도
+  expected_page_ids 가 명확해 chunk_id backfill 즉시 가능.
+
+### 첨부 활용 8건 매핑
+
+samples 의 첨부는 4건 (EKS 운영 매뉴얼 / Datadog 메트릭 정의서 / EKS 노드
+사용량 통계 / 신규입사 체크리스트). 각 첨부에서 2건씩 다른 각도 질문으로 8건
+확보. 설계서 v0.2.2 의 "첨부 활용 질문 16% 이상" 정합.
+
+### 수정 파일
+
+- `samples/evaluation_set.json` — 10건 → **50건** + label_source 필드 추가
+- `docs/ai/working-log.md` (본 세션 기록)
+- `docs/ai/current-plan.md` (feature17b 라벨링 [x] bootstrap 만, 사용자 검수
+  대기 명시)
+
+### 검증
+
+- 의도 비율 자동 검증 통과 (Python Counter 로 확인)
+- label_source / is_attachment_focused 분포 정합 확인
+- ruff/format 영향 없음 (JSON 데이터 변경만)
+- pytest 회귀 영향 없음 — 627 passed 유지
+
+### 후속 (사용자 검수 필요)
+
+1. **사용자 검수** — `samples/evaluation_set.json` 의 EVAL-011 ~ EVAL-050
+   40건을 빠르게 훑어보고 (1) 질문이 의미 있는지, (2) expected_page_ids 가
+   정확한지, (3) expected_answer_excerpt 가 답변 베이스라인으로 적절한지 확인.
+   부적절한 항목은 직접 수정 또는 label_source 를 `human` 으로 승격.
+2. **backfill** — `python scripts/backfill_chunk_ids.py` 1회 실행 → expected
+   _chunk_ids 자동 채움.
+3. **운영 평가** — `python scripts/run_evaluation.py --use-real-adapters
+   --rouge-l --bert-score` → 50건 자동 평가.
+4. **Golden Set 추출** — 설계서 §6.3 3 조건 만족 항목 자동 필터 (feature17b
+   다음 단계).
+5. **feature17c** — 평가 결과 기반 Pool 가중치 / Cross-Encoder 임계값 튜닝.
+
 | 질의 | expected | actual | 결과 |
 |------|----------|--------|------|
 | EKS NotReady | 장애대응 | 장애대응 | ✅ |

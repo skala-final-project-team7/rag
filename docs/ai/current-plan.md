@@ -587,12 +587,13 @@ BE 담당자 명세 확정 후 진행.
   (scripts/run_evaluation.py) + LLM 커스텀 메트릭 4종 (llm_fallback_total /
   verification_status_total / answer_generation_latency_seconds /
   intent_classification_total) + 회귀 7건 (다음 commit)
-- [-] **feature17b** — 인프라 부분 완료 (다음 commit). 라벨링 미완.
+- [-] **feature17b** — 인프라 + bootstrap 라벨링 완료. Golden Set 추출 미완.
   - [x] scripts/backfill_chunk_ids.py (Qdrant scroll 로 expected_chunk_ids 자동 채움)
   - [x] pyproject.toml evaluation extras (evaluate / rouge-score / bert-score)
   - [x] scripts/run_evaluation.py --rouge-l / --bert-score 옵션 + helper
-  - [ ] Evaluation Set 50건 라벨링 (사용자 시간 필요)
-  - [ ] Golden Set 자동 추출 (3 조건 AND 필터) — 라벨링 완료 후
+  - [x] Evaluation Set 50건 라벨링 — 시드 10건 (human) + Claude bootstrap 40건
+    (의도 비율 35:30:20:15 + 첨부 활용 8건). 사용자 검수 후 backfill + 평가.
+  - [ ] Golden Set 자동 추출 (3 조건 AND 필터) — 평가 실행 후
 - [ ] **feature17c** — 튜닝 (Pool 가중치 그리드 서치 / 생성기 prompt /
   Cross-Encoder 임계값) — 라우터 prompt 튜닝은 2026-05-19 fix
   (app/query/routing_transport.py) 로 사실상 달성 (정확도 4/4=100%)
