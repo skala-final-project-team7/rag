@@ -47,6 +47,10 @@
     환경변수 기반으로 주입 (agent 자체 urllib HTTP transport 가 있어 운영 즉시
     호출 가능 — answer-generation-agent 와 차이점). 모델은 GPT-4o-mini (설계서
     §4.7.2 / app/CLAUDE.md §5 라우팅 정책).
+  - 2026-05-19, (B) 운영 OpenAI HTTP transport — build_real_deps 에 답변 생성기
+    OpenAIAnswerLLMProvider + ``build_openai_chat_transport`` 주입. 설계서 §4.6.3
+    GPT-4o 운영 호출 정합. ``settings.openai_api_key`` / ``settings.llm_answer
+    _model`` 사용. build_poc_deps 는 기존대로 fake 자동 (외부 키 없이 동작).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -148,10 +152,13 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
 
     # 실 어댑터 import는 lazy — embedding extra 미설치 환경에서도 build_poc_deps와
     # 본 모듈 import는 동작해야 한다. import 실패 시 호출자에게 ImportError 전파.
+    from answer_generation_agent.config import AnswerGenerationConfig
+    from answer_generation_agent.generation.answer_generation import OpenAIAnswerLLMProvider
     from answer_verification_agent.config import AnswerVerificationConfig
     from answer_verification_agent.evaluator.providers import OpenAIEvaluatorProvider
     from app.ingestion.embedder.dense import E5DenseEmbedder
     from app.ingestion.embedder.sparse import BM25SparseEmbedder
+    from app.query.openai_transport import build_openai_chat_transport
     from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
     from app.storage.chunk_lookup import MongoChunkTextLookup
     from query_routing_agent.config import QueryRoutingConfig
@@ -178,6 +185,21 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # 진입 직전에 누락 명확히 드러남). GPT-4o-mini (설계서 §4.7.2).
     verifier_config = AnswerVerificationConfig(evaluator_model="gpt-4o-mini")
     verifier_provider = OpenAIEvaluatorProvider(config=verifier_config)
+    # 답변 생성기는 운영 모드에서 OpenAI Chat Completions 를 직접 호출한다 — agent
+    # OpenAIAnswerLLMProvider 는 transport callable (Callable[[dict], dict]) 주입을
+    # 요구하므로 본 저장소의 ``build_openai_chat_transport`` 로 동기 HTTP transport
+    # 를 만들어 주입한다 (Plan v2 §3 (B), 설계서 §4.6.3). 모델은 GPT-4o (app/
+    # CLAUDE.md §5 라우팅 정책). OPENAI_API_KEY 가 비어 있으면 ProviderConfiguration
+    # Error 즉시 발생 — 운영 lifespan 진입 직전에 누락 명확히 드러남.
+    openai_api_key = settings.openai_api_key.get_secret_value()
+    generator_config = AnswerGenerationConfig(
+        model=settings.llm_answer_model,
+        fallback_model=settings.llm_aux_model,
+    )
+    generator_provider = OpenAIAnswerLLMProvider(
+        api_key=openai_api_key,
+        transport=build_openai_chat_transport(api_key=openai_api_key),
+    )
 
     return QueryGraphDeps(
         dense_embedder=dense,
@@ -189,6 +211,8 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
         routing_config=routing_config,
         verifier_provider=verifier_provider,
         verifier_config=verifier_config,
+        generator_provider=generator_provider,
+        generator_config=generator_config,
     )
 
 

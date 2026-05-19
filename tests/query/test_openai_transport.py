@@ -1,0 +1,251 @@
+"""OpenAI Chat Completions transport callable 검증 — (B) 운영 OpenAI HTTP transport.
+
+build_openai_chat_transport: agent OpenAIAnswerLLMProvider 의 transport 자리에 주입
+되는 callable. 실제 OpenAI API 호출은 mock 으로 대체하고, payload 정규화·JSON 파싱·
+에러 흡수 분기를 검증한다.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import types
+from typing import Any
+
+import pytest
+
+from app.query.openai_transport import build_openai_chat_transport
+
+# --- Fake OpenAI SDK ---
+
+
+class _FakeMessage:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _FakeMessage(content)
+
+
+class _FakeCompletion:
+    def __init__(self, content: str) -> None:
+        self.choices = [_FakeChoice(content)]
+
+
+class _FakeClient:
+    """OpenAI client 대체 — chat.completions.create 만 받는 최소 스텁."""
+
+    def __init__(
+        self,
+        *,
+        response_content: str = '{"answer": "ok"}',
+        raise_error: BaseException | None = None,
+    ) -> None:
+        self._response_content = response_content
+        self._raise_error = raise_error
+        self.captured_kwargs: dict[str, Any] | None = None
+        self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs: Any) -> _FakeCompletion:
+        self.captured_kwargs = kwargs
+        if self._raise_error is not None:
+            raise self._raise_error
+        return _FakeCompletion(self._response_content)
+
+
+class _FakeAPITimeoutError(Exception):
+    pass
+
+
+class _FakeAPIStatusError(Exception):
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _FakeAPIError(Exception):
+    pass
+
+
+def _install_fake_openai(monkeypatch: pytest.MonkeyPatch, client: _FakeClient) -> None:
+    """본 저장소의 transport callable 이 lazy import 하는 openai 모듈을 fake 로 대체."""
+    module = types.ModuleType("openai")
+    module.OpenAI = lambda **kwargs: client  # type: ignore[attr-defined]
+    module.APITimeoutError = _FakeAPITimeoutError  # type: ignore[attr-defined]
+    module.APIStatusError = _FakeAPIStatusError  # type: ignore[attr-defined]
+    module.APIError = _FakeAPIError  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", module)
+
+
+def _payload(*, model: str = "gpt-4o") -> dict[str, Any]:
+    return {
+        "model": model,
+        "temperature": 0.2,
+        "timeout_seconds": 45,
+        "messages": [
+            {"role": "system", "content": "system instructions"},
+            {"role": "developer", "content": "developer instructions"},
+            {"role": "user", "content": "user question"},
+        ],
+    }
+
+
+# --- 정상 동작 ---
+
+
+def test_transport_returns_parsed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeClient(
+        response_content=json.dumps(
+            {"answer": "장애 대응 안내.", "sentences": [], "unsupported_gaps": []}
+        )
+    )
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    result = transport(_payload())
+
+    assert result["answer"] == "장애 대응 안내."
+    assert client.captured_kwargs is not None
+    # JSON 강제 모드가 기본값
+    assert client.captured_kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_transport_merges_developer_into_system_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # OpenAI Chat Completions 는 developer role 을 별도로 받지 않으므로 system 으로 합산.
+    client = _FakeClient()
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    transport(_payload())
+
+    assert client.captured_kwargs is not None
+    messages = client.captured_kwargs["messages"]
+    # system 1개 + user 1개 — developer 가 system 으로 합쳐졌다.
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user"]
+    assert "system instructions" in messages[0]["content"]
+    assert "developer instructions" in messages[0]["content"]
+
+
+def test_transport_passes_model_and_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    transport(_payload(model="gpt-4o-mini"))
+
+    assert client.captured_kwargs is not None
+    assert client.captured_kwargs["model"] == "gpt-4o-mini"
+    assert client.captured_kwargs["temperature"] == 0.2
+
+
+# --- 에러 흡수 ---
+
+
+def test_transport_empty_content_raises_openai_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from answer_generation_agent.generation.answer_generation import OpenAITransportError
+
+    client = _FakeClient(response_content="")
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    with pytest.raises(OpenAITransportError) as exc_info:
+        transport(_payload())
+    assert exc_info.value.status_code == 500
+    assert "empty" in exc_info.value.message.lower()
+
+
+def test_transport_invalid_json_raises_openai_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from answer_generation_agent.generation.answer_generation import OpenAITransportError
+
+    client = _FakeClient(response_content="not a json")
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    with pytest.raises(OpenAITransportError):
+        transport(_payload())
+
+
+def test_transport_non_object_json_raises_openai_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from answer_generation_agent.generation.answer_generation import OpenAITransportError
+
+    client = _FakeClient(response_content='["not", "an", "object"]')
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    with pytest.raises(OpenAITransportError):
+        transport(_payload())
+
+
+def test_transport_timeout_raises_with_none_status_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from answer_generation_agent.generation.answer_generation import OpenAITransportError
+
+    client = _FakeClient(raise_error=_FakeAPITimeoutError("timeout"))
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    with pytest.raises(OpenAITransportError) as exc_info:
+        transport(_payload())
+    # agent _openai_error_to_provider_error 가 status_code=None 을 timeout_error 로 분류.
+    assert exc_info.value.status_code is None
+
+
+def test_transport_status_error_preserves_status_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from answer_generation_agent.generation.answer_generation import OpenAITransportError
+
+    client = _FakeClient(raise_error=_FakeAPIStatusError("rate limit", status_code=429))
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    with pytest.raises(OpenAITransportError) as exc_info:
+        transport(_payload())
+    assert exc_info.value.status_code == 429
+
+
+def test_transport_generic_api_error_normalized_to_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from answer_generation_agent.generation.answer_generation import OpenAITransportError
+
+    client = _FakeClient(raise_error=_FakeAPIError("unknown"))
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    with pytest.raises(OpenAITransportError) as exc_info:
+        transport(_payload())
+    assert exc_info.value.status_code == 500
+
+
+# --- response_format 커스텀 주입 ---
+
+
+def test_transport_custom_response_format_overrides_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # response_format 인자로 OpenAI 의 다른 모드 (text) 를 강제할 수 있다.
+    client = _FakeClient(response_content='{"answer": "ok"}')
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(
+        api_key="sk-test",
+        response_format={"type": "text"},
+    )
+    transport(_payload())
+    assert client.captured_kwargs is not None
+    assert client.captured_kwargs["response_format"] == {"type": "text"}

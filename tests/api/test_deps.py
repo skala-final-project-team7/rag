@@ -91,6 +91,8 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "store_from_settings": None,
         "routing_provider_init": None,
         "verifier_provider_init": None,
+        "generator_provider_init": None,
+        "generator_transport_init": None,
     }
 
     def _fake_dense_factory(*args: Any, **kwargs: Any) -> _FakeRealDense:
@@ -127,9 +129,29 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             captured["verifier_provider_init"] = {"config": config, "transport": transport}
             self.config = config
 
+    class _FakeOpenAIAnswer:
+        """OpenAIAnswerLLMProvider 대체 — API key 검증·실 HTTP transport 회피."""
+
+        def __init__(self, *, api_key: str, transport: Any | None = None) -> None:
+            captured["generator_provider_init"] = {
+                "api_key_provided": bool(api_key),
+                "transport": transport,
+            }
+
+    def _fake_build_openai_chat_transport(*, api_key: str, **kwargs: Any) -> object:
+        # build_openai_chat_transport 도 sentinel callable 로 대체 — 실 OpenAI client
+        # 생성 회피. transport 가 wiring 됐는지만 검증한다.
+        captured["generator_transport_init"] = {
+            "api_key_provided": bool(api_key),
+            "kwargs": kwargs,
+        }
+        return lambda payload: {"answer": "stub"}
+
+    import answer_generation_agent.generation.answer_generation as generation_module
     import answer_verification_agent.evaluator.providers as verifier_providers_module
     import app.ingestion.embedder.dense as dense_module
     import app.ingestion.embedder.sparse as sparse_module
+    import app.query.openai_transport as openai_transport_module
     import app.query.reranker.cross_encoder as reranker_module
 
     monkeypatch.setattr(dense_module, "E5DenseEmbedder", _fake_dense_factory)
@@ -142,6 +164,12 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         classmethod(_fake_routing_provider_from_config),
     )
     monkeypatch.setattr(verifier_providers_module, "OpenAIEvaluatorProvider", _FakeOpenAIEvaluator)
+    monkeypatch.setattr(generation_module, "OpenAIAnswerLLMProvider", _FakeOpenAIAnswer)
+    monkeypatch.setattr(
+        openai_transport_module,
+        "build_openai_chat_transport",
+        _fake_build_openai_chat_transport,
+    )
 
     return captured
 
@@ -176,11 +204,19 @@ def test_build_real_deps_wires_real_adapter_classes(
     # 가 manage_router 기본값일 때 partial 로 노드에 주입되는 경로).
     assert deps.routing_provider is not None
     assert deps.routing_config is not None
-    # 답변 생성기 provider / config 는 본 세션(Agent 통합 2/4)에서 fake 자동 wiring
-    # 으로 유지된다 (Plan v2 §3 B). agent OpenAIAnswerLLMProvider 의 transport
-    # 미주입 한계로 build_real_deps 도 None 유지 — 회귀 보호.
-    assert deps.generator_provider is None
-    assert deps.generator_config is None
+    # 답변 생성기 provider / config 는 (B) 운영 OpenAI HTTP transport 도입으로
+    # 운영 모드에 wiring 된다 (Plan v2 §2.6, 설계서 §4.6.3). build_openai_chat
+    # _transport 가 OpenAI client 를 만들어 OpenAIAnswerLLMProvider 의 transport 로
+    # 주입된다. 모델은 settings.llm_answer_model (default GPT-4o).
+    # NOTE: 단위 테스트는 Settings(_env_file=None) 으로 openai_api_key 가 빈 SecretStr
+    # 이므로 api_key_provided 자체는 False 가 정상이다 — 운영에서는 OPENAI_API_KEY
+    # 환경변수로 채워진다. 본 단언은 transport wiring 자체와 모델명만 검증한다.
+    assert patched_real_adapters["generator_provider_init"] is not None
+    assert patched_real_adapters["generator_provider_init"]["transport"] is not None
+    assert patched_real_adapters["generator_transport_init"] is not None
+    assert deps.generator_provider is not None
+    assert deps.generator_config is not None
+    assert deps.generator_config.model == _settings().llm_answer_model
     # 답변 검증 2단계 평가자 provider / config 는 Agent 통합 3/4 에서 OpenAIEvaluator
     # Provider 로 주입된다 (agent 자체 urllib HTTP transport 가 있어 즉시 wiring).
     # GPT-4o-mini 모델로 설정 (설계서 §4.7.2 / app/CLAUDE.md §5 라우팅 정책).
