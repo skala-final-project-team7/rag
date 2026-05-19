@@ -37,6 +37,14 @@
     시그니처 변경 (``config`` placeholder + ``routing_config`` keyword-only)
     에 맞춰 router partial wiring 을 ``config=`` → ``routing_config=`` 로 갱신.
     generator/verifier partial 은 변경 없음.
+  - 2026-05-19, feature14 SSE token streaming 라우트 통합 —
+    ``build_query_graph_for_streaming(deps)`` helper 신설. 기존 build_query
+    _graph 가 history→router→search→(empty|rerank)→generate→verify 전체를
+    조립하는 반면, 본 helper 는 generate/verify 를 제외하고 rerank 까지만
+    조립한다 (rerank 노드 종료 후 END). SSE 라우트가 rerank 결과 top_chunks
+    를 받아 OpenAI streaming + 검증을 직접 수행하는 흐름 (설계서 §4.6.4).
+    기존 build_query_graph 는 무수정 보존 (PoC 600 test 회귀 + non-streaming
+    경로 유지).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, LangGraph 0.2.x
@@ -251,6 +259,76 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
     builder.add_edge("rerank", "generate")
     builder.add_edge("generate", "verify")
     builder.add_edge("verify", END)
+
+    return builder.compile()
+
+
+def build_query_graph_for_streaming(deps: QueryGraphDeps) -> Any:
+    """SSE token streaming 용 partial Query LangGraph (rerank 까지만 조립).
+
+    설계서 §4.6.4 — SSE 라우트가 첫 토큰부터 사용자에게 즉시 송신하려면 답변 생성기를
+    LangGraph 노드로 두지 말고 라우트에서 직접 OpenAI streaming 을 호출해야 한다.
+    본 helper 는 build_query_graph 와 동일한 wiring 을 사용하되 generate / verify
+    노드를 제외하고 rerank 종료 후 END 로 끝난다. 라우트가 종료된 state 의
+    ``top_chunks`` 를 받아 ``stream_openai_answer`` 로 토큰 송신 + 검증 1+2단계
+    를 사후에 직접 수행한다.
+
+    그래프 구조:
+        manage_history → router → hybrid_search
+                                     ├─(candidates 0건)─► empty_retrieval ─► END
+                                     └─(후보 있음)─► rerank ─► END
+
+    Args:
+        deps: 그래프 노드 wiring 에 필요한 의존성 묶음. ``generator_*`` /
+            ``verifier_*`` / ``verify_llm_evaluator`` 필드는 본 그래프에서
+            사용하지 않는다.
+
+    Returns:
+        LangGraph CompiledGraph — rerank 까지 실행한 RagState 를 반환한다.
+        검색 0건이면 empty_retrieval 분기로 빠지며 ``answer`` 가 RETRIEVAL_EMPTY
+        표준 메시지로 채워진다 (기존 build_query_graph 정합).
+    """
+    builder = StateGraph(RagState)
+
+    # 노드 등록 — build_query_graph 와 동일 wiring. partial 패턴 정합.
+    builder.add_node("manage_history", partial(manage_history, provider=deps.history_provider))
+    if deps.router_node is manage_router:
+        builder.add_node(
+            "router",
+            partial(
+                manage_router,
+                provider=deps.routing_provider,
+                routing_config=deps.routing_config,
+            ),
+        )
+    else:
+        builder.add_node("router", deps.router_node)
+    builder.add_node(
+        "hybrid_search",
+        partial(
+            hybrid_search,
+            dense_embedder=deps.dense_embedder,
+            sparse_embedder=deps.sparse_embedder,
+            store=deps.store,
+        ),
+    )
+    builder.add_node("empty_retrieval", empty_retrieval_node)
+    builder.add_node(
+        "rerank",
+        partial(cross_encoder_rerank, reranker=deps.reranker, chunk_lookup=deps.chunk_lookup),
+    )
+
+    # 엣지 — 단일 경로 + 검색 0건 분기 (generate/verify 미포함).
+    builder.set_entry_point("manage_history")
+    builder.add_edge("manage_history", "router")
+    builder.add_edge("router", "hybrid_search")
+    builder.add_conditional_edges(
+        "hybrid_search",
+        after_search_branch,
+        {"empty": "empty_retrieval", "rerank": "rerank"},
+    )
+    builder.add_edge("empty_retrieval", END)
+    builder.add_edge("rerank", END)
 
     return builder.compile()
 

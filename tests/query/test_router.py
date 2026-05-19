@@ -193,16 +193,26 @@ def test_routing_config_keyword_is_accepted() -> None:
     """``routing_config=`` keyword-only 인자가 agent config 로 정상 전달되는지 확인.
 
     feature12 회귀 보호: query_graph.py partial wiring 이 ``routing_config=deps.
-    routing_config`` 로 갱신된 정합 확인.
+    routing_config`` 로 갱신된 정합 확인. LLM 힌트가 제공된 경우 ``max_query_count``
+    가 길이 상한으로 작용해 갯수가 그 이하로 잘리는 흐름을 검증한다 (default_query
+    _count 는 LLM 힌트가 없을 때 deterministic fallback 이 채우는 갯수이므로
+    명시 힌트가 있는 경우 max_query_count 가 진짜 상한).
     """
     from query_routing_agent.config import QueryRoutingConfig
 
-    custom_config = QueryRoutingConfig(model="gpt-4o-mini", default_query_count=2)
+    # agent validation 정합: default_query_count <= max_query_count 가 강제이므로
+    # 둘을 함께 2 로 낮춰 max_query_count 가 길이 상한으로 작용하는 흐름을 검증한다.
+    custom_config = QueryRoutingConfig(
+        model="gpt-4o-mini",
+        default_query_count=2,
+        max_query_count=2,
+    )
+    hints = ["힌트1", "힌트2", "힌트3"]  # 3 개 힌트 제공 → max_query_count=2 로 잘려야 함.
     result = manage_router(
         _state(),
-        provider=_fake("operations_guide"),
+        provider=_fake("operations_guide", expanded_queries=hints),
         routing_config=custom_config,
     )
     assert result.intent is Intent.OPERATION_GUIDE
-    # default_query_count=2 가 rewrite 단계에 반영되면 rewritten_queries 길이가 ≤ 2.
+    # max_query_count=2 가 적용되면 rewritten_queries 갯수는 2 이하.
     assert len(result.rewritten_queries) <= 2
