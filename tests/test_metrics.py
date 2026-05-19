@@ -111,14 +111,18 @@ def test_answer_generation_latency_seconds_observes() -> None:
 
 
 def test_metrics_registered_in_default_registry() -> None:
-    """4종 메트릭이 default CollectorRegistry 에 등록되어 /metrics 노출 대상이 된다."""
-    names = {m.describe()[0].name for m in REGISTRY._collector_to_names.keys() if m.describe()}  # type: ignore[attr-defined]
-    # Counter 는 ``<name>`` 또는 ``<name>_total`` 두 가지로 sample 되지만 metric 객체
-    # 자체의 name 은 ``<name>`` (``_total`` 접미사 제외). prometheus_client 1.x 정합.
-    assert "llm_fallback" in names or "llm_fallback_total" in names
-    assert "verification_status" in names or "verification_status_total" in names
-    assert "answer_generation_latency_seconds" in names
-    assert "intent_classification" in names or "intent_classification_total" in names
+    """4종 메트릭이 default CollectorRegistry 에 등록되어 /metrics 노출 대상이 된다.
+
+    REGISTRY.collect() 가 process collector (GCCollector 등) + 본 모듈의 사용자
+    정의 메트릭을 모두 yield 하므로 metric name 집합을 모은 뒤 본 모듈의 4종이
+    포함되는지 확인한다. Counter 는 prometheus_client 0.20+ 에서 metric.name 에
+    ``_total`` 접미사가 포함되지 않으므로 두 표기 모두 허용한다.
+    """
+    metric_names = {metric.name for metric in REGISTRY.collect()}
+    assert "llm_fallback" in metric_names or "llm_fallback_total" in metric_names
+    assert "verification_status" in metric_names or "verification_status_total" in metric_names
+    assert "answer_generation_latency_seconds" in metric_names
+    assert "intent_classification" in metric_names or "intent_classification_total" in metric_names
 
 
 # --- hook 동작 ---

@@ -4305,3 +4305,117 @@ Instrumentator 가 `/metrics` 로 자동 노출.
   - 라우터 prompt 튜닝 (smoke 발견 #2 의도 분류 정확도 90% 달성)
   - 답변 생성기 prompt 튜닝 (환각 비율 15% 이내)
   - Cross-Encoder 임계값 비교 (0.20 / 0.30 / 0.40)
+
+---
+
+## 2026-05-19 — 라우터 의도 분류 prompt 보강 (feature16 발견 #2 fix)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17a 의 `scripts/run_evaluation.py --debug-route` 로 4종 의도
+  질의를 운영 라우터에 통과시킨 결과 — **4건 중 1건만 정답** (operations_guide
+  만 우연 정합), 나머지 3건 모두 incident_response / policy_procedure /
+  history_lookup → operations_guide 로 오분류. **설계서 §6.1 임계 90% 와 격차
+  큼**. vendoring 한 `query_routing_agent` 의 default prompt 결함을 본 저장소
+  transport callable 보강으로 무수정 우회 fix.
+
+### 분석 결과
+
+| 질의 | expected | actual | latency_ms | 비고 |
+|------|----------|--------|------------|------|
+| EKS NotReady | 장애대응 | 운영가이드 | — | 오분류 |
+| Karpenter 도입 단계 | 운영가이드 | 운영가이드 | — | 우연 정답 |
+| IAM 정책 변경 절차 | 정책절차 | 운영가이드 | — | 오분류 |
+| 지난 분기 비용 증가 원인 | 이력조회 | 운영가이드 | — | 오분류 |
+
+- 정확도 **25%** (1/4). 설계서 §6.1 임계 90% 미충족.
+- `rewritten_queries` 가 모두 deterministic fallback (`"원본"`, `"원본 + 검색"`,
+  `"원본 + 검색 1"`) — LLM 응답에 `expanded_queries` 없음.
+- `metadata_filters` 의 space_keys / labels / document_types 모두 빈 배열 —
+  LLM 이 메타필터 추출 안 함.
+- `pool_weights = {0.25, 0.6, 0.15}` — agent 의 OPERATIONS_GUIDE 정상 분기
+  가중치. **`_apply_fallback` 안 탐 ✓** (라우터 LangGraph fix 정상 작동).
+
+### 원인 (vendoring `query_routing_agent` prompt 결함)
+
+`query_routing_agent/llm/classification.py:57` 의 `build_routing_prompt` 가
+빈약함:
+
+```python
+return "\n".join([
+    "Classify the routing intent for a RAG search request.",
+    f"query: {routing_input.query}",
+    ...
+    "Return JSON with intent, confidence, reason.",
+])
+```
+
+`query_routing_agent/llm/providers.py:88` 의 `to_openai_payload` 가 만든 system
+prompt 도 한 줄: `"You classify RAG query routing intent."`
+
+결함 4종:
+1. 4종 의도 라벨의 정의·예시·구분 기준 prompt 미포함 → LLM 이 라벨 의미 모름
+2. `expanded_queries` 요청 누락 → rewrite_queries deterministic fallback
+3. `metadata_filters` 요청 누락 → space_keys / labels 빈 배열
+4. Function Calling schema 강제 없음 (response_format=json_object 만 있음)
+
+### Fix — `app/query/routing_transport.py` 신설
+
+vendoring 코드는 무수정 보존 (CLAUDE.md 절대 규칙) 하고, `OpenAIRoutingLLMProvider`
+의 `transport` 인자에 본 저장소가 만든 callable 을 주입해 **default transport 대체**.
+
+- `build_openai_routing_transport(api_key)` — transport callable factory.
+- system prompt: 설계서 §4.4.2 / §4.4.3 / §4.4.4 정합 — 4종 의도 정의·예시·구분
+  기준 + 한국어 가이드 + 출력 schema (intent / confidence / reason / expanded
+  _queries[3] / metadata_filters) 강제.
+- user message: agent 의 `build_routing_prompt` 결과를 그대로 전달 (history
+  _decision / context_summary 정보 보존).
+- response_format=json_object 유지 (agent `parse_routing_llm_response` 가 그대로
+  파싱 가능).
+- OpenAI `RateLimitError` → `OpenAITransportError(429)` 매핑 (상위 provider 가
+  routing fallback 으로 흡수).
+
+### `build_real_deps` 갱신
+
+```python
+routing_provider = OpenAIRoutingLLMProvider(
+    config=routing_config,
+    api_key=openai_api_key,
+    transport=build_openai_routing_transport(api_key=openai_api_key),
+)
+```
+
+### 수정 파일
+
+- `app/query/routing_transport.py` (신규) — transport callable + system prompt
+- `app/api/deps.py` — `build_real_deps` 의 OpenAIRoutingLLMProvider 에 transport
+  명시 주입
+- `tests/query/test_routing_transport.py` (신규) — 회귀 6건 (system prompt 4종
+  의도 명시 / user 메시지 보존 / response_format=json_object / model·temp 전달
+  / content 반환 / RateLimitError 매핑)
+- `tests/api/test_deps.py` — `routing_provider_init["transport"]` 가 callable
+  인지 단언 추가
+- `docs/ai/working-log.md` (본 세션 기록)
+- `docs/ai/current-plan.md` (Milestone D 갱신)
+
+### 정합성 검증 — 설계서
+
+- §4.4.2 (4종 의도 정의) ✓ — system prompt 에 명시
+- §4.4.3 (검색 친화적 쿼리 확장 3종) ✓ — schema 강제
+- §4.4.4 (의도별 메타필터 + Pool 가중치) ✓ — metadata_filters schema 강제
+- §4.4.5 (Function Calling 강제) — response_format=json_object + schema 명세로
+  대체 (full Function Calling tools 강제는 후속 — 본 fix 충분)
+- §4.4.6 (라우터 실패 시 Fallback) ✓ — RateLimitError 매핑 정합
+- §6.1 의도 분류 정확도 90% — 본 fix 후 사용자 Mac 재검증 권장 (4 → 4 정답
+  목표)
+
+### 검증 명령 / 결과
+
+- 사용자 Mac: `./scripts/verify.sh` 실행 — 614 + 6 = **620 passed 예상**.
+- commit/push 후 **debug-route 재실행** 권장 — 4종 질의가 정확히 4종 의도로
+  분류되는지 확인. 결과를 다음 commit 의 후속 기록으로.
+
+### 후속 TODO
+
+- 사용자 Mac 에서 debug-route 재실행 → 본 fix 의 분류 정확도 실측
+- feature17b — Evaluation Set 50건 라벨링 + ROUGE-L/BERTScore
+- feature17c — Pool 가중치 그리드 서치 + 답변 생성기 prompt 튜닝
