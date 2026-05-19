@@ -15,7 +15,12 @@ from app.config import Settings
 from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import index_chunks
 from app.pipeline.nodes import RETRIEVAL_EMPTY_ANSWER
-from app.pipeline.query_graph import QueryGraphDeps, build_query_graph, run_query
+from app.pipeline.query_graph import (
+    QueryGraphDeps,
+    build_query_graph,
+    build_query_graph_for_streaming,
+    run_query,
+)
 from app.pipeline.stubs import generator_stub, verify_llm_evaluator_stub
 from app.query.acl import ACLViolationError, build_acl_filter
 from app.query.formatter import BLOCKED_ANSWER_MESSAGE
@@ -159,6 +164,48 @@ def test_build_query_graph_compiles_without_node_state_key_collision(
     """
     # 컴파일 자체가 통과하면 노드명·필드명 충돌이 없음 — 별도 단언 불필요.
     build_query_graph(_deps(dense, sparse, populated_store))
+
+
+# --- feature14: SSE streaming 용 partial graph 회귀 ---
+
+
+def test_build_query_graph_for_streaming_populates_top_chunks_and_sources(
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    populated_store: QdrantPoolStore,
+) -> None:
+    """streaming 용 partial graph 는 rerank 까지만 실행하고 종료한다.
+
+    feature14 회귀 — generate/verify 노드 미포함 + top_chunks/sources 가 채워진 채
+    종료. answer/verification 은 비어 있어야 한다 (라우트가 사후 streaming + 검증
+    을 직접 수행하는 흐름).
+    """
+    graph = build_query_graph_for_streaming(_deps(dense, sparse, populated_store))
+    result_dict = graph.invoke(_initial_state(query="alpha"))
+    state = RagState.model_validate(result_dict)
+    # rerank 결과가 채워져야 한다.
+    assert state.top_chunks
+    assert state.sources
+    # generate/verify 가 실행되지 않았으므로 answer/verification 은 비어 있다.
+    assert not state.answer
+    assert not state.verification
+
+
+def test_build_query_graph_for_streaming_handles_empty_retrieval(
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    empty_store: QdrantPoolStore,
+) -> None:
+    """streaming 용 partial graph 도 검색 0건 분기에서 RETRIEVAL_EMPTY 표준 응답.
+
+    rerank 노드를 건너뛰고 empty_retrieval 노드가 answer 를 표준 메시지로 채운다.
+    라우트는 top_chunks 가 비었음을 확인하고 5 이벤트 시퀀스 그대로 송신.
+    """
+    graph = build_query_graph_for_streaming(_deps(dense, sparse, empty_store))
+    result_dict = graph.invoke(_initial_state(query="anything"))
+    state = RagState.model_validate(result_dict)
+    assert state.top_chunks == []
+    assert state.answer == RETRIEVAL_EMPTY_ANSWER
 
 
 # --- 정상 흐름 ---

@@ -23,6 +23,11 @@
     인증을 우회하는 Prometheus scraper 직접 접근 경로 (CORS·인증 미들웨어는
     BFF 가 담당 — docs/api-spec.md NOTE 정합). LLM 커스텀 메트릭 (환각
     비율·Precision@3 등) 은 feature17 (평가 세션) 으로 이관.
+  - 2026-05-19, feature14 SSE token streaming — lifespan 이 build_query_graph
+    뿐 아니라 ``build_query_graph_for_streaming`` 도 함께 컴파일해 ``app.state
+    .streaming_graph`` 에 저장한다. SSE 라우트가 ``stream=True`` 요청에 대해
+    rerank 까지만 실행한 뒤 OpenAI streaming + 검증을 직접 수행하는 흐름
+    (설계서 §4.6.4).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -39,7 +44,11 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.api.deps import build_poc_deps, build_real_deps
 from app.api.routes import router as query_router
 from app.config import get_settings
-from app.pipeline.query_graph import QueryGraphDeps, build_query_graph
+from app.pipeline.query_graph import (
+    QueryGraphDeps,
+    build_query_graph,
+    build_query_graph_for_streaming,
+)
 
 
 @asynccontextmanager
@@ -57,14 +66,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         build_real_deps(settings) if settings.use_real_adapters else build_poc_deps(settings)
     )
     app.state.deps = deps
+    app.state.settings = settings
     app.state.graph = build_query_graph(deps)
+    # streaming_graph 는 SSE 라우트의 ``stream=True`` 분기 전용 — rerank 까지만
+    # 실행하고 답변 생성·검증은 라우트가 직접 OpenAI streaming + verify_pipeline_node
+    # 로 수행한다. 운영 모드에서만 사용되지만 lifespan 부담이 적어 PoC 에서도 함께
+    # 컴파일한다 (PoC 경로는 stream=true 라도 자동 fallback 으로 비-streaming 실행).
+    app.state.streaming_graph = build_query_graph_for_streaming(deps)
     try:
         yield
     finally:
         # Qdrant `:memory:` 클라이언트는 GC에 맡긴다 — 명시 close 없음.
         # 운영 from_settings 클라이언트도 별도 세션 종료 절차가 없어 GC에 맡긴다.
         app.state.graph = None
+        app.state.streaming_graph = None
         app.state.deps = None
+        app.state.settings = None
 
 
 def create_app() -> FastAPI:

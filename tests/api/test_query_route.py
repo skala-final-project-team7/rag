@@ -254,3 +254,132 @@ async def test_query_route_acl_mismatch_yields_empty_retrieval(
     events = dict(_parse_sse(resp.text))
     assert "권한 범위" in events["token"]
     assert json.loads(events["sources"]) == []
+
+
+# --- feature14: SSE token streaming (stream=True) 분기 ---
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_true_falls_back_when_no_generator_provider(
+    populated_graph: Any,
+) -> None:
+    """PoC 안전 fallback — stream=True 라도 deps.generator_provider 없으면 비-streaming.
+
+    `_should_fallback_to_non_streaming` 회귀 — app.state.deps 가 미설정 / generator
+    _provider None / settings.openai_api_key 빈 SecretStr 중 하나라도 해당하면
+    stream=True 가 무시되고 기존 run_query 흐름으로 5 이벤트 송신.
+    """
+    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
+    async with _client(populated_graph) as client:
+        resp = await client.post("/api/v1/rag/query", json=body)
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    # fallback 흐름은 기존 5 이벤트 시퀀스 그대로 — token 1회 + 후행 4종.
+    event_names = [name for name, _ in events]
+    assert event_names == ["token", "sources", "verification", "meta", "done"]
+
+
+def _streaming_client(
+    populated_graph: Any,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming_tokens: list[str],
+) -> httpx.AsyncClient:
+    """운영 streaming 분기 회귀용 클라이언트.
+
+    app.state 에 streaming_graph / deps / settings 를 수동 채워 lifespan 우회하면서
+    stream=True 분기로 진입할 수 있게 한다. ``stream_openai_answer`` 는 monkeypatch
+    로 fake token generator 로 대체.
+    """
+    from types import SimpleNamespace
+
+    from app.api import routes as routes_module
+    from app.pipeline.query_graph import build_query_graph_for_streaming
+
+    # populated_graph 자체에는 streaming_graph 가 없으므로 동일 인메모리 deps 로
+    # streaming graph 도 컴파일한다. 본 테스트는 token chunk 송신·검증 호출 흐름을
+    # 검증하므로 deps 의 generator_provider/config 는 sentinel 로 채워 분기만 활성화.
+    settings = Settings(_env_file=None)  # type: ignore[arg-type]
+    dense = FakeDenseEmbedder(dimension=8)
+    sparse = FakeSparseEmbedder()
+    store = QdrantPoolStore.in_memory(settings, dense_dimension=8)
+    store.bootstrap_collections()
+    index_chunks(
+        [
+            _chunk(chunk_id="a" * 40, text="alpha bravo charlie"),
+            _chunk(chunk_id="b" * 40, text="bravo delta echo"),
+        ],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        cache=FakeEmbeddingCache(),
+    )
+    deps = QueryGraphDeps(
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=store,
+        reranker=FakeCrossEncoderReranker(),
+        # generator_provider 가 None 이 아니어야 streaming 분기 활성. 본 fake 는
+        # 실제로는 호출되지 않으며 stream_openai_answer monkeypatch 만 사용된다.
+        generator_provider=object(),
+        generator_config=SimpleNamespace(model="gpt-4o", temperature=0.2, timeout_seconds=45),
+    )
+    streaming_graph = build_query_graph_for_streaming(deps)
+
+    # streaming OpenAI 호출은 monkeypatch — fake token chunk 를 순차 yield.
+    from app.query.openai_streaming import StreamingTokenChunk
+
+    def _fake_stream_openai_answer(**_kwargs: Any) -> Any:
+        for token in streaming_tokens:
+            yield StreamingTokenChunk(text=token)
+
+    monkeypatch.setattr(routes_module, "stream_openai_answer", _fake_stream_openai_answer)
+
+    # settings.openai_api_key 가 빈 SecretStr 이면 fallback. 채워 둔다.
+    from pydantic import SecretStr
+
+    settings_with_key = settings.model_copy(update={"openai_api_key": SecretStr("sk-test")})
+
+    app = create_app()
+    # lifespan 우회한 채 app.state 를 수동 채움 — ASGITransport 가 lifespan 을 자동
+    # 켜기 때문에 state 가 초기화될 가능성이 있어 dependency_overrides 와 함께 둔다.
+    app.state.deps = deps
+    app.state.settings = settings_with_key
+    app.state.streaming_graph = streaming_graph
+    app.state.graph = populated_graph  # stream=False 케이스 호환을 위해.
+    app.dependency_overrides[get_graph] = lambda: populated_graph
+    transport = ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_true_emits_multiple_token_chunks(
+    populated_graph: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """운영 streaming — token chunk 가 다중 송신되고 후행 4 이벤트 시퀀스 정합."""
+    streaming_tokens = ["답변 ", "시작 ", "[#1]"]
+    client = _streaming_client(
+        populated_graph,
+        monkeypatch=monkeypatch,
+        streaming_tokens=streaming_tokens,
+    )
+    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
+    async with client as c:
+        resp = await c.post("/api/v1/rag/query", json=body)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    events = _parse_sse(resp.text)
+    # token 이벤트는 streaming_tokens 갯수 이상 (검증 차단 분기에서 1회 더 송신 가능).
+    token_count = sum(1 for name, _ in events if name == "token")
+    assert token_count >= len(streaming_tokens)
+    # token 데이터 누적은 streaming_tokens 의 순서를 보존한다.
+    token_payloads = [data for name, data in events if name == "token"]
+    assert token_payloads[: len(streaming_tokens)] == streaming_tokens
+    # 후행 이벤트 시퀀스 정합 — sources / verification / meta / done.
+    trailing_names = [name for name, _ in events if name != "token"]
+    assert trailing_names == ["sources", "verification", "meta", "done"]
+    # meta payload — used_llm 이 generator_config.model 정합 (gpt-4o → GPT_4O).
+    meta = json.loads(dict(events)["meta"])
+    assert meta["used_llm"] == "gpt-4o"

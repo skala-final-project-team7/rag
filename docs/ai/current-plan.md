@@ -489,10 +489,10 @@
 
 작업 항목:
 
-- [ ] (PDF #1) .gitignore 보완
-- [ ] (PDF #4) Prometheus instrumentator + /metrics
-- [ ] 라우터 LangGraph config rename
-- [ ] config.py 기본값 + build_real_deps api_key 명시 전달
+- [x] (PDF #1) .gitignore 보완 — `78286ea`
+- [x] (PDF #4) Prometheus instrumentator + /metrics — `78286ea`
+- [x] 라우터 LangGraph config rename — `78286ea`
+- [x] config.py 기본값 + build_real_deps api_key 명시 전달 — `78286ea`
 
 ### feature13: ML 코드 리뷰 (PDF 2+3) — P1 ⏳ 외부 협의 대기
 
@@ -534,7 +534,9 @@ BE 담당자 명세 확정 후 진행.
 
 작업 항목:
 
-- [ ] SSE 라우트 streaming 분기 + 회귀
+- [x] SSE 라우트 streaming 분기 + 회귀 — `build_query_graph_for_streaming`
+  helper + `QueryRequest.stream` + `_streaming_event_stream` + PoC fallback +
+  partial graph 회귀 2건 + 라우트 회귀 2건 (다음 commit)
 
 ### feature15: (C) Rate Limit fallback — P2
 
@@ -600,10 +602,11 @@ BE 담당자 명세 확정 후 진행.
 
 ## 완료 현황 (2026-05-19 종료 시점)
 
-- **본 담당자 (Pipeline + Storage) 영역 진척도**: **~99%+**
+- **본 담당자 (Pipeline + Storage) 영역 진척도**: **~100%** (운영성·관측성·streaming
+  까지 완성)
 - **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
-  Mode B 시연 검증)**
-- **잔여 (Milestone D)**: feature12 ~ feature18
-- **즉시 진행 가능 (외부 협의 불필요)**: feature12 / feature14 / feature15 / feature16 /
+  Mode B 시연 검증 + Milestone D feature12 + feature14)**
+- **잔여 (Milestone D)**: feature13 / feature15 / feature16 / feature17 / feature18
+- **즉시 진행 가능 (외부 협의 불필요)**: feature15 / feature16 / feature17 /
   feature18(부분)
 - **외부 협의 대기**: feature13 (BE 명세), feature18(Data Agent / Agent 담당자 영역)
