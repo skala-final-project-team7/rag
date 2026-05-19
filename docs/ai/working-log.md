@@ -3506,3 +3506,206 @@ working-log.md` 본 단락에 일관 기록되어 다음 세션에서 누락 없
 5. **(F) all-sentence evaluation mode** — 비용/정확도 trade-off 평가 후 결정.
 6. **운영 라이브 smoke** — Agent 통합 4종 + 운영 transport 모두 끝낸 후 docker
    compose + `RAG_USE_REAL_ADAPTERS=true` 로 끝-끝 검증.
+
+
+## 2026-05-19 — (B) 운영 OpenAI HTTP transport + (A 인프라) Hybrid streaming generator
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: Agent 통합 3/4 완료로 본 담당자 영역 ~99% 도달. 답변 생성기 운영 GPT-4o
+  호출 (설계서 §4.6.3)·SSE 토큰 스트리밍 (§4.6.4) 두 잔여 미구현을 진행한다.
+  본 세션은 사용자 합의에 따라 (B) transport + (A) streaming 인프라 (`openai_
+  transport.py` / `openai_streaming.py`)·`build_real_deps` wiring·테스트까지만
+  마무리. SSE 라우트의 streaming 통합은 그래프 흐름 (search → rerank → generate
+  → verify) 분리·재조립이 필요하므로 별도 세션 (다음 후속 작업).
+
+### 변경 사항
+
+**(B) 운영 OpenAI HTTP transport — `app/query/openai_transport.py` (~150 lines)**
+
+- `build_openai_chat_transport(*, api_key, response_format=None) -> Callable` —
+  agent `OpenAIAnswerLLMProvider` 의 transport 자리에 그대로 주입 가능한
+  closure callable 반환.
+- agent `request.to_safe_dict()` payload 를 받아 `openai.OpenAI.chat.completions
+  .create` 동기 호출. `response_format={"type": "json_object"}` 기본값으로 JSON
+  강제 — agent `parse_llm_response` 가 JSON dict 를 기대하므로 정합.
+- `_normalize_messages` — agent 의 `system` / `developer` / `user` 3 role 을
+  OpenAI 가 받는 형식 (`system` / `user`)으로 정규화. `developer` 메시지는 system
+  앞에 합쳐 단일 system 메시지로 전달 (GPT-4o 계열은 developer role 미지원).
+- 에러 흡수:
+    - `APITimeoutError` → `OpenAITransportError(status_code=None)` → agent 가
+      timeout_error 로 분류 (retryable).
+    - `APIStatusError` → status_code 보존 → agent 가 429/5xx retry 결정.
+    - `APIError` → status_code=500 일반화.
+    - empty content / invalid JSON / non-object JSON → 모두 `OpenAITransport
+      Error(status_code=500)` 로 흡수.
+- 컴포넌트 분류 [Storage] — 외부 API 호출 어댑터. agent retry/타임아웃/안전
+  fallback 은 그대로 agent 본체·`manage_generator` 에 위임 (책임 분리).
+
+**(A 인프라) Hybrid streaming generator — `app/query/openai_streaming.py` (~150 lines)**
+
+- 설계서 §4.6 의 두 충돌 (Function Calling JSON contract vs token streaming)을
+  Plan v2 hybrid 방식으로 해소: streaming 경로는 별도 plain text prompt 로
+  분리하고, LLM 에게 `[#N]` 마커를 답변에 포함하도록 강제. 검증 1단계는 답변
+  텍스트의 `[#N]` 마커 기반이므로 호환.
+- `_STREAMING_SYSTEM_PROMPT` — 핵심 규칙 6 조항:
+    1. 컨텍스트만 근거, 한국어 답변.
+    2. 모든 핵심 문장 끝에 `[#1]` `[#2]` 형식 마커.
+    3. 다중 인용은 `[#1][#2]` 이어붙임.
+    4. 컨텍스트 외 사실 단정 금지 ("확인할 수 없습니다" 표시).
+    5. plain text 만 — JSON / 코드 블록 감싸지 않기.
+- `build_streaming_user_prompt(*, query, top_chunks) -> str` — top_chunks 를
+  1-based `[#N]` 번호로 컨텍스트 블록 합산. 본 함수가 마커 번호 부여 단일 진입점.
+- `stream_openai_answer(*, api_key, model, temperature, timeout_seconds, query,
+  top_chunks) -> Iterator[StreamingTokenChunk]` — OpenAI `stream=True` 모드로
+  token chunk yield. `delta.content` 가 None / 빈 문자열이면 skip.
+- `StreamingTokenChunk` dataclass — SSE 라우트가 그대로 송신할 단일 token chunk
+  타입. SSE 라우트 통합 (다음 세션) 시 token 이벤트로 변환.
+- 가드: `top_chunks` 비면 `RuntimeError` — 호출자 (다음 세션의 SSE 라우트) 가
+  검색 0건 분기에서 본 함수 호출을 막아야 한다.
+- 컴포넌트 분류 [Storage] — 외부 streaming API 어댑터.
+
+**부트스트랩 — `app/api/deps.py` (build_real_deps 갱신)**
+
+- 모듈 docstring 변경 이력에 (B) 운영 OpenAI HTTP transport 단락 추가.
+- `build_real_deps` 본체:
+    - lazy import 추가: `AnswerGenerationConfig`, `OpenAIAnswerLLMProvider`,
+      `build_openai_chat_transport`.
+    - `settings.openai_api_key.get_secret_value()` 로 API key 추출.
+    - `AnswerGenerationConfig(model=settings.llm_answer_model, fallback_model=
+      settings.llm_aux_model)` 생성 — settings 단일 진입점에서 GPT-4o / GPT-4o-
+      mini 모델명 가져옴.
+    - `OpenAIAnswerLLMProvider(api_key=..., transport=build_openai_chat
+      _transport(api_key=...))` 인스턴스화 — transport 주입 시점에 API key 누락
+      이면 `ProviderConfigurationError` 즉시 발생 (운영 lifespan 진입 직전에
+      누락 명확히 드러남).
+    - `QueryGraphDeps(..., generator_provider=..., generator_config=...)` 반환.
+- `build_poc_deps` 변경 없음 — fake 자동 wiring 유지 (외부 API 키 없이 동작).
+
+### 신규 회귀 테스트
+
+**`tests/query/test_openai_transport.py` (~230 lines, 9 tests)**
+
+OpenAI client 를 `_FakeClient` 로 monkeypatch (sys.modules["openai"] 모듈 자체 교체):
+- `test_transport_returns_parsed_json` — 정상 JSON 응답 → dict 반환.
+- `test_transport_merges_developer_into_system_role` — developer 메시지가 system
+  으로 합쳐짐.
+- `test_transport_passes_model_and_temperature` — model/temperature 정합 전달.
+- `test_transport_empty_content_raises_openai_transport_error` — 빈 응답 흡수.
+- `test_transport_invalid_json_raises_openai_transport_error` — 잘못된 JSON 흡수.
+- `test_transport_non_object_json_raises_openai_transport_error` — array JSON 흡수.
+- `test_transport_timeout_raises_with_none_status_code` — APITimeoutError →
+  status_code=None (agent timeout_error 분류 정합).
+- `test_transport_status_error_preserves_status_code` — 429 등 status_code 보존.
+- `test_transport_generic_api_error_normalized_to_500` — generic APIError → 500.
+- `test_transport_custom_response_format_overrides_default` — response_format
+  커스텀 주입 (text 등).
+
+**`tests/query/test_openai_streaming.py` (~220 lines, 8 tests)**
+
+- `test_user_prompt_includes_query_and_numbered_contexts` — 1-based [#N] 매칭.
+- `test_user_prompt_handles_empty_chunks_safely` — "(컨텍스트 없음)" 안전 fallback.
+- `test_user_prompt_includes_chunk_text` — chunk.text 가 prompt 에 포함.
+- `test_streaming_yields_token_chunks` — token chunk 정합 yield + stream=True 전달.
+- `test_streaming_skips_none_delta` — None/빈 문자열 chunk skip.
+- `test_streaming_requires_non_empty_top_chunks` — empty top_chunks → RuntimeError.
+- `test_streaming_passes_model_and_temperature` — 인자 정합 전달.
+- `test_streaming_system_prompt_enforces_marker_rule` — system prompt 규칙
+  검증 ([#N] + plain text).
+
+**`tests/api/test_deps.py` 회귀 보호 추가**
+
+- `patched_real_adapters` fixture 에 `_FakeOpenAIAnswer` + `_fake_build_openai
+  _chat_transport` monkeypatch 추가. `OpenAIAnswerLLMProvider` 자체 + `build_
+  openai_chat_transport` 자체를 sentinel 로 대체 — 실 OpenAI client 생성 회피.
+- `test_build_real_deps_wires_real_adapter_classes` 에 generator_provider/
+  config 회귀 단언 추가:
+    - `generator_provider_init.api_key_provided is True`
+    - `generator_provider_init.transport is not None` — transport 주입 회귀 보호.
+    - `generator_transport_init.api_key_provided is True`
+    - `deps.generator_config.model == settings.llm_answer_model` (default GPT-4o).
+
+### 본 세션 미구현 — 다음 단계 이관
+
+- **(A) SSE 라우트 streaming 통합** — `openai_streaming.py` 가 token chunk
+  generator 를 제공하지만, SSE 라우트가 이를 multi-token 송신으로 변환하는 분기
+  는 별도 세션. 그래프 흐름을 search/rerank 까지 분리한 뒤 streaming 으로 답변
+  생성을 대체하는 비교적 큰 작업.
+- **(C) Rate Limit fallback (GPT-4o-mini 다운그레이드)** — 설계서 §4.6.5. agent
+  의 `select_generation_model(use_fallback=True)` 인터페이스를 사용하는 retry
+  orchestrator 추가 필요. transport 도입 후 별도 세션.
+- **(D) Function Calling 스키마 강제** — Agent 담당자 영역.
+- **(E) 자연어 출처 인용 패턴** — Agent 담당자 영역.
+
+### 책임 분리 (본 담당자 영역만)
+
+- 본 commit 은 본 담당자 영역 5 파일 (2 new — `app/query/openai_transport.py`
+  + `app/query/openai_streaming.py` / 3 modified — `app/api/deps.py` + `tests/
+  api/test_deps.py`) + 2 new tests (`tests/query/test_openai_transport.py` +
+  `tests/query/test_openai_streaming.py`) + 본 docs/ai/working-log.md = 총 8
+  파일.
+- Agent 패키지 (`answer_generation_agent/**`) — 무수정 보존.
+- `app/query/generator.py` — 변경 없음 (build_real_deps 만 provider 주입).
+- `app/api/routes.py` — 변경 없음 (SSE streaming 분기는 다음 세션).
+
+### 정합성 검증 (오버튜닝 회피)
+
+- `app/CLAUDE.md` §5 LLM 라우팅 — 답변 생성기는 GPT-4o 기본 + GPT-4o-mini
+  fallback (`AnswerGenerationConfig(model=GPT-4o, fallback_model=GPT-4o-mini)`) ✓
+- rag-pipeline-design.md §4.6.3 GPT-4o 운영 호출 정합 ✓
+- rag-pipeline-design.md §4.6.4 SSE 토큰 streaming 의 LLM 호출 인프라 ✓
+- rag-pipeline-design.md §4.6.5 plain text fallback — streaming 경로가 plain
+  text 모드 + 검증기 1단계 출처 매핑 정합 ✓
+- `app/CLAUDE.md` §3 ACL / 정확성 — 컨텍스트 외 단정 금지 system prompt 강제 ✓
+- 기존 패턴 재사용 — `OpenAIRoutingLLMProvider` / `OpenAIEvaluatorProvider`
+  wiring 패턴 (build_real_deps lazy import + sentinel monkeypatch) 그대로 복제 ✓
+- 새 의존성 도입 0 — `openai>=1.30` 이미 보유 ✓
+
+### 후방 호환성
+
+- 신규 (B) transport + (A 인프라) — 기존 회귀 테스트 0건 영향. `build_poc_deps`
+  는 변경 없음 — fake 자동 wiring 유지로 PoC 경로 그대로.
+- `QueryGraphDeps` 시그니처 변경 없음 (Agent 통합 2/4 에서 이미 generator_
+  provider/config 필드 추가됨).
+- `manage_generator` 변경 없음 — Agent 통합 2/4 때의 transport=None 한계가 본
+  세션에서 해소되며 자연 동작.
+- `tests/api/test_deps.py` `patched_real_adapters` fixture 확장 — 기존
+  monkeypatch 와 충돌 없이 추가됨.
+
+### 검증 결과 (회사 Mac 기준 — 예상)
+
+- 샌드박스 ruff 0.15.13 으로 format `--check` + check 모두 통과 (`All checks
+  passed!`).
+- pytest 는 `./scripts/verify.sh` 실행 시 통과 예상 — 신규 17 케이스 (test_
+  openai_transport 9 + test_openai_streaming 8) + test_deps 회귀 추가 + 기존
+  회귀 0건. 576 → ~595 예상.
+
+### Agent 통합 + 잔여 진척도
+
+| 영역 | 현재 상태 |
+|---|---|
+| RAG Pipeline 에이전트 4종 (히스토리/라우팅/생성/검증) | ✅ 모두 통합 완료 |
+| (B) 답변 생성기 운영 OpenAI HTTP transport | ✅ 본 commit 으로 완료 |
+| (A 인프라) Streaming generator + plain text prompt | ✅ 본 commit 으로 완료 |
+| (A 라우트) SSE token multi-send 분기 | ⏳ 다음 세션 |
+| (C) Rate Limit fallback | ⏳ 다음 세션 |
+
+### 비고
+
+- 본 commit 이 끝나면 본 담당자 영역 ~99% → **99%+** (단순 인프라 완성도 상승,
+  운영 답변 생성 가능). SSE token 체감 streaming 은 다음 세션 후 100% 운영 정합.
+- 본 commit 의 변경 영향 파일 = 5 본 담당자 + 0 vendoring + 2 test + 1 working
+  -log = 8 파일.
+
+### 후속 TODO (다음 세션 후보 — 우선순위)
+
+1. **(A) SSE 라우트 streaming 통합** — `app/api/routes.py` 의 query_route 에
+   `stream` query parameter 추가. stream=True 시 graph 분기 — search/rerank
+   까지만 graph 실행, top_chunks 확보 후 `stream_openai_answer` 로 token
+   multi-send, 답변 완료 후 sources/verification/meta/done 송신.
+2. **(C) Rate Limit fallback** — `manage_generator` 가 `AnswerProviderError(
+   error_type='rate_limit_error')` 캐치 후 GPT-4o-mini 로 재시도 + verification
+   .note 기록 (설계서 §4.6.5).
+3. **운영 라이브 smoke** — Agent 통합 4종 + (A+B+C) 모두 끝낸 후 docker compose
+   + `RAG_USE_REAL_ADAPTERS=true` 로 끝-끝 검증.
+4. **평가 세션 (F, G)** — 1단계 정합 검증, all-sentence mode 비용 측정.
+5. **feature4-B PDF/CSV 첨부 분할기** — 외부 픽스처 + pymupdf.
