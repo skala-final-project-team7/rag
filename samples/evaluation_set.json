@@ -1,0 +1,113 @@
+{
+  "$schema": "evaluation_set.v1",
+  "description": "RAG Pipeline Evaluation Set — 설계서 §6.2 정합. PoC 종료까지 50건 완성 목표 (현재 시드 10건, feature17b 에서 라벨링 보강).",
+  "design_constraints": {
+    "design_ref": "docs/rag-pipeline-design.md §6.2 / §6.3",
+    "target_size": 50,
+    "intent_ratio_target": {
+      "장애대응": 0.35,
+      "운영가이드": 0.30,
+      "정책절차": 0.20,
+      "이력조회": 0.15
+    },
+    "attachment_focused_min": 8,
+    "notes": [
+      "expected_page_ids 는 정답 청크가 소속된 PageObject 의 page_id 목록.",
+      "expected_chunk_ids 는 정답 청크의 SHA1(page_id+chunk_index+attachment_id) 식별자 — feature17b 에서 운영 그래프 1회 실행 후 backfill 한다 (chunking 결과가 결정론이므로 backfill 후 stable).",
+      "expected_answer_excerpt 는 우수 답변의 핵심 문장 1~2개 — ROUGE-L / BERTScore 자동 평가 입력 (feature17b).",
+      "is_attachment_focused=true 인 항목은 첨부 파일에서 정답이 나와야 하는 항목 (설계서 v0.2.2 신설)."
+    ]
+  },
+  "items": [
+    {
+      "id": "EVAL-001",
+      "intent": "장애대응",
+      "query": "EKS Worker Node가 NotReady 상태가 되었을 때 어떻게 대응해야 하나요?",
+      "expected_page_ids": ["100019", "100001"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "kubelet 로그 확인 → Security Group 인바운드 규칙 (443, 10250) 확인 → IAM Role EKSNodeRole 정책 점검 순서로 진단합니다.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-002",
+      "intent": "장애대응",
+      "query": "Redis 메모리 초과로 인한 세션 유실 사고는 어떻게 처리했나요?",
+      "expected_page_ids": ["100020"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "ElastiCache Redis 메모리 사용량 100% 도달 → 세션 키 evict → maxmemory-policy 점검 + 인스턴스 스케일업.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-003",
+      "intent": "장애대응",
+      "query": "Lambda Cold Start 로 인한 API 타임아웃 사례는?",
+      "expected_page_ids": ["100022"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "Lambda 동시 호출 급증으로 새 컨테이너 초기화 지연 → Provisioned Concurrency 적용 후 P95 회복.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-004",
+      "intent": "장애대응",
+      "query": "DynamoDB 쓰로틀링이 발생했을 때 원인과 해결 과정은?",
+      "expected_page_ids": ["100023"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "ProvisionedThroughputExceededException 발생 → On-Demand 전환 또는 Auto Scaling 임계 조정.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-005",
+      "intent": "운영가이드",
+      "query": "EKS 에 Karpenter 를 도입할 때 어떤 단계를 거쳐야 하나요?",
+      "expected_page_ids": ["100004"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "IAM Role 생성 → Helm chart 설치 → Provisioner CRD 정의 → 노드그룹 마이그레이션.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-006",
+      "intent": "운영가이드",
+      "query": "RDS PostgreSQL 운영 시 백업과 복구 절차는?",
+      "expected_page_ids": ["100028"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "자동 스냅샷 + 수동 스냅샷 정책 + PITR (Point-in-Time Recovery) 활용.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-007",
+      "intent": "운영가이드",
+      "query": "ArgoCD 로 GitOps 배포를 운영할 때 주요 명령은 무엇인가요?",
+      "expected_page_ids": ["100011"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "argocd app sync / argocd app rollback / argocd app diff 가 주요 운영 명령입니다.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-008",
+      "intent": "정책절차",
+      "query": "IAM 정책 변경 절차는 어떻게 진행되어야 하나요?",
+      "expected_page_ids": ["100025"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "IAM 정책 변경은 PR 기반 검토 + 최소 권한 원칙 + 변경 이력 CloudTrail 로 기록.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-009",
+      "intent": "정책절차",
+      "query": "S3 버킷 네이밍 컨벤션과 운영 정책은?",
+      "expected_page_ids": ["100027"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "<환경>-<서비스>-<용도> 네이밍 + 버전 관리 활성화 + Public Access Block 강제.",
+      "is_attachment_focused": false
+    },
+    {
+      "id": "EVAL-010",
+      "intent": "이력조회",
+      "query": "2026년 3월 AWS 월간 비용 리포트의 주요 절감 액션 아이템은?",
+      "expected_page_ids": ["100014"],
+      "expected_chunk_ids": [],
+      "expected_answer_excerpt": "NAT Gateway 트래픽 분석 후 S3/DynamoDB VPC Endpoint 도입 (월 $500 절감), Dev 환경 야간/주말 자동 셧다운 ($800 절감), 미사용 EBS 볼륨 정리.",
+      "is_attachment_focused": false
+    }
+  ]
+}

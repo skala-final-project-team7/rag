@@ -583,9 +583,14 @@ BE 담당자 명세 확정 후 진행.
 
 작업 항목:
 
-- [ ] (F) all-sentence evaluation 측정
-- [ ] (G) 1단계 정합 검증
-- [ ] Golden Set 품질 측정
+- [x] **feature17a** — Evaluation Set 골격(10건) + 평가 스크립트
+  (scripts/run_evaluation.py) + LLM 커스텀 메트릭 4종 (llm_fallback_total /
+  verification_status_total / answer_generation_latency_seconds /
+  intent_classification_total) + 회귀 7건 (다음 commit)
+- [ ] **feature17b** — Evaluation Set 50건 라벨링 + chunk_id backfill + ROUGE
+  -L/BERTScore 평가 + Golden Set 자동 추출
+- [ ] **feature17c** — 튜닝 (Pool 가중치 그리드 서치 / 라우터 prompt /
+  생성기 prompt / Cross-Encoder 임계값)
 
 ### feature18: 외부 의존 / 부가 — P3
 
@@ -607,9 +612,10 @@ BE 담당자 명세 확정 후 진행.
 ## 완료 현황 (2026-05-19 종료 시점)
 
 - **본 담당자 (Pipeline + Storage) 영역 진척도**: **~100%** (운영성·관측성·streaming
-  + Rate Limit fallback + 운영 라이브 smoke 검증 완료)
+  + Rate Limit fallback + 운영 라이브 smoke + LLM 커스텀 메트릭 + 평가 인프라 완성)
 - **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
-  Mode B 시연 검증 + Milestone D feature12 + feature14 + feature15 + feature16)**
-- **잔여 (Milestone D)**: feature13 / feature17 / feature18
-- **즉시 진행 가능 (외부 협의 불필요)**: feature17 / feature18(부분)
+  Mode B 시연 검증 + Milestone D feature12 + feature14 + feature15 + feature16 + feature17a)**
+- **잔여 (Milestone D)**: feature13 / feature17b / feature17c / feature18
+- **즉시 진행 가능 (외부 협의 불필요)**: feature17b (단, 50건 라벨링 인적 자원 필요) /
+  feature17c (평가 결과 기반) / feature18(부분)
 - **외부 협의 대기**: feature13 (BE 명세), feature18(Data Agent / Agent 담당자 영역)

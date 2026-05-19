@@ -36,6 +36,12 @@
     으로 운영 로그 기록 + meta.used_llm 이 GPT-4o-mini 로 표시되어 사용자가
     다운그레이드를 인지할 수 있다. 두 번째 시도 중에도 RateLimitError → 상위
     UPSTREAM_LLM_ERROR 502 매핑 (라우트 try/except 가 흡수).
+  - 2026-05-19, feature17a — streaming Rate Limit fallback 발생 시 ``llm
+    _fallback_total`` Prometheus 카운터 inc. ``answer_generation_latency
+    _seconds`` 히스토그램은 generator 어댑터에서 이미 측정하므로 본 라우트
+    에서는 별도 observe 하지 않는다 (streaming 경로는 generator 노드 미경유
+    이므로 streaming 시작 ~ 마지막 토큰 도착 구간 own observe). 설계서 §6.4
+    KPI 정합.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+, sse-starlette 2.1+
@@ -54,6 +60,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.errors import HTTP_STATUS_BY_CODE, ErrorCode, error_response
+from app.metrics import llm_fallback_total
 from app.pipeline.nodes import verify_pipeline_node
 from app.pipeline.query_graph import run_query
 from app.query.acl import (
@@ -256,6 +263,12 @@ async def _streaming_event_stream(
             "answer streaming rate-limited, falling back to fallback_model=%s",
             fallback_model,
         )
+        # feature17a — Prometheus 카운터로 streaming 경로 Rate Limit fallback 빈도 가시화.
+        llm_fallback_total.labels(
+            from_model=primary_model,
+            to_model=fallback_model,
+            reason="rate_limit_error",
+        ).inc()
         if accumulated_tokens:
             accumulated_tokens.clear()
             yield {"event": "token", "data": ""}

@@ -24,6 +24,10 @@
     GPT-4o-mini, 정상 시 GPT-4o. 재시도 시 logging.warning 으로 운영 로그 기록
     (다음 세션 feature17 의 ``llm_fallback_total`` 카운터로 후속 가시화). 다른
     에러 (timeout/server/auth/invalid_response) 는 기존 ``_apply_fallback`` 유지.
+  - 2026-05-19, feature17a LLM 커스텀 메트릭 — ``llm_fallback_total`` (Rate
+    Limit fallback 발생 시 inc) + ``answer_generation_latency_seconds`` (답변
+    생성 단계 latency observe). 설계서 §6.4 KPI 환각 비율 / P95 관측 지점
+    정합. logging.warning 은 그대로 보존 (운영 로그 + 메트릭 이중화).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -61,6 +65,7 @@
 
 import hashlib
 import logging
+import time
 from typing import Any
 
 from answer_generation_agent.config import AnswerGenerationConfig
@@ -83,6 +88,7 @@ from answer_generation_agent.schemas import (
     GeneratedSource,
     TaskPromptType,
 )
+from app.metrics import answer_generation_latency_seconds, llm_fallback_total
 from app.schemas.chunk import Chunk
 from app.schemas.enums import Intent, LlmModel, SourceType
 from app.schemas.rag_state import RagState
@@ -183,6 +189,9 @@ def manage_generator(
 
     payload = _build_generation_input_payload(state)
 
+    # feature17a — 답변 생성 단계만의 latency 를 별도 histogram 으로 관측 (HTTP latency
+    # 와 분리). normalize → generate → citation_mapping → output_build 전체를 포함.
+    started = time.perf_counter()
     try:
         normalized = normalize_generation_input(
             payload,
@@ -204,7 +213,9 @@ def manage_generator(
             citation_result=citation_result,
         )
     except Exception:  # noqa: BLE001 — agent provider/parsing 실패는 안전 fallback 으로 흡수.
+        answer_generation_latency_seconds.observe(time.perf_counter() - started)
         return _apply_fallback(state)
+    answer_generation_latency_seconds.observe(time.perf_counter() - started)
 
     state.answer = _compose_answer_with_citations(answer_output)
     state.sources = _agent_sources_to_rag_sources(
@@ -242,6 +253,12 @@ def _generate_with_rate_limit_fallback(
             "answer generator rate-limited, falling back to fallback_model=%s",
             config.fallback_model,
         )
+        # feature17a — Prometheus 카운터로 Rate Limit fallback 빈도 가시화.
+        llm_fallback_total.labels(
+            from_model=config.model,
+            to_model=config.fallback_model,
+            reason="rate_limit_error",
+        ).inc()
         return service.generate(
             normalized_input=normalized_input,
             config=config,

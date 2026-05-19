@@ -11,6 +11,11 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature11 통합 — empty_retrieval_node /
     verify_pipeline_node / after_search_branch
+  - 2026-05-19, feature17a — verify_pipeline_node 가 verification 결과를
+    state 에 반영한 직후 ``verification_status_total{status}`` Prometheus
+    카운터를 inc 한다. 설계서 §6.4 KPI "환각 비율 15% 이하" (NOT_SUPPORTED
+    비율) 관측 지점 정합. 카운터는 default registry 에 등록되어 ``/metrics``
+    로 자동 노출 (``app/api/main.py`` Instrumentator wiring 정합).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -21,6 +26,7 @@
 
 from collections.abc import Callable
 
+from app.metrics import verification_status_total
 from app.query.verifier import RuleVerificationResult, SentenceCheck, verify_answer_rules
 from app.schemas.enums import Intent, LlmModel
 from app.schemas.rag_state import RagState
@@ -96,6 +102,9 @@ def verify_pipeline_node(
     # sentence_id 오름차순 정렬 — UI 표시 정합 (api-spec.md verification 배열).
     merged = sorted(passed + evaluated, key=lambda item: item.sentence_id)
     state.verification = merged
+    # feature17a — verification status 분포 메트릭 (설계서 §6.4 환각 비율 KPI 관측).
+    for item in merged:
+        verification_status_total.labels(status=item.status.value).inc()
     return state
 
 
