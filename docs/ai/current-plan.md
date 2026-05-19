@@ -446,3 +446,164 @@
 3. 완료 후 `./scripts/verify.sh`(format → lint → test)를 실행한다.
 4. `git diff`로 변경 범위를 확인하고 `docs/ai/working-log.md`를 업데이트한 뒤 커밋한다.
 5. Agent 컴포넌트는 LLM 응답을 mock/fake로 대체해 테스트한다. 외부 의존성(Qdrant/Mongo/MySQL)도 동일.
+
+---
+
+## Milestone D — 운영성 마무리 (2026-05-19 이후, ML 코드 리뷰 반영)
+
+> **배경**: Agent 통합 3/4 완료 + Mode B 실 GPT-4o 시연 성공 (`ac66fee`) 후 잔여 작업.
+> 2026-05-18 ML 코드 리뷰(`0518_RAG.pdf`) 4개 항목 + 본 담당자 영역 자체 발견한
+> 운영성 fix 3건을 묶어 진행한다. 본 Milestone 완료 시 본 담당자 영역 진척도 100%
+> + 운영 진입 직전 단계 완성.
+
+### feature12: ML 코드 리뷰 (PDF 1+4) + 운영성 fix — P0 ✅ 다음 세션 즉시
+
+본 담당자가 단독으로 진행 가능한 묶음. 외부 협의 불필요.
+
+- **(PDF #1) .gitignore 보완** — `.env` push 방지 + 표준 ignore 패턴
+  - 기존 `.gitignore` 와 머지 (중복 제거)
+  - PDF 명시 패턴: Python / Virtual environments / Tooling caches / Secrets·env
+    (`.env`, `.env.*`, `!.env.example`) / IDE·OS / Logs
+- **(PDF #4) Prometheus 모니터링 의존성 추가**
+  - `pyproject.toml` 에 `prometheus-fastapi-instrumentator` (또는 동등) 추가
+  - `app/api/main.py` `create_app` 에 instrumentator wiring + `/metrics` 엔드포인트
+  - 결정점 (사용자 확인): 라이브러리 선택 / 메트릭 범위 (HTTP만 vs LLM 커스텀) /
+    `/metrics` 노출 위치 (root vs `/api/v1/metrics`) / 인증 적용 여부 (BFF 책임이라
+    본 저장소는 비인증 유지)
+- **라우터 어댑터 LangGraph config 충돌 fix** — `app/query/router.py` 도 generator
+  와 동일한 LangGraph RunnableConfig dict override 영향 받음 (Mode B 시연에서 fallback
+  떨어지지만 OPERATION_GUIDE 라 잘 안 보임). `config` → `routing_config` keyword-only
+  분리 + `query_graph.py` partial wiring 갱신 + `tests/query/test_router.py` 회귀
+- **`app/config.py` 기본값 fix**
+  - `cross_encoder_model` 기본값에 `-v2` 추가 (`cross-encoder/ms-marco-MiniLM-L-12-v2`)
+    — 현재 `.env` 로 우회 중이지만 코드 기본값도 fix
+  - `build_real_deps` 에서 routing/verifier provider 에 `settings.openai_api_key
+    .get_secret_value()` 명시 전달 → vendoring agent 의 `os.getenv("OPENAI_API_KEY")`
+    조회 없이 동작 → `.env` 의 `OPENAI_API_KEY` 중복 환경변수 불필요
+- **테스트**:
+  - `tests/api/test_query_route.py` `/metrics` 엔드포인트 회귀
+  - `tests/query/test_router.py` `routing_config` rename 영향
+  - `tests/api/test_deps.py` api_key 명시 전달 검증
+- **완료 기준**: ruff/mypy/pytest 통과 / Mode B 운영에서 라우터·`/metrics` 동작 확인 /
+  working-log + commit + push
+
+작업 항목:
+
+- [ ] (PDF #1) .gitignore 보완
+- [ ] (PDF #4) Prometheus instrumentator + /metrics
+- [ ] 라우터 LangGraph config rename
+- [ ] config.py 기본값 + build_real_deps api_key 명시 전달
+
+### feature13: ML 코드 리뷰 (PDF 2+3) — P1 ⏳ 외부 협의 대기
+
+BE 담당자 명세 확정 후 진행.
+
+- **(PDF #2) API Spec — BE 변경사항 업데이트**
+  - 대기: BE 담당자가 변경사항 전달
+  - 갱신 대상: `docs/api-spec.md`, `tests/api/test_query_route.py`
+- **(PDF #3) Schema — user ACL + Confluence call 명세 정합**
+  - 대기 (BE 확정 필요):
+    - user ACL (권한) 관련 column 이 BE 에서 어떻게 전달되는지
+    - Confluence 데이터 call 명세
+  - 갱신 대상:
+    - `docs/db-schema.md`
+    - `app/schemas/chunk.py` `ChunkMetadata` (allowed_groups / allowed_users 등)
+    - `app/query/acl.py` `build_acl_filter` 정합
+    - `app/adapters/json_fixture.py` `_synthesize_acl` (현재 PoC 합성 → 실 명세)
+    - tests 회귀
+- **완료 기준**: 명세 합의 → 스키마 변경 → 회귀 테스트 통과 → docs 동반 갱신 →
+  working-log + commit + push
+
+작업 항목:
+
+- [ ] (PDF #2) API Spec 갱신 (BE 협의 후)
+- [ ] (PDF #3) ACL 컬럼 스키마 정합 (BE 협의 후)
+
+### feature14: (A) SSE token streaming 라우트 통합 — P2
+
+- **목표**: 설계서 §4.6.4 KPI "P95 5초", "토큰당 25~40ms" 달성
+- **수정 대상**: `app/api/routes.py` `query_route` 에 `stream` query parameter 분기
+- **흐름**: graph 흐름을 search/rerank 까지만 실행 → top_chunks 확보 후
+  `stream_openai_answer` (openai_streaming.py, 본 commit `5f9311b` 에서 작성 완료)
+  로 답변 생성 대체 → token chunk 다중 송신 → 답변 완료 후 sources/verification/
+  meta/done 송신
+- **수정하지 않을 파일**: `app/pipeline/query_graph.py` (그래프 자체는 그대로),
+  `answer_generation_agent/**` (vendoring 무수정)
+- **테스트**: `tests/api/test_query_route.py` 에 stream=true 분기 회귀
+- **완료 기준**: 테스트 통과 / Mode B 운영에서 첫 토큰 1초 내 도달 확인
+
+작업 항목:
+
+- [ ] SSE 라우트 streaming 분기 + 회귀
+
+### feature15: (C) Rate Limit fallback — P2
+
+- **목표**: 설계서 §4.6.5 — Rate Limit (429) → GPT-4o-mini 자동 다운그레이드 + 재시도
+- **수정 대상**: `app/query/generator.py` `manage_generator` 가 `AnswerProviderError(
+  error_type='rate_limit_error')` 캐치 후 `selected_config.fallback_model` 로 재시도 +
+  `RagState.verification` 에 다운그레이드 note 추가
+- **테스트**: 429 mock 시 fallback_model 호출 + verification.note 기록 회귀
+
+작업 항목:
+
+- [ ] Rate Limit fallback 분기
+
+### feature16: 운영 라이브 smoke — P3
+
+- **목표**: 본 담당자 영역 모든 fix·통합 완료 후 끝-끝 운영 검증
+- **선행 조건**: feature12 ~ feature15 모두 완료
+- **시나리오**:
+  - docker compose 전체 (Qdrant + MongoDB + MySQL) 기동
+  - `.env` 에 `RAG_USE_REAL_ADAPTERS=true` + `RAG_OPENAI_API_KEY`
+  - `python scripts/ingest_samples.py --use-mongo-cache` 로 chunk_lookup MongoDB 적재
+  - uvicorn 실행 + 다양한 질의 (장애대응 / 운영가이드 / 정책절차 / 이력조회 4종 의도)
+  - SSE token streaming 체감 latency 측정 (P95 5초 KPI 확인)
+  - Prometheus `/metrics` 수집 확인
+
+작업 항목:
+
+- [ ] 운영 smoke 시나리오 실행 + 결과 working-log 기록
+
+### feature17: 평가 세션 (F + G) — P3
+
+- **목표**: 설계서 §7 평가 규칙
+- **(F) all-sentence evaluation mode 비용/정확도 측정** — 현재 본 어댑터는 suspicious
+  only. all-sentence 모드 켰을 때 비용 증가 vs False Negative 감소 측정.
+- **(G) agent rule-based 정합 검증** — 본 저장소 `verify_answer_rules` vs agent 의
+  `rule_based_verifier` 가 같은 의심 판정을 내리는지 비교
+- **추가 평가**:
+  - Golden Set 50건 답변 품질 측정 (ROUGE-L / BERTScore)
+  - Precision@k / 응답 지연 / 환각 비율
+
+작업 항목:
+
+- [ ] (F) all-sentence evaluation 측정
+- [ ] (G) 1단계 정합 검증
+- [ ] Golden Set 품질 측정
+
+### feature18: 외부 의존 / 부가 — P3
+
+- **Data Ingestion Agent 책임 협의** — `data-ingestion-agent` / `data-sync-agent` 가
+  본 저장소 외부 (백엔드/Data 담당자) 영역인지 합의. `document_analyzer_stub` 처리
+  방향 결정 (별도 Agent 패키지 받기 vs 본 저장소 직접 작성)
+- **feature4-B PDF/CSV 첨부 분할기** — pymupdf + 외부 픽스처
+- **(D) Function Calling 강제 + (E) 자연어 출처 인용 패턴** — Agent 담당자 영역
+  (answer_generation_agent prompt template 갱신 요청)
+
+작업 항목:
+
+- [ ] Data Ingestion Agent 책임 협의 + document_analyzer 방향 확정
+- [ ] feature4-B PDF/CSV 첨부 분할기
+- [ ] (D) Function Calling + (E) 자연어 출처 — Agent 담당자 보고
+
+---
+
+## 완료 현황 (2026-05-19 종료 시점)
+
+- **본 담당자 (Pipeline + Storage) 영역 진척도**: **~99%+**
+- **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
+  Mode B 시연 검증)**
+- **잔여 (Milestone D)**: feature12 ~ feature18
+- **즉시 진행 가능 (외부 협의 불필요)**: feature12 / feature14 / feature15 / feature16 /
+  feature18(부분)
+- **외부 협의 대기**: feature13 (BE 명세), feature18(Data Agent / Agent 담당자 영역)

@@ -10,6 +10,14 @@
 작성일 : 2026-05-18
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, Agent 통합 1/4 — manage_router 어댑터 노드
+  - 2026-05-19, feature12 LangGraph config 키워드 충돌 fix — LangGraph 가 노드
+    시그니처의 ``config`` 키워드를 자체 ``RunnableConfig`` (dict) 로 자동 주입
+    하는 충돌을 generator/verifier 와 동일 패턴으로 해소. ``config`` 인자를
+    placeholder 로 유지하고 agent ``QueryRoutingConfig`` 는 ``routing_config``
+    keyword-only 인자로 분리한다. 외부 wiring (``query_graph.py`` partial)
+    도 ``routing_config=`` 로 갱신. 이전 시그니처에서는 LangGraph 가 주입한
+    RunnableConfig dict 가 agent normalize_routing_input 에 전달돼 RoutingProvider
+    Error 가 발생하고 매번 OPERATION_GUIDE fallback 으로 떨어지던 회귀를 해소.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -76,9 +84,10 @@ _DEFAULT_FAKE_RESPONSE: dict[str, Any] = {
 
 def manage_router(
     state: RagState,
+    config: Any = None,  # noqa: ARG001 — LangGraph 가 RunnableConfig dict 를 주입할 자리. 무시.
     *,
     provider: RoutingLLMProvider | None = None,
-    config: QueryRoutingConfig | None = None,
+    routing_config: QueryRoutingConfig | None = None,
 ) -> RagState:
     """질의 라우터 노드 — 라우팅 의도·확장 쿼리·메타필터·Pool 가중치를 채운다.
 
@@ -91,16 +100,22 @@ def manage_router(
     Args:
         state: Query 파이프라인 상태. ``query`` / ``user_id`` / ``groups`` /
             ``conversation_id`` / ``history_decision`` 를 읽는다.
+        config: LangGraph 가 노드에 자동 주입하는 ``RunnableConfig`` (dict). 본
+            어댑터는 사용하지 않으며 무시한다 — keyword name 충돌 회피 목적의
+            placeholder. agent 의 ``QueryRoutingConfig`` 는 ``routing_config``
+            인자로 받는다 (LangGraph 가 ``config`` 키워드를 자체 RunnableConfig
+            로 override 하기 때문에 분리, generator/verifier 와 동일 패턴).
         provider: 라우팅 분류용 LLM provider. None 이면 FakeRoutingLLMProvider 를 쓴다
             (PoC·테스트). 실제 운영에서는 OpenAIRoutingLLMProvider 를 주입한다.
-        config: Query Routing 실행 설정. None 이면 기본값 (model="configurable",
-            temperature=0.0, default_query_count=3, max_query_count=5) 을 사용한다.
+        routing_config: Query Routing 실행 설정. None 이면 기본값 (model=
+            "configurable", temperature=0.0, default_query_count=3,
+            max_query_count=5) 을 사용한다.
 
     Returns:
         ``intent`` / ``rewritten_queries`` / ``metadata_filters`` / ``pool_weights`` /
         ``target_llm`` 가 채워진 RagState (입력 state 를 갱신해 반환).
     """
-    selected_config = config or QueryRoutingConfig()
+    selected_config = routing_config or QueryRoutingConfig()
     selected_provider = provider or FakeRoutingLLMProvider(_DEFAULT_FAKE_RESPONSE)
 
     # 안전 fallback: conversation_id 가 없으면 Agent 호출 자체를 회피한다 (정규화 단계에서

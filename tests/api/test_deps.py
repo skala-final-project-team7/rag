@@ -78,11 +78,12 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     실 어댑터들은 build_real_deps 함수 본문 내 lazy import이므로 원본 모듈
     (``app.ingestion.embedder.dense`` 등)의 클래스 자체를 교체한다. Qdrant
     ``from_settings`` 도 :memory: 클라이언트로 우회해 외부 컨테이너 없이 검증.
-    Query Routing Agent 의 ``OpenAIRoutingLLMProvider.from_config`` 도 sentinel
-    객체를 반환하는 가짜로 대체해 OPENAI_API_KEY 환경변수 없이 회귀 보호. Answer
+    Query Routing Agent 의 ``OpenAIRoutingLLMProvider`` 도 sentinel 클래스로
+    대체해 OPENAI_API_KEY 환경변수 없이 회귀 보호 — feature12 에서 ``from_config``
+    (env fallback) → ``__init__(config, api_key)`` 직접 호출로 변경됐다. Answer
     Verification Agent 의 ``OpenAIEvaluatorProvider`` 도 sentinel 로 대체.
     """
-    from query_routing_agent.llm import OpenAIRoutingLLMProvider
+    import query_routing_agent.llm as routing_llm_module
 
     captured: dict[str, Any] = {
         "dense_init": None,
@@ -114,13 +115,20 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         captured["store_from_settings"] = {"dense_dimension": dense_dimension}
         return QdrantPoolStore.in_memory(settings, dense_dimension=dense_dimension)
 
-    def _fake_routing_provider_from_config(
-        cls: type[OpenAIRoutingLLMProvider], config: Any, **kwargs: Any
-    ) -> object:
-        # API key 검증·실 HTTP transport 회피용 sentinel — 운영 build_real_deps 가 환경변수
-        # 없이도 wiring 까지 진행되는지 단위 검증 (real OpenAI 호출은 별도 opt-in 스모크).
-        captured["routing_provider_init"] = {"config": config, "kwargs": kwargs}
-        return object()
+    class _FakeOpenAIRouting:
+        """OpenAIRoutingLLMProvider 대체 — API key 검증·실 HTTP transport 회피.
+
+        feature12 에서 build_real_deps 가 ``from_config`` → ``__init__(config, api_key)``
+        직접 호출로 변경됐다. 본 sentinel 은 settings.openai_api_key 가 명시 전달되는지
+        captured 에 기록해 회귀 보호한다.
+        """
+
+        def __init__(self, *, config: Any, api_key: str, transport: Any | None = None) -> None:
+            captured["routing_provider_init"] = {
+                "config": config,
+                "api_key_provided": bool(api_key),
+                "transport": transport,
+            }
 
     class _FakeOpenAIEvaluator:
         """OpenAIEvaluatorProvider 대체 — API key 검증·실 HTTP transport 회피."""
@@ -158,11 +166,7 @@ def patched_real_adapters(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(sparse_module, "BM25SparseEmbedder", _fake_sparse_factory)
     monkeypatch.setattr(reranker_module, "CrossEncoderRerankerImpl", _fake_reranker_factory)
     monkeypatch.setattr(QdrantPoolStore, "from_settings", classmethod(_fake_from_settings))
-    monkeypatch.setattr(
-        OpenAIRoutingLLMProvider,
-        "from_config",
-        classmethod(_fake_routing_provider_from_config),
-    )
+    monkeypatch.setattr(routing_llm_module, "OpenAIRoutingLLMProvider", _FakeOpenAIRouting)
     monkeypatch.setattr(verifier_providers_module, "OpenAIEvaluatorProvider", _FakeOpenAIEvaluator)
     monkeypatch.setattr(generation_module, "OpenAIAnswerLLMProvider", _FakeOpenAIAnswer)
     monkeypatch.setattr(
@@ -226,6 +230,45 @@ def test_build_real_deps_wires_real_adapter_classes(
     assert deps.verifier_provider is not None
     assert deps.verifier_config is not None
     assert deps.verifier_config.evaluator_model == "gpt-4o-mini"
+
+
+def test_build_real_deps_passes_openai_api_key_to_all_providers(
+    patched_real_adapters: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``settings.openai_api_key`` 가 라우터·검증기·답변 생성기 3종 provider 에 명시
+    전달되는지 검증 (feature12 회귀 보호).
+
+    이전에는 라우터·검증기 provider 가 ``os.environ.get("OPENAI_API_KEY")`` fallback
+    에 의존했다. 본 fix 로 settings 의 값을 직접 주입하므로 ``OPENAI_API_KEY``
+    환경변수가 부재해도 provider 생성이 성공해야 한다 (의존성 명시화).
+
+    ``Settings(_env_file=None)`` 의 기본 ``openai_api_key`` 는 빈 SecretStr 이므로
+    본 테스트는 임의 sentinel 키를 환경변수로 주입 후 ``Settings()`` 가 그 값을
+    읽어 provider 에 전달하는 경로를 검증한다.
+    """
+    # OPENAI_API_KEY 자체는 비워 두고, settings 의 RAG_OPENAI_API_KEY 만으로 동작 확인.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("RAG_OPENAI_API_KEY", "sk-feature12-sentinel")
+
+    from app.api.deps import build_real_deps
+
+    build_real_deps(Settings(_env_file=None))  # type: ignore[arg-type]
+
+    # 라우터 — __init__ 직접 호출 + api_key kwarg 로 전달.
+    routing_init = patched_real_adapters["routing_provider_init"]
+    assert routing_init is not None
+    assert routing_init["api_key_provided"] is True
+    # 검증기 — AnswerVerificationConfig.openai_api_key 에 채워서 전달 (env fallback 회피).
+    verifier_init = patched_real_adapters["verifier_provider_init"]
+    assert verifier_init is not None
+    assert verifier_init["config"].openai_api_key == "sk-feature12-sentinel"
+    # 답변 생성기 — OpenAIAnswerLLMProvider(api_key=...) 직접 주입 + transport 도 api_key 전달.
+    generator_init = patched_real_adapters["generator_provider_init"]
+    assert generator_init is not None
+    assert generator_init["api_key_provided"] is True
+    transport_init = patched_real_adapters["generator_transport_init"]
+    assert transport_init is not None
+    assert transport_init["api_key_provided"] is True
 
 
 def test_build_real_deps_passes_model_names_from_settings(
