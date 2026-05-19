@@ -17,6 +17,13 @@
     를 placeholder 로 유지하고 agent ``AnswerGenerationConfig`` 는 ``generation
     _config`` keyword-only 인자로 분리. 외부 wiring (``query_graph.py`` partial)
     도 ``generation_config=`` 로 갱신.
+  - 2026-05-19, feature15 Rate Limit fallback — 설계서 §4.6.5 정합. agent
+    ``AnswerProviderError(error_type='rate_limit_error')`` 캐치 후
+    ``AnswerGenerationService.generate(use_fallback_model=True)`` 로 1회 재시도.
+    ``state.used_llm`` 은 generation_result.model 로부터 정합 — fallback 시
+    GPT-4o-mini, 정상 시 GPT-4o. 재시도 시 logging.warning 으로 운영 로그 기록
+    (다음 세션 feature17 의 ``llm_fallback_total`` 카운터로 후속 가시화). 다른
+    에러 (timeout/server/auth/invalid_response) 는 기존 ``_apply_fallback`` 유지.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -53,12 +60,14 @@
 """
 
 import hashlib
+import logging
 from typing import Any
 
 from answer_generation_agent.config import AnswerGenerationConfig
 from answer_generation_agent.generation.answer_generation import (
     AnswerGenerationService,
     AnswerLLMProvider,
+    AnswerProviderError,
     FakeAnswerLLMProvider,
 )
 from answer_generation_agent.generation.answer_output_builder import (
@@ -78,6 +87,14 @@ from app.schemas.chunk import Chunk
 from app.schemas.enums import Intent, LlmModel, SourceType
 from app.schemas.rag_state import RagState
 from app.schemas.response import Source
+
+_LOGGER = logging.getLogger(__name__)
+
+# Rate Limit fallback 결과로 사용되는 GPT-4o-mini 의 LlmModel enum 정합 매핑 키.
+# generation_result.model 문자열에 ``mini`` 가 포함되면 GPT_4O_MINI 로 매핑한다
+# (settings.llm_aux_model 기본값이 ``gpt-4o-mini`` 이므로 정합). 매핑 실패 시
+# state.target_llm fallback 으로 보존 — 응답 meta 가 빈 채 떨어지지 않도록 보호.
+_FALLBACK_MODEL_TOKEN = "mini"
 
 # Intent (rag, 한국어) → TaskPromptType (agent, 영어) 매핑 표. rag-pipeline-design.md
 # §4.6.2 / §6.6 표와 정합: 장애 대응 → timeline / 운영 가이드 → step_by_step /
@@ -172,7 +189,8 @@ def manage_generator(
             max_contexts=selected_config.max_contexts,
         )
         service = AnswerGenerationService(provider=selected_provider)
-        generation_result = service.generate(
+        generation_result = _generate_with_rate_limit_fallback(
+            service=service,
             normalized_input=normalized,
             config=selected_config,
         )
@@ -193,8 +211,57 @@ def manage_generator(
         agent_sources=answer_output.sources,
         top_chunks=state.top_chunks,
     )
-    state.used_llm = state.target_llm or LlmModel.GPT_4O
+    # 사용된 모델을 generation_result.model 에서 정합 — Rate Limit fallback 시 GPT-4o-
+    # mini 로 다운그레이드된 사실이 응답 meta.used_llm 으로 사용자에게 노출된다.
+    state.used_llm = _resolve_used_llm(generation_result.model, state.target_llm)
     return state
+
+
+def _generate_with_rate_limit_fallback(
+    *,
+    service: AnswerGenerationService,
+    normalized_input: Any,
+    config: AnswerGenerationConfig,
+) -> Any:
+    """설계서 §4.6.5 Rate Limit fallback — 429 시 fallback_model 로 1회 재시도.
+
+    agent ``AnswerProviderError(error_type='rate_limit_error')`` 만 다운그레이드
+    트리거. 다른 error_type (timeout/auth/invalid_response/server) 은 상위로 그대로
+    raise 해 ``_apply_fallback`` 안전 분기로 이어지게 한다 (운영 시점에 다운그레이드
+    가 의미 없는 에러까지 GPT-4o-mini 로 강제 시도하지 않도록 보호).
+
+    재시도 시점에 ``logging.warning`` 으로 운영 로그 기록 — 다음 세션 feature17
+    의 ``llm_fallback_total`` Prometheus 카운터로 후속 가시화 (현재는 logging 만).
+    """
+    try:
+        return service.generate(normalized_input=normalized_input, config=config)
+    except AnswerProviderError as exc:
+        if exc.error_type != "rate_limit_error":
+            raise
+        _LOGGER.warning(
+            "answer generator rate-limited, falling back to fallback_model=%s",
+            config.fallback_model,
+        )
+        return service.generate(
+            normalized_input=normalized_input,
+            config=config,
+            use_fallback_model=True,
+        )
+
+
+def _resolve_used_llm(model: str, target_llm: LlmModel | None) -> LlmModel:
+    """generation_result.model 문자열을 LlmModel enum 으로 안전 매핑.
+
+    - 정확 매칭 (``gpt-4o`` / ``gpt-4o-mini``) 우선
+    - 문자열에 ``mini`` 포함 → GPT_4O_MINI (Rate Limit fallback 결과)
+    - 매핑 실패 → target_llm 보존 (라우터가 결정한 값), 없으면 GPT_4O.
+    """
+    try:
+        return LlmModel(model)
+    except ValueError:
+        if _FALLBACK_MODEL_TOKEN in model.lower():
+            return LlmModel.GPT_4O_MINI
+        return target_llm or LlmModel.GPT_4O
 
 
 def _build_generation_input_payload(state: RagState) -> dict[str, Any]:

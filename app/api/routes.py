@@ -28,6 +28,14 @@
         누적 후 ``verify_pipeline_node`` (1+2단계 검증) → ``format_response`` 로
         저신뢰/차단 분기 적용 → sources/verification/meta/done 송신.
     설계서 §4.6.4 정합으로 첫 토큰부터 사용자에게 즉시 송신해 P95 5초 KPI 달성.
+  - 2026-05-19, feature15 streaming Rate Limit fallback — 설계서 §4.6.5 정합.
+    ``stream_openai_answer`` 호출 중 OpenAI ``RateLimitError`` 캐치 후 ``fallback
+    _model`` (GPT-4o-mini) 로 재시도. 첫 토큰 송신 전 발생 시 그대로 fallback,
+    첫 토큰 송신 후 발생 시 누적 토큰을 빈 ``token`` 이벤트로 clear 한 뒤
+    fallback 으로 재시작 (UI 가 부분 답변을 덮어쓸 수 있도록). ``logging.warning``
+    으로 운영 로그 기록 + meta.used_llm 이 GPT-4o-mini 로 표시되어 사용자가
+    다운그레이드를 인지할 수 있다. 두 번째 시도 중에도 RateLimitError → 상위
+    UPSTREAM_LLM_ERROR 502 매핑 (라우트 try/except 가 흡수).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+, sse-starlette 2.1+
@@ -35,6 +43,7 @@
 """
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
@@ -58,6 +67,8 @@ from app.query.openai_streaming import stream_openai_answer
 from app.schemas.enums import Intent, LlmModel
 from app.schemas.rag_state import RagState
 from app.schemas.response import QueryResponse
+
+_LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -211,30 +222,58 @@ async def _streaming_event_stream(
         return
 
     # rerank 분기 — OpenAI streaming 으로 token chunk 다중 송신.
-    accumulated_tokens: list[str] = []
     api_key = settings.openai_api_key.get_secret_value()
     generator_config = deps.generator_config
     # generator_config 가 None 이면 (외부 사용자 정의 generator_node 만 주입한 경우)
     # _should_fallback_to_non_streaming 단계에서 이미 걸러져야 한다 — 본 분기 도달 시
     # generator_config 는 반드시 존재한다고 가정한다.
-    model = generator_config.model
+    primary_model = generator_config.model
+    fallback_model = generator_config.fallback_model
     temperature = generator_config.temperature
     timeout_seconds = generator_config.timeout_seconds
 
-    for token_chunk in stream_openai_answer(
-        api_key=api_key,
-        model=model,
-        temperature=temperature,
-        timeout_seconds=timeout_seconds,
-        query=state.query,
-        top_chunks=rerank_state.top_chunks,
-    ):
-        accumulated_tokens.append(token_chunk.text)
-        yield {"event": "token", "data": token_chunk.text}
+    # lazy import — openai 없는 환경 (PoC) 에서도 모듈 로드 가능. 본 분기는 운영
+    # 모드에서만 도달.
+    from openai import RateLimitError
+
+    accumulated_tokens: list[str] = []
+    used_model = primary_model
+    try:
+        for token_chunk in stream_openai_answer(
+            api_key=api_key,
+            model=primary_model,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+            query=state.query,
+            top_chunks=rerank_state.top_chunks,
+        ):
+            accumulated_tokens.append(token_chunk.text)
+            yield {"event": "token", "data": token_chunk.text}
+    except RateLimitError:
+        # 설계서 §4.6.5 — 429 시 fallback_model 로 1회 재시도. 부분 토큰을 이미
+        # 송신했다면 UI 가 덮어쓸 수 있도록 빈 token 이벤트로 clear.
+        _LOGGER.warning(
+            "answer streaming rate-limited, falling back to fallback_model=%s",
+            fallback_model,
+        )
+        if accumulated_tokens:
+            accumulated_tokens.clear()
+            yield {"event": "token", "data": ""}
+        used_model = fallback_model
+        for token_chunk in stream_openai_answer(
+            api_key=api_key,
+            model=fallback_model,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+            query=state.query,
+            top_chunks=rerank_state.top_chunks,
+        ):
+            accumulated_tokens.append(token_chunk.text)
+            yield {"event": "token", "data": token_chunk.text}
 
     answer = "".join(accumulated_tokens)
     rerank_state.answer = answer
-    rerank_state.used_llm = _resolve_used_llm(model)
+    rerank_state.used_llm = _resolve_used_llm(used_model)
 
     # 검증 1+2단계 — verify_pipeline_node 에 deps 의 verify_llm_evaluator 주입.
     verify_pipeline_node(rerank_state, llm_evaluator=deps.verify_llm_evaluator)
