@@ -20,6 +20,13 @@
     LLM provider/Config 주입을 위해 routing_provider/routing_config 필드 추가
     (functools.partial 패턴으로 노드에 wiring). 라우터 stub 은 회귀 보호·PoC fallback
     용도로 보존.
+  - 2026-05-19, Agent 통합 2/4 — answer-generation-agent vendoring + manage_generator
+    어댑터 교체. QueryGraphDeps 의 generator_node 기본값을 generator_stub →
+    manage_generator 로 변경. LLM provider/Config 주입을 위해 generator_provider/
+    generator_config 필드 추가 (router 와 동일 partial 패턴). generator_stub 은
+    회귀 보호용으로 보존. SSE 토큰 스트리밍 (설계서 §4.6.4)·운영 OpenAI transport
+    (§4.6.3)·Rate Limit fallback (§4.6.5)은 본 세션 미구현 — generator.py 미구현
+    섹션 + working-log 참조.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, LangGraph 0.2.x
@@ -46,10 +53,10 @@ from app.pipeline.nodes import (
     verify_pipeline_node,
 )
 from app.pipeline.stubs import (
-    generator_stub,
     verify_llm_evaluator_stub,
 )
 from app.query.formatter import format_response
+from app.query.generator import manage_generator
 from app.query.history import manage_history
 from app.query.rerank_node import cross_encoder_rerank
 from app.query.reranker.base import CrossEncoderReranker
@@ -70,6 +77,12 @@ HistoryProvider = Any
 # 강제하지 않아도 된다.
 RoutingProvider = Any
 RoutingConfig = Any
+
+# answer-generation-agent 의 LLM provider / config — runtime 인터페이스 의존성 회피를
+# 위해 Any. 실제 타입은 AnswerLLMProvider / AnswerGenerationConfig. manage_generator
+# 가 None 일 때 FakeAnswerLLMProvider + 기본 AnswerGenerationConfig 를 사용한다.
+GeneratorProvider = Any
+GeneratorConfig = Any
 
 # 노드 시그니처 (모두 (RagState) -> RagState)
 QueryNode = Callable[[RagState], RagState]
@@ -105,12 +118,20 @@ class QueryGraphDeps:
     routing_provider: RoutingProvider | None = None
     routing_config: RoutingConfig | None = None
 
+    # 답변 생성기 LLM provider / config — None 이면 manage_generator 가
+    # FakeAnswerLLMProvider + 기본 AnswerGenerationConfig 를 사용한다. agent 의
+    # OpenAIAnswerLLMProvider 는 transport 주입을 요구하므로 본 세션은 운영 모드도
+    # PoC 와 동일하게 fake 자동 — Plan v2 §3 B / generator.py 미구현 섹션 참조.
+    generator_provider: GeneratorProvider | None = None
+    generator_config: GeneratorConfig | None = None
+
     # --- Agent 노드 ---
-    # router_node 는 manage_router (query-routing-agent 어댑터) 가 기본값. provider 가
-    # None 이면 fake provider 가 자동 주입되어 외부 API 키 없이 PoC 경로 동작.
-    # generator_node / verify_llm_evaluator 는 아직 stub — Agent 코드 전달 시 교체.
+    # router_node 는 manage_router (query-routing-agent 어댑터) 가 기본값.
+    # generator_node 는 manage_generator (answer-generation-agent 어댑터) 가 기본값.
+    # provider 가 None 이면 fake provider 가 자동 주입되어 외부 API 키 없이 PoC 경로
+    # 동작. verify_llm_evaluator 는 아직 stub — Agent 통합 3/4 (검증 2단계) 대기.
     router_node: QueryNode = field(default=manage_router)
-    generator_node: QueryNode = field(default=generator_stub)
+    generator_node: QueryNode = field(default=manage_generator)
     verify_llm_evaluator: VerifyEvaluator = field(default=verify_llm_evaluator_stub)
 
 
@@ -162,7 +183,20 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
         "rerank",
         partial(cross_encoder_rerank, reranker=deps.reranker, chunk_lookup=deps.chunk_lookup),
     )
-    builder.add_node("generate", deps.generator_node)
+    # 생성기 노드는 manage_generator 기본값일 때만 generator_provider / generator_config
+    # 를 functools.partial 로 주입한다. 외부에서 주입된 사용자 정의 generator_node 는
+    # 이미 provider 가 captured 되어 있다고 가정하고 그대로 등록 (router 패턴 정합).
+    if deps.generator_node is manage_generator:
+        builder.add_node(
+            "generate",
+            partial(
+                manage_generator,
+                provider=deps.generator_provider,
+                config=deps.generator_config,
+            ),
+        )
+    else:
+        builder.add_node("generate", deps.generator_node)
     builder.add_node(
         "verify",
         partial(verify_pipeline_node, llm_evaluator=deps.verify_llm_evaluator),

@@ -22,6 +22,8 @@
 - search.py     reciprocal_rank_fusion / merge_pools / select_top_candidates /
                 fuse_and_rank — Hybrid Search 핵심 로직 [feature9-A]
 - rerank.py     select_reranked / RerankResult — Cross-Encoder 재순위화 선정 로직 [feature9-A]
+- generator.py  manage_generator — 답변 생성기 통합 어댑터 노드
+                [Agent 통합 2/4] (vendoring한 answer_generation_agent 패키지를 RagState에 연결)
 - verifier.py   verify_answer_rules / RuleVerificationResult — 답변 검증 1단계 규칙 매칭
                 [feature10-Pipeline] (2단계 LLM 평가자 [Agent]는 별도 담당자 추가)
 - formatter.py  format_response — 검증된 답변·출처·검증 결과를 QueryResponse로 변환
@@ -37,6 +39,7 @@ from app.query.acl import (
     extract_principal,
 )
 from app.query.formatter import format_response
+from app.query.generator import manage_generator
 from app.query.history import manage_history
 from app.query.rerank import RerankResult, select_reranked
 from app.query.router import manage_router
@@ -60,6 +63,7 @@ __all__ = [
     "extract_principal",
     "format_response",
     "fuse_and_rank",
+    "manage_generator",
     "manage_history",
     "manage_router",
     "merge_pools",
