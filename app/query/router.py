@@ -18,6 +18,11 @@
     도 ``routing_config=`` 로 갱신. 이전 시그니처에서는 LangGraph 가 주입한
     RunnableConfig dict 가 agent normalize_routing_input 에 전달돼 RoutingProvider
     Error 가 발생하고 매번 OPERATION_GUIDE fallback 으로 떨어지던 회귀를 해소.
+  - 2026-05-19, feature17a — ``intent_classification_total{intent}`` Prometheus
+    카운터 inc. feature16 smoke 발견 #2 (4종 질의 모두 운영가이드 분류) 의
+    분포 가시화 + 설계서 §6.1 의도 분류 정확도 90% 임계 관측 지점. 정상 분기
+    는 분류된 intent enum 값, fallback 분기 (``_apply_fallback``) 는 라벨
+    ``"fallback"`` 으로 inc.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
@@ -31,6 +36,7 @@
 from typing import Any
 
 from app.ingestion.vector_store import CONTENT_POOL, LABEL_POOL, TITLE_POOL
+from app.metrics import intent_classification_total
 from app.schemas.enums import Intent, LlmModel
 from app.schemas.rag_state import RagState
 from query_routing_agent.config import QueryRoutingConfig
@@ -150,6 +156,8 @@ def manage_router(
     state.metadata_filters = filter_result.metadata_filter.to_dict()
     state.pool_weights = _map_pool_weights(filter_result.pool_weights)
     state.target_llm = LlmModel.GPT_4O
+    # feature17a — 라우터 의도 분류 분포 메트릭 (설계서 §6.1 + smoke 발견 #2 분석).
+    intent_classification_total.labels(intent=state.intent.value).inc()
     return state
 
 
@@ -237,6 +245,9 @@ def _apply_fallback(state: RagState) -> RagState:
     state.pool_weights = dict(_FALLBACK_POOL_WEIGHTS)
     state.target_llm = LlmModel.GPT_4O
     state.metadata_filters = None
+    # feature17a — fallback 경로는 별도 라벨 "fallback" 으로 inc. 운영 시 라우터
+    # provider 호출 실패 빈도 / conversation_id 누락 빈도 등을 모니터링한다.
+    intent_classification_total.labels(intent="fallback").inc()
     return state
 
 
