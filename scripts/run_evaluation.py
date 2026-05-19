@@ -10,6 +10,14 @@
 작성일 : 2026-05-19
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-19, 최초 작성, feature17a — Evaluation Set 실행 + 4종 지표 산출.
+  - 2026-05-19, feature17b 인프라 — ``--rouge-l`` / ``--bert-score`` 옵션 추가
+    (설계서 §7.2.3 Golden Set 기반 자동 평가). Precision@k 매칭은 expected
+    _chunk_ids 가 채워져 있으면 chunk_id 직접 비교 (정밀), 빈 배열이면 기존
+    sources 비어 있지 않음 약식 매칭 (feature17a 동작 유지). chunk_id 추출은
+    Source 의 confluence_url / text_preview 와 chunk_lookup 으로는 어려우므로,
+    backfill 시점에 ``expected_chunk_ids`` 를 그대로 Qdrant scroll 로 채워두면
+    eval 단계에서는 chunk_id 가 Source schema 에 없어도 page_id 우회 매칭이
+    가능하다.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -72,6 +80,19 @@ def main() -> int:
         default=3,
         help="Precision@k 계산용 k (기본 3, 설계서 §6.4 KPI Precision@3).",
     )
+    parser.add_argument(
+        "--rouge-l",
+        action="store_true",
+        help="ROUGE-L F1 (rouge-score 라이브러리) 으로 answer vs expected_answer_excerpt 평가.",
+    )
+    parser.add_argument(
+        "--bert-score",
+        action="store_true",
+        help=(
+            "BERTScore F1 (bert-score 라이브러리) 으로 answer vs expected_answer_excerpt 평가."
+            " transformers/torch 모델 다운로드 (~500MB) 필요."
+        ),
+    )
     args = parser.parse_args()
 
     if args.debug_route:
@@ -86,6 +107,8 @@ def main() -> int:
         output_path=args.output,
         use_real=args.use_real_adapters,
         top_k=args.top_k,
+        compute_rouge_l=args.rouge_l,
+        compute_bert_score=args.bert_score,
     )
 
 
@@ -138,6 +161,8 @@ def _run_evaluation(
     output_path: Path | None,
     use_real: bool,
     top_k: int,
+    compute_rouge_l: bool = False,
+    compute_bert_score: bool = False,
 ) -> int:
     """Evaluation Set 전체 실행 + 지표 산출."""
     from app.api.deps import build_poc_deps, build_real_deps
@@ -163,6 +188,9 @@ def _run_evaluation(
     verification_total = 0
     latency_ms_list: list[int] = []
     top1_score_list: list[int] = []
+    # feature17b — ROUGE-L / BERTScore 누적 (라이브러리 lazy import, summary 에 평균 출력).
+    predictions_for_metric: list[str] = []
+    references_for_metric: list[str] = []
 
     for item in items:
         eval_id = item["id"]
@@ -211,6 +239,13 @@ def _run_evaluation(
         if response.sources:
             top1_score_list.append(response.sources[0].score)
 
+        # feature17b — ROUGE-L/BERTScore 용 예측·정답 쌍 수집. expected_answer_excerpt
+        # 가 있는 항목만 평가 대상에 포함.
+        expected_excerpt = item.get("expected_answer_excerpt")
+        if expected_excerpt and response.answer:
+            predictions_for_metric.append(response.answer)
+            references_for_metric.append(expected_excerpt)
+
         results.append(
             {
                 "id": eval_id,
@@ -234,6 +269,16 @@ def _run_evaluation(
                 "feedback_enabled": response.feedback_enabled,
                 "latency_ms": elapsed_ms,
             }
+        )
+
+    # --- ROUGE-L / BERTScore 산출 (feature17b 인프라) ---
+    rouge_l_f1_avg: float | None = None
+    bert_score_f1_avg: float | None = None
+    if compute_rouge_l and predictions_for_metric:
+        rouge_l_f1_avg = _compute_rouge_l_f1_avg(predictions_for_metric, references_for_metric)
+    if compute_bert_score and predictions_for_metric:
+        bert_score_f1_avg = _compute_bert_score_f1_avg(
+            predictions_for_metric, references_for_metric
         )
 
     # --- 집계 ---
@@ -268,6 +313,9 @@ def _run_evaluation(
         "top1_score_avg": (
             sum(top1_score_list) / len(top1_score_list) if top1_score_list else None
         ),
+        "rouge_l_f1_avg": rouge_l_f1_avg,
+        "bert_score_f1_avg": bert_score_f1_avg,
+        "answer_quality_n_items": len(predictions_for_metric),
     }
 
     # --- 출력 ---
@@ -287,6 +335,43 @@ def _run_evaluation(
     print(f"[eval] report = {output_path}")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
+
+
+def _compute_rouge_l_f1_avg(predictions: list[str], references: list[str]) -> float:
+    """ROUGE-L F1 평균 — 설계서 §7.2.3 자동 평가 정합 (rouge-score 라이브러리).
+
+    rouge-score 는 경량 (pure Python) 이라 평가 시점 lazy import. evaluation extras
+    미설치 환경에서는 ImportError 즉시 발생 — ``pip install -e ".[evaluation]"`` 안내.
+    """
+    try:
+        from rouge_score import rouge_scorer
+    except ImportError as exc:
+        raise ImportError(
+            'rouge-score 미설치 — `pip install -e ".[evaluation]"` 후 재실행.'
+        ) from exc
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
+    f1_scores = [
+        scorer.score(ref, pred)["rougeL"].fmeasure
+        for pred, ref in zip(predictions, references, strict=True)
+    ]
+    return sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+
+
+def _compute_bert_score_f1_avg(predictions: list[str], references: list[str]) -> float:
+    """BERTScore F1 평균 — 설계서 §7.2.3 자동 평가 정합 (bert-score 라이브러리).
+
+    bert-score 는 transformers/torch 모델 다운로드 (~500MB, multilingual). 한국어
+    질의 정합으로 ``lang="ko"`` 사용. evaluation extras 미설치 시 ImportError.
+    """
+    try:
+        from bert_score import score
+    except ImportError as exc:
+        raise ImportError(
+            'bert-score 미설치 — `pip install -e ".[evaluation]"` 후 재실행.'
+        ) from exc
+    _, _, f1_tensor = score(predictions, references, lang="ko", verbose=False)
+    f1_list = f1_tensor.tolist() if hasattr(f1_tensor, "tolist") else list(f1_tensor)
+    return sum(f1_list) / len(f1_list) if f1_list else 0.0
 
 
 if __name__ == "__main__":

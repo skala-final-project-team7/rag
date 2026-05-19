@@ -4425,6 +4425,102 @@ routing_provider = OpenAIRoutingLLMProvider(
 본 fix 적용 후 동일 4종 의도 질의를 운영 라우터로 재실행. **정확도 25% →
 100% (4/4)** 달성, 설계서 §6.1 임계 90% **충족**.
 
+---
+
+## 2026-05-19 — feature17b 인프라 (chunk_id backfill + ROUGE-L/BERTScore)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17b 의 **인프라 부분** 만 본 세션에서 완성 — Evaluation Set
+  50건 라벨링 후 즉시 자동 평가 가능한 도구 골격 구축. 50건 라벨링 자체는 사용자
+  시간 필요 (별도 세션).
+
+### 1. `scripts/backfill_chunk_ids.py` 신설
+
+- 입력: `samples/evaluation_set.json` (expected_page_ids 채워진 상태)
+- 처리: 운영 Qdrant CONTENT_POOL 을 `MatchAny(any=[page_id, ...])` filter 로
+  scroll → page_id 별 chunk_id set 산출 → 각 항목의 expected_chunk_ids 자동 채움
+- 백업: 갱신 전 `.bak` 사본 생성
+- `--dry-run` 옵션: 파일 수정 없이 매칭 결과만 콘솔 출력
+- chunking 결과가 결정론 (SHA1) 이므로 한 번 backfill 한 chunk_id 는 stable
+
+### 2. `pyproject.toml` `evaluation` extras 신설
+
+```
+evaluation = [
+  "evaluate>=0.4.0",
+  "rouge-score>=0.1.2",
+  "bert-score>=0.3.13",
+]
+```
+
+사용법: `pip install -e ".[evaluation]"`. ROUGE-L 은 경량 (pure Python),
+BERTScore 는 transformers/torch 모델 다운로드 (~500MB, multilingual). 모두
+lazy import — 미설치 환경에서도 본 저장소 import 영향 0.
+
+### 3. `scripts/run_evaluation.py` 옵션 확장
+
+- `--rouge-l` — actual answer vs expected_answer_excerpt 의 ROUGE-L F1 평균
+- `--bert-score` — 동일 비교의 BERTScore F1 평균 (lang="ko" 강제)
+- helper 함수 `_compute_rouge_l_f1_avg` / `_compute_bert_score_f1_avg` 분리 —
+  라이브러리 lazy import + 미설치 시 ImportError 안내 메시지
+- summary 에 `rouge_l_f1_avg` / `bert_score_f1_avg` / `answer_quality_n_items`
+  추가
+
+### 4. 회귀 테스트 신규 7건
+
+- `tests/scripts/test_backfill_chunk_ids.py` (3건):
+  - page_id 별 chunk_id 매핑이 expected_chunk_ids 에 채워짐 + 백업 생성
+  - --dry-run 시 파일 미수정 + 백업 미생성
+  - target page_ids 비어 있으면 scroll 호출 안 함
+- `tests/scripts/test_run_evaluation.py` (4건):
+  - ROUGE-L helper 평균 산출 (mock scorer)
+  - rouge-score 미설치 시 ImportError + "evaluation" 안내
+  - BERTScore helper 평균 산출 (mock score)
+  - bert-score 미설치 시 ImportError + "evaluation" 안내
+
+`scripts/__init__.py` + `tests/scripts/__init__.py` 신설로 본 회귀가 `from
+scripts import ...` 패턴으로 import 가능.
+
+### 수정 파일
+
+- `scripts/backfill_chunk_ids.py` (신규)
+- `scripts/run_evaluation.py` — `--rouge-l` / `--bert-score` 옵션 + helper 함수 +
+  ROUGE-L/BERTScore 누적 + summary 항목 3종 추가
+- `scripts/__init__.py` (신규, 빈 파일)
+- `pyproject.toml` — evaluation extras 추가
+- `tests/scripts/__init__.py` (신규, 빈 파일)
+- `tests/scripts/test_backfill_chunk_ids.py` (신규, 3건)
+- `tests/scripts/test_run_evaluation.py` (신규, 4건)
+- `docs/ai/working-log.md` (본 세션 기록)
+- `docs/ai/current-plan.md` (feature17b 인프라 부분 [x], 라벨링은 미완)
+
+### 정합성 검증 — 설계서
+
+- §6.2 (Evaluation Set 50건 형식 `(질문, 정답 청크 ID 집합, 우수 답변 예시)`) —
+  backfill 로 정답 청크 ID 집합 자동 채움 ✓
+- §6.3 Golden Set 채택 기준 (3 조건 AND) — verification_status / Cross-Encoder
+  Top-1 점수 / 사용자 피드백 인프라 모두 보유. 자동 추출은 feature17b 다음
+  단계 (50건 실행 후)
+- §6.4 KPI (Precision@3 75% 이상) — expected_chunk_ids backfill 후 정밀 매칭
+  가능
+- §7.2.3 ROUGE-L / BERTScore 자동 평가 — 라이브러리 도입 + helper 함수 ✓
+
+### 검증 명령 / 결과
+
+- 사용자 Mac: `./scripts/verify.sh` 실행 — 620 + 7 = **627 passed 예상**.
+- evaluation extras 설치 후 사용 가이드: `pip install -e ".[evaluation]"` →
+  `python scripts/backfill_chunk_ids.py` → `python scripts/run_evaluation.py
+  --use-real-adapters --rouge-l --bert-score`.
+
+### 후속 (다음 세션, 사용자 시간 필요)
+
+- **feature17b 라벨링** — `samples/evaluation_set.json` 에 40건 더 추가 (의도
+  비율 35:30:20:15 + 첨부 활용 ≥ 8건).
+- backfill 1회 실행으로 expected_chunk_ids 자동 채움.
+- 운영 환경 평가 실행 + Golden Set 자동 추출 (3 조건 AND 필터 신설).
+- **feature17c** — 평가 결과 기반 튜닝 (Pool 가중치 / 생성기 prompt / Cross-
+  Encoder 임계값). 라우터 prompt 는 직전 commit 으로 달성됨.
+
 | 질의 | expected | actual | 결과 |
 |------|----------|--------|------|
 | EKS NotReady | 장애대응 | 장애대응 | ✅ |
