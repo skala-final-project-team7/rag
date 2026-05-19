@@ -15,6 +15,14 @@
   - 2026-05-18, build_real_deps 후속 — lifespan이 settings.use_real_adapters
     토글을 읽어 build_real_deps / build_poc_deps 분기. 기본값(False)에서는
     동작 변화 없음.
+  - 2026-05-19, feature12 (PDF 0518_RAG.pdf #4) — Prometheus 운영 모니터링
+    instrumentator wiring 추가. create_app 시점에 ``Instrumentator().instrument
+    (app).expose(app, endpoint="/metrics", include_in_schema=False)`` 를 1회
+    호출해 HTTP 표준 메트릭(요청 수·지연 히스토그램·상태 코드별 카운터)을
+    자동 수집하고 ``/metrics`` 엔드포인트로 노출한다. ``/metrics`` 는 BFF
+    인증을 우회하는 Prometheus scraper 직접 접근 경로 (CORS·인증 미들웨어는
+    BFF 가 담당 — docs/api-spec.md NOTE 정합). LLM 커스텀 메트릭 (환각
+    비율·Precision@3 등) 은 feature17 (평가 세션) 으로 이관.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -26,6 +34,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.api.deps import build_poc_deps, build_real_deps
 from app.api.routes import router as query_router
@@ -71,6 +80,16 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
     app.include_router(query_router)
+
+    # 운영 모니터링 — Prometheus instrumentator (feature12, PDF 0518_RAG.pdf #4).
+    # ``/metrics`` 는 OpenAPI 스키마에서 제외(include_in_schema=False)하며 BFF 인증을
+    # 우회하는 Prometheus scraper 직접 접근 경로. 본 저장소가 비인증으로 동작하므로
+    # 별도 미들웨어 분기 불필요 (CORS·인증은 BFF 담당 — docs/api-spec.md NOTE).
+    Instrumentator().instrument(app).expose(
+        app,
+        endpoint="/metrics",
+        include_in_schema=False,
+    )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

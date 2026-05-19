@@ -33,6 +33,10 @@
     LLM provider/Config 주입을 위해 verifier_provider/verifier_config 필드 추가
     (router/generator 와 동일 partial 패턴). verify_llm_evaluator_stub 은 회귀
     보호용으로 보존.
+  - 2026-05-19, feature12 라우터 LangGraph config 충돌 fix — manage_router 의
+    시그니처 변경 (``config`` placeholder + ``routing_config`` keyword-only)
+    에 맞춰 router partial wiring 을 ``config=`` → ``routing_config=`` 로 갱신.
+    generator/verifier partial 은 변경 없음.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, LangGraph 0.2.x
@@ -183,7 +187,7 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
             partial(
                 manage_router,
                 provider=deps.routing_provider,
-                config=deps.routing_config,
+                routing_config=deps.routing_config,
             ),
         )
     else:

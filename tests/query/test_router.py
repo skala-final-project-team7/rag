@@ -169,3 +169,40 @@ def test_state_query_is_not_mutated() -> None:
     original_query = state.query
     manage_router(state, provider=_fake("operations_guide"))
     assert state.query == original_query
+
+
+def test_langgraph_runnable_config_dict_is_ignored() -> None:
+    """LangGraph 가 노드 시그니처의 ``config`` 키워드에 RunnableConfig dict 를 주입하는
+    경로 시뮬레이션 — placeholder 가 흡수해 정상 분기로 진행해야 한다.
+
+    feature12 회귀 보호: 이전 시그니처는 ``config`` 가 agent ``QueryRoutingConfig``
+    였기 때문에 LangGraph 가 주입한 dict 가 normalize_routing_input 에 흘러 들어가
+    RoutingProviderError 가 발생, OPERATION_GUIDE fallback 으로 떨어졌다. 본 테스트는
+    fix 이후 dict 를 무시하고 fake provider 가 응답한 intent 로 정상 분기하는지 확인.
+    """
+    runnable_config_like = {"configurable": {"thread_id": "lg-1"}, "tags": []}
+    result = manage_router(
+        _state(),
+        runnable_config_like,  # type: ignore[arg-type]
+        provider=_fake("incident_response"),
+    )
+    assert result.intent is Intent.INCIDENT_RESPONSE
+
+
+def test_routing_config_keyword_is_accepted() -> None:
+    """``routing_config=`` keyword-only 인자가 agent config 로 정상 전달되는지 확인.
+
+    feature12 회귀 보호: query_graph.py partial wiring 이 ``routing_config=deps.
+    routing_config`` 로 갱신된 정합 확인.
+    """
+    from query_routing_agent.config import QueryRoutingConfig
+
+    custom_config = QueryRoutingConfig(model="gpt-4o-mini", default_query_count=2)
+    result = manage_router(
+        _state(),
+        provider=_fake("operations_guide"),
+        routing_config=custom_config,
+    )
+    assert result.intent is Intent.OPERATION_GUIDE
+    # default_query_count=2 가 rewrite 단계에 반영되면 rewritten_queries 길이가 ≤ 2.
+    assert len(result.rewritten_queries) <= 2

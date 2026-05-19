@@ -51,6 +51,15 @@
     OpenAIAnswerLLMProvider + ``build_openai_chat_transport`` 주입. 설계서 §4.6.3
     GPT-4o 운영 호출 정합. ``settings.openai_api_key`` / ``settings.llm_answer
     _model`` 사용. build_poc_deps 는 기존대로 fake 자동 (외부 키 없이 동작).
+  - 2026-05-19, feature12 — 라우터·검증기 provider 에 ``settings.openai_api
+    _key.get_secret_value()`` 명시 전달. 라우터는 ``OpenAIRoutingLLMProvider.
+    from_config`` (env 의존) 대신 ``__init__(config, api_key)`` 직접 호출로
+    변경. 검증기는 ``AnswerVerificationConfig(evaluator_model=..., openai_api
+    _key=...)`` 로 config 객체에 키를 채워 ``OpenAIEvaluatorProvider`` 가
+    ``os.environ.get("OPENAI_API_KEY")`` fallback 을 거치지 않도록 한다. 답변
+    생성기는 이미 명시 주입 중. CLAUDE.md 절대 규칙 "Secret 은 ``app/config.py``
+    에서 환경 변수로 주입" 정합 + ``.env`` 의 ``OPENAI_API_KEY`` 중복 환경변수
+    제거.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+
@@ -173,17 +182,29 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # chunk_lookup은 운영 모드에서 MongoDB `chunk_lookup` 컬렉션을 가리킨다 (db-schema §2.5).
     # 컬렉션이 비어 있어도 fetch가 None을 반환하므로 download_url=None으로 안전 fallback.
     chunk_lookup = MongoChunkTextLookup.from_settings(settings)
-    # 라우터는 운영 모드에서 OpenAI provider 를 사용한다. OPENAI_API_KEY 환경변수가
-    # 없으면 from_config 가 RoutingProviderError 를 던지므로, 운영 lifespan 진입 직전에
-    # 누락이 명확히 드러난다. 키가 있으면 GPT-4o-mini (app/CLAUDE.md §5 라우팅 정책) 로
-    # 분류한다.
+    # OpenAI API key 는 settings 에서 1회 추출해 라우터·검증기·답변 생성기 3종에 명시
+    # 전달한다. CLAUDE.md 절대 규칙 "Secret 은 ``app/config.py`` 에서 환경 변수로
+    # 주입" 정합 — provider 가 ``os.environ.get("OPENAI_API_KEY")`` fallback 을 거치지
+    # 않도록 직접 주입한다 (feature12, 2026-05-19).
+    openai_api_key = settings.openai_api_key.get_secret_value()
+    # 라우터는 운영 모드에서 OpenAI provider 를 사용한다. ``__init__(config, api_key)``
+    # 로 settings 의 키를 직접 주입한다 (이전 ``from_config`` 의 env fallback 제거).
+    # api_key 가 비어 있으면 RoutingProviderError 즉시 발생 — 운영 lifespan 진입 직전에
+    # 누락이 명확히 드러난다. GPT-4o-mini (app/CLAUDE.md §5 라우팅 정책).
     routing_config = QueryRoutingConfig(model="gpt-4o-mini")
-    routing_provider = OpenAIRoutingLLMProvider.from_config(routing_config)
+    routing_provider = OpenAIRoutingLLMProvider(
+        config=routing_config,
+        api_key=openai_api_key,
+    )
     # 답변 검증 2단계 평가자도 운영 모드는 OpenAI 직접 호출 — agent OpenAIEvaluator
     # Provider 는 자체 urllib transport (default) 가 있어 transport 미주입 OK.
-    # OPENAI_API_KEY 환경변수가 없으면 EvaluatorProviderError 즉시 발생 (운영 lifespan
-    # 진입 직전에 누락 명확히 드러남). GPT-4o-mini (설계서 §4.7.2).
-    verifier_config = AnswerVerificationConfig(evaluator_model="gpt-4o-mini")
+    # ``AnswerVerificationConfig.openai_api_key`` 에 settings 의 키를 채워 env
+    # fallback 을 거치지 않도록 한다. 비어 있으면 EvaluatorProviderError 즉시 발생.
+    # GPT-4o-mini (설계서 §4.7.2).
+    verifier_config = AnswerVerificationConfig(
+        evaluator_model="gpt-4o-mini",
+        openai_api_key=openai_api_key,
+    )
     verifier_provider = OpenAIEvaluatorProvider(config=verifier_config)
     # 답변 생성기는 운영 모드에서 OpenAI Chat Completions 를 직접 호출한다 — agent
     # OpenAIAnswerLLMProvider 는 transport callable (Callable[[dict], dict]) 주입을
@@ -191,7 +212,6 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # 를 만들어 주입한다 (Plan v2 §3 (B), 설계서 §4.6.3). 모델은 GPT-4o (app/
     # CLAUDE.md §5 라우팅 정책). OPENAI_API_KEY 가 비어 있으면 ProviderConfiguration
     # Error 즉시 발생 — 운영 lifespan 진입 직전에 누락 명확히 드러남.
-    openai_api_key = settings.openai_api_key.get_secret_value()
     generator_config = AnswerGenerationConfig(
         model=settings.llm_answer_model,
         fallback_model=settings.llm_aux_model,

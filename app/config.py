@@ -13,6 +13,13 @@
   - 2026-05-18, build_real_deps 후속 — use_real_adapters 토글 추가
     (RAG_USE_REAL_ADAPTERS). 기본값 False(PoC). True 시 lifespan이 build_real_deps
     분기로 E5 + BM25 + Qdrant from_settings + CrossEncoderRerankerImpl을 부트스트랩
+  - 2026-05-19, feature12 — cross_encoder_model 기본값에 ``-v2`` 추가.
+    Hugging Face / sentence-transformers 의 실 모델명은 ``cross-encoder/ms-marco-
+    MiniLM-L-12-v2`` 이며 ``-v2`` 가 없는 변형은 존재하지 않는다 (설계서
+    §4.5.3 표기는 ``-v2`` 누락 — 설계서 차기 개정 시 반영 권장). 직전 세션
+    까지는 ``.env`` 의 ``RAG_CROSS_ENCODER_MODEL`` 로 우회 중이었으며 본 fix 로
+    코드 기본값만으로도 운영 모드(``RAG_USE_REAL_ADAPTERS=true``) 에서 모델
+    로드 성공.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+, pydantic-settings 2.3+
@@ -64,7 +71,10 @@ class Settings(BaseSettings):
 
     # --- 임베딩 / 재순위화 모델 ---
     dense_embedding_model: str = "intfloat/multilingual-e5-large"
-    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12"
+    # NOTE: 설계서 §4.5.3 은 ``cross-encoder/ms-marco-MiniLM-L-12`` 로 표기되어 있으나
+    # Hugging Face / sentence-transformers 의 실 모델명은 ``-v2`` 가 정식이다 (``-v2``
+    # 가 없는 변형은 존재하지 않음). 설계서 차기 개정 시 ``-v2`` 반영 권장.
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 
     # --- 운영 어댑터 토글 (build_real_deps 후속, 2026-05-18) ---
     # True면 lifespan이 build_real_deps 분기로 E5 + BM25 + Qdrant from_settings +
