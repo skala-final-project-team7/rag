@@ -391,6 +391,28 @@ def test_lookup_default_none_keeps_legacy_behavior() -> None:
     assert result.sources[0].download_url is None
 
 
+def test_download_url_lookup_failure_degrades_gracefully() -> None:
+    """chunk_lookup(Mongo) 조회 실패 시 쿼리를 죽이지 않고 download_url 없이 진행한다 (17c-8)."""
+
+    class _FailingLookup(FakeChunkTextLookup):
+        def fetch_many(self, chunk_ids: list[str]) -> dict[str, ChunkLookupRecord]:
+            raise RuntimeError("Mongo 연결 거부 (localhost:27017)")
+
+    chunk = _chunk(
+        chunk_id="a" * 40,
+        is_attachment=True,
+        attachment_filename="EKS_운영_매뉴얼.docx",
+    )
+    state = _state(candidates=[chunk])
+    # 스토리지 장애가 전파되지 않고 정상적으로 sources/top_chunks 가 채워져야 한다.
+    result = cross_encoder_rerank(
+        state, reranker=_ConstantScoreReranker(score=0.9), chunk_lookup=_FailingLookup()
+    )
+    assert len(result.top_chunks) == 1
+    assert len(result.sources) == 1
+    assert result.sources[0].download_url is None  # 조회 실패 → download_url 누락(graceful).
+
+
 def test_score_is_rounded_to_integer_percent() -> None:
     chunk = _chunk(chunk_id="a" * 40)
     state = _state(candidates=[chunk])

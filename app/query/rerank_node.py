@@ -19,6 +19,8 @@
 --------------------------------------------------
 """
 
+import logging
+
 from app.query.rerank import select_reranked
 from app.query.reranker.base import CrossEncoderReranker
 from app.schemas.chunk import Chunk
@@ -27,9 +29,15 @@ from app.schemas.rag_state import RagState
 from app.schemas.response import Source
 from app.storage.chunk_lookup import ChunkTextLookup
 
+logger = logging.getLogger(__name__)
+
 # select_reranked.is_low_confidence는 RagState에 별도 필드로 두지 않는다. 응답 포맷터
 # (feature11)의 ``_is_low_confidence`` 가 ``Source.score`` 기반으로 동일 판정하므로
 # 이중 신호가 된다 — score만 정확히 매핑하면 포맷터가 자동으로 저신뢰 분기를 적용한다.
+
+# UI 출처 카드 text_preview 폭 — chunk.text 가 feature17c-7 이후 풀 텍스트라 절단한다
+# (vector_store.TEXT_PREVIEW_LIMIT / generator._preview_text 와 동일 200자).
+_SOURCE_TEXT_PREVIEW_LIMIT = 200
 
 
 def cross_encoder_rerank(
@@ -134,7 +142,15 @@ def _fetch_attachment_download_urls(
     ]
     if not attachment_ids:
         return {}
-    records = lookup.fetch_many(attachment_ids)
+    # download_url 은 UI 출처 카드의 부가 정보(첨부 다운로드 링크)다. chunk_lookup
+    # (Mongo) 일시 장애가 RAG 쿼리 전체를 실패시키면 안 되므로, 조회 실패 시 download_url
+    # 없이 graceful degrade 한다 (feature17c-8 — 첨부 청크는 payload 풀텍스트로 이미
+    # 검색·생성 가능하며 download_url 만 누락). 본문 검색·생성 품질에는 영향 없다.
+    try:
+        records = lookup.fetch_many(attachment_ids)
+    except Exception as exc:  # noqa: BLE001 — 스토리지 장애를 쿼리 실패로 전파하지 않는다.
+        logger.warning("chunk_lookup download_url 조회 실패 — download_url 없이 진행: %s", exc)
+        return {}
     return {chunk_id: record.download_url for chunk_id, record in records.items()}
 
 
@@ -163,6 +179,8 @@ def _chunk_to_source(
     metadata = chunk.metadata
     # 첨부 청크는 출처 카드 제목을 attachment_filename으로, 본문 청크는 page_title로.
     title = metadata.attachment_filename or metadata.page_title
+    # chunk.text 는 feature17c-7 이후 풀 텍스트이므로 UI 출처 카드용 미리보기는 200자로
+    # 절단한다 (payload text_preview / generator _preview_text 와 동일 폭).
     return Source(
         title=title,
         score=round(raw_score * 100),
@@ -171,7 +189,7 @@ def _chunk_to_source(
         source_type=metadata.source_type,
         confluence_url=metadata.webui_link,
         last_modified=metadata.last_modified,
-        text_preview=chunk.text,
+        text_preview=chunk.text[:_SOURCE_TEXT_PREVIEW_LIMIT],
         attachment_filename=metadata.attachment_filename,
         attachment_mime=metadata.attachment_mime,
         download_url=download_url,

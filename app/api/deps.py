@@ -80,7 +80,7 @@ from pathlib import Path
 
 from app.adapters.json_fixture import JsonFixtureSourceAdapter
 from app.config import Settings, get_settings
-from app.ingestion.chunker import chunk_page
+from app.ingestion.chunker import chunk_attachment, chunk_page
 from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import index_chunks
 from app.pipeline.ingestion_graph import IngestionGraphDeps
@@ -187,6 +187,7 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     store.bootstrap_collections()
     reranker = CrossEncoderRerankerImpl(
         settings.cross_encoder_model,
+        device=settings.cross_encoder_device,
         temperature=settings.cross_encoder_temperature,
     )
     # chunk_lookup은 운영 모드에서 MongoDB `chunk_lookup` 컬렉션을 가리킨다 (db-schema §2.5).
@@ -262,6 +263,11 @@ def _ingest_samples(
     PoC 픽스처(`JsonFixtureSourceAdapter`)는 page.attachments[*].download_url 을 file://
     URI로 채워둔다. 이 매핑을 indexer 에 전달해 첨부 청크의 chunk_lookup 적재 시점에
     Source.download_url 이 함께 채워지도록 한다.
+
+    본문(chunk_page)뿐 아니라 첨부(chunk_attachment, docx/xlsx)도 적재한다 — 적재
+    누락 시 PoC(Mode A) 데모에서 첨부 활용 질의가 검색 0건이 되던 문제(feature17c-4
+    의 PoC 경로 대응). 미지원 유형(PDF/CSV)·파싱 실패는 적재를 중단하지 않고 건너뛴다.
+    실 운영 ingestion 그래프(`app/pipeline/ingestion_graph.py`)는 이미 첨부를 청킹한다.
     """
     adapter = JsonFixtureSourceAdapter(samples_dir=samples_dir)
     chunks: list[Chunk] = []
@@ -269,9 +275,16 @@ def _ingest_samples(
     attachment_download_urls: dict[str, str] = {}
     for page in adapter.fetch_pages():
         version_by_page_id[page.page_id] = page.version_number
+        chunks.extend(chunk_page(page))
         for attachment in page.attachments:
             attachment_download_urls[attachment.attachment_id] = attachment.download_url
-        chunks.extend(chunk_page(page))
+            try:
+                chunks.extend(chunk_attachment(attachment, page))
+            except ValueError:
+                # 미지원 유형(PDF/CSV=feature4-B 미구현) — 적재 계속.
+                continue
+            except Exception:  # noqa: BLE001 — 파싱 실패도 적재 중단 없이 skip.
+                continue
 
     if not chunks:
         return
