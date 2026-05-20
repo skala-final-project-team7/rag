@@ -651,8 +651,14 @@ BE 담당자 명세 확정 후 진행.
     경계(`app/query/openai_transport.py` `_normalize_messages`)에 `CONSERVATIVE_SYSTEM
     _GUARD` 를 덧붙이는 방식으로 강화(vendoring 무수정). `generator_conservative_guard`
     토글 기본 OFF → `.env` 로 A/B(`not_supported_ratio_answerable` 비교 후 채택 결정).
-    회귀 +4(transport 2 + deps 2). 효과는 사용자 Mac A/B 측정 대기(미검증). Agent
-    담당자 통보 — vendored 프롬프트 보수화는 Agent 측 정식 경로.
+    회귀 +4(transport 2 + deps 2). Agent 담당자 통보 — vendored 프롬프트 보수화는
+    Agent 측 정식 경로.
+    - [x] **A/B 실측(082545)**: guard ON 시 환각 answerable 38.74→37.44%(1.3pp,
+      노이즈 범위) + 미근거 문장 수 오히려 증가 + ROUGE-L 소폭↓ → **guard 미채택,
+      기본 OFF 유지**. summary 에 guard 상태 기록 추가(추적성).
+    - [x] **진단**: NOT_SUPPORTED 가 44/50 항목·전 의도에 균일 분산 → 병목은 생성기
+      prompt 가 아니라 **문장별 검증기(verifier)**. 다음 세션은 문장 단위 진단(토큰/
+      cited chunk/2단계 사유) 후 결정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선
