@@ -97,6 +97,16 @@ def main() -> int:
         help="Precision@k 계산용 k (기본 3, 설계서 §6.4 KPI Precision@3).",
     )
     parser.add_argument(
+        "--pool-weights",
+        type=str,
+        default=None,
+        help=(
+            "Pool 가중치 그리드 서치 — 모든 질의의 라우터 pool_weights 를 강제 오버라이드한다 "
+            "(feature17c-9). 형식: 'title:0.25,content:0.6,label:0.15'. 라우터 출력을 덮어쓰므로 "
+            "의도별 가중치 비교 실험에 사용. 미지정 시 라우터 값 그대로."
+        ),
+    )
+    parser.add_argument(
         "--rouge-l",
         action="store_true",
         help="ROUGE-L F1 (rouge-score 라이브러리) 으로 answer vs expected_answer_excerpt 평가.",
@@ -121,6 +131,8 @@ def main() -> int:
         print(f"[err] eval-set not found: {args.eval_set}")
         return 1
 
+    pool_weights_override = _parse_pool_weights(args.pool_weights) if args.pool_weights else None
+
     return _run_evaluation(
         eval_set_path=args.eval_set,
         output_path=args.output,
@@ -128,7 +140,32 @@ def main() -> int:
         top_k=args.top_k,
         compute_rouge_l=args.rouge_l,
         compute_bert_score=args.bert_score,
+        pool_weights_override=pool_weights_override,
     )
+
+
+def _parse_pool_weights(spec: str) -> dict[str, float]:
+    """'title:0.25,content:0.6,label:0.15' → {title_pool/content_pool/label_pool: float}.
+
+    Pool 가중치 그리드 서치(feature17c-9)용. 짧은 키(title/content/label)를 Qdrant Pool
+    이름(`title_pool`/`content_pool`/`label_pool`)으로 매핑한다. 3 Pool 모두 명시해야 한다.
+
+    Raises:
+        ValueError: 형식 오류 / 미지의 Pool 키 / 3 Pool 누락.
+    """
+    alias = {"title": "title_pool", "content": "content_pool", "label": "label_pool"}
+    weights: dict[str, float] = {}
+    for part in spec.split(","):
+        if ":" not in part:
+            raise ValueError(f"잘못된 pool-weights 항목: {part!r} (형식 'title:0.25')")
+        key, _, value = part.partition(":")
+        key = key.strip().lower()
+        if key not in alias:
+            raise ValueError(f"미지의 Pool 키: {key!r} (title/content/label 중 하나)")
+        weights[alias[key]] = float(value.strip())
+    if set(weights) != set(alias.values()):
+        raise ValueError("pool-weights 는 title/content/label 3 Pool 을 모두 명시해야 한다")
+    return weights
 
 
 def _run_debug_route(query: str, *, use_real: bool) -> int:
@@ -257,7 +294,28 @@ def _run_debug_rerank(query: str, *, use_real: bool) -> int:
 
     n = len(ordered)
     print(f"[debug-rerank] query={query!r}")
-    print(f"[debug-rerank] 후보 {n}건 raw logit 분포:")
+    print(
+        f"[debug-rerank] intent={state.intent.value if state.intent else None} "
+        f"pool_weights={state.pool_weights} metadata_filters={state.metadata_filters}"
+    )
+
+    # 후보별 page 분포 — 정답 페이지가 후보에 있는지/몇 위에 reranking 되는지 진단용
+    # (잔여 recall 실패 분석). logit 내림차순으로 page_id/title/section 출력.
+    ranked = sorted(zip(candidates, logits, strict=True), key=lambda pair: pair[1], reverse=True)
+    print(f"[debug-rerank] 후보 {n}건 (rerank logit 내림차순 — Top-5 가 답변 컨텍스트로 전달):")
+    print("  rank | T4score | logit  | src  | page_id | section / title")
+    for rank, (chunk, lg) in enumerate(ranked, start=1):
+        meta = chunk.metadata
+        src = "ATT" if meta.source_type.value == "attachment" else "page"
+        label = (meta.attachment_filename or meta.page_title)[:32]
+        section = (meta.section_header or "")[:24]
+        marker = " <Top5" if rank <= 5 else ""
+        print(
+            f"  #{rank:>2} | {round(_sigmoid(lg / 4) * 100):>3} | {lg:>7.3f} | {src:>4} | "
+            f"{meta.page_id:>7} | {label} / {section}{marker}"
+        )
+    print()
+    print("[debug-rerank] raw logit 분포:")
     print(f"  max={ordered[0]:.3f} / min={ordered[-1]:.3f} / mean={sum(ordered) / n:.3f}")
     print(f"  Top-1 logit = {ordered[0]:.3f}")
     print()
@@ -284,12 +342,14 @@ def _run_evaluation(
     top_k: int,
     compute_rouge_l: bool = False,
     compute_bert_score: bool = False,
+    pool_weights_override: dict[str, float] | None = None,
 ) -> int:
     """Evaluation Set 전체 실행 + 지표 산출."""
     from app.api.deps import build_poc_deps, build_real_deps
     from app.config import get_settings
     from app.pipeline.query_graph import build_query_graph, run_query
     from app.query.acl import build_acl_filter
+    from app.query.router import manage_router
     from app.schemas.rag_state import RagState
 
     with eval_set_path.open() as fp:
@@ -306,6 +366,26 @@ def _run_evaluation(
 
     settings = get_settings()
     deps = build_real_deps(settings) if use_real else build_poc_deps(settings)
+
+    # feature17c-9 — Pool 가중치 그리드 서치: 라우터 노드를 래핑해 실 라우터 실행 후
+    # state.pool_weights 를 강제 오버라이드한다. build_query_graph 는 router_node 가
+    # manage_router 일 때만 provider/config 를 주입하므로, 래퍼가 직접 provider/config 를
+    # captured 해 manage_router 를 호출한다(라우팅 정확도는 그대로, 가중치만 교체).
+    if pool_weights_override is not None:
+        routing_provider = deps.routing_provider
+        routing_config = deps.routing_config
+
+        # NOTE: 노드 annotation 은 ``Any`` 로 둔다 — LangGraph add_node 가 노드 콜러블에
+        # get_type_hints 를 호출하는데, 그 평가는 run_evaluation 모듈 globals 에서 일어난다.
+        # RagState 는 본 함수 내부 lazy import 라 모듈 globals 에 없어 NameError 가 난다.
+        # Any 는 모듈 상단에 import 되어 있어 안전하다(그래프 state schema 는 StateGraph(RagState)).
+        def _router_with_pool_override(state: Any) -> Any:
+            manage_router(state, provider=routing_provider, routing_config=routing_config)
+            state.pool_weights = dict(pool_weights_override)
+            return state
+
+        deps.router_node = _router_with_pool_override
+
     graph = build_query_graph(deps)
 
     results: list[dict[str, Any]] = []
@@ -457,6 +537,8 @@ def _run_evaluation(
         "rouge_l_f1_avg": rouge_l_f1_avg,
         "bert_score_f1_avg": bert_score_f1_avg,
         "answer_quality_n_items": len(predictions_for_metric),
+        # feature17c-9 — Pool 가중치 그리드 서치 시 어떤 가중치로 측정했는지 기록(없으면 라우터 값).
+        "pool_weights_override": pool_weights_override,
     }
 
     # --- 출력 ---

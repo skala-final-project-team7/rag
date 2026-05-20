@@ -594,9 +594,58 @@ BE 담당자 명세 확정 후 진행.
   - [x] Evaluation Set 50건 라벨링 — 시드 10건 (human) + Claude bootstrap 40건
     (의도 비율 35:30:20:15 + 첨부 활용 8건). 사용자 검수 후 backfill + 평가.
   - [ ] Golden Set 자동 추출 (3 조건 AND 필터) — 평가 실행 후
-- [ ] **feature17c** — 튜닝 (Pool 가중치 그리드 서치 / 생성기 prompt /
+- [-] **feature17c** — 튜닝 (Pool 가중치 그리드 서치 / 생성기 prompt /
   Cross-Encoder 임계값) — 라우터 prompt 튜닝은 2026-05-19 fix
   (app/query/routing_transport.py) 로 사실상 달성 (정확도 4/4=100%)
+  - [x] feature17c-1/2/3 — Cross-Encoder temperature(T=4) + Source.score saturation
+    fix (generator 진짜 rerank score 전달)
+  - [x] **feature17c-4** — 첨부 청크 인덱싱 wiring (scripts/ingest_samples.py 가
+    chunk_attachment 미호출 → 첨부 검색 0건. collect_chunks 헬퍼 분리 + 첨부 청킹
+    호출 + 회귀 4건). 사용자 Mac 재적재·재평가 완료: 첨부 청크 51건 적재, 전체
+    Precision 68→72% / 환각 37→34% / P95 18.1→13.9초. 단, 첨부 8건은 2차 원인으로
+    여전히 대부분 0건 → feature17c-5 로 이어짐.
+  - [x] **feature17c-5** — metadata_filters 키 매핑 fix (router 복수형
+    space_keys/document_types/source_types → payload 단수형 space_key/doc_type/
+    source_type). `_coerce_metadata_filters` 어댑터에서 rename(vendoring 무수정) +
+    회귀 4건(in-memory Qdrant end-to-end). **실측: 집계 무변화** (Precision 70~72%
+    유지). 코드는 옳으나 키 불일치가 첨부 차단의 실제 주원인은 아니었음. 첨부 개별
+    변동은 라우터 LLM 비결정성(동일 코드 2회 실행 상이).
+  - [x] **feature17c-6** — metadata filter 0건 fallback 재검색. 정적 분석으로
+    첨부 질의 결정적 0건의 근본 원인 확정(n_src=0 ⟺ hybrid_search 후보 0건 ⟺
+    라우터 LLM 추출 metadata filter 가 payload 불일치로 must 전부 배제; query_points
+    score 하한 없음). `_search_and_fuse` 헬퍼 분리 + 0건 시 ACL 유지·filter 완화
+    1회 재검색(회귀 안전: 0건일 때만 동작) + 회귀 2건. 사용자 Mac 재평가로 첨부
+    Precision before/after 확인 대기.
+  - [x] **feature17c-7** — Qdrant payload 풀텍스트(`text`) 저장. 정적 분석으로
+    진짜 recall 병목 확정: n_src=0 은 "검색 0건"이 아니라 "생성기 거부"(검색 후보는
+    있으나 정답 청크 미포함 OR 200자 프리뷰만 전달). rerank·generator 가 200자
+    프리뷰로만 동작하던 것을 payload 풀텍스트로 해소(generator=Agent 무수정, Pipeline
+    한 곳 변경). db-schema §1.2 갱신 + 회귀 3건. **★재적재 필수★** 후 재평가로
+    Precision/환각 before-after 확인 대기.
+  - [x] **feature17c-8** — 첨부 download_url lookup(Mongo) 실패 graceful degrade.
+    rerank 의 download_url 조회가 Mongo 장애를 쿼리 전체 실패로 전파하던 버그 수정
+    (UI 부가정보라 실패 시 download_url 없이 진행). 회귀 +1.
+  - [x] **17c-7/8 재평가 실측** — **Precision@3 68→80% (KPI 75% 충족 ✅)**, n_src=0
+    12→6. 풀텍스트 fix 가 recall 병목 해소를 실증(reports/evaluation_20260520_063441).
+  - [x] **feature17c-9** — Pool 가중치 그리드 서치 도구: run_evaluation `--pool-weights`
+    오버라이드(라우터 래핑) + `--debug-rerank` 후보 page 분포 테이블 + `_parse_pool_weights`
+    회귀 4건. 잔여 recall 4건 진단·튜닝 인프라.
+  - [x] **잔여 recall 4건 진단** (EVAL-006/024/032/041) — `--debug-rerank` 실측:
+    정답 페이지가 후보엔 있으나(예: 100039 #13, 100028 #4) Cross-Encoder(ms-marco,
+    영어) 한국어 변별 부족으로 Top-3 밖. 무관 페이지(Route53)를 정답보다 상위 랭크.
+    → 병목은 Pool 가중치가 아니라 reranker 변별력으로 확정.
+  - [x] **feature17c-10/12** — 다국어 reranker(bge-v2-m3) 실험 후 **ms-marco 로 원복**.
+    bge 가 한국어 변별 우수(EVAL-032 #13→#1)하나 CPU 추론이 느려 KPI #4(P95 8초) 위반.
+    Precision@3 는 풀텍스트(17c-7)만으로 이미 80%(목표 충족)라 bge 는 선택적이었음 →
+    지연 우선 원복. bge 는 운영 GPU 환경 재검토. device 설정(17c-11)은 유지.
+  - [x] **평가 비용 분석** — reranker=로컬(비용 0). full 50건 평가 ≈ $0.5~2/회(추정),
+    $134 한도 대비 충분. 진단은 --debug-rerank/route(거의 무료), full 평가는 마일스톤만.
+  - [ ] NOT_SUPPORTED 39% — 생성기 prompt 보수성 튜닝(Agent 영역, 협의/이관).
+  - [ ] 평가셋 답없는 항목(EVAL-021 DiskPressure/046 야간비용) 분리(is_answerable).
+  - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
+  - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
+  - [ ] 정책절차 Precision 50% 개선
+  - [ ] 생성기 prompt 튜닝 (환각 37%) — Agent 경계, 별도 세션/이관
 
 ### feature18: 외부 의존 / 부가 — P3
 

@@ -33,11 +33,14 @@ from app.query.reranker.base import CrossEncoderReranker
 
 
 class CrossEncoderRerankerImpl(CrossEncoderReranker):
-    """``cross-encoder/ms-marco-MiniLM-L-12`` 어댑터 (sentence-transformers).
+    """Cross-Encoder reranker 어댑터 (sentence-transformers, 모델 비종속).
 
     sentence-transformers ``CrossEncoder.predict`` 를 호출해 (query, passage) 쌍의 관련도
     logit을 산출한 뒤, Sigmoid를 적용해 ``[0.0, 1.0]`` 점수로 변환한다 —
-    ``select_reranked`` (feature9-A)의 임계값과 정합.
+    ``select_reranked`` (feature9-A)의 임계값과 정합. 모델은 config(``cross_encoder_model``)
+    가 결정한다 — 기본은 ``cross-encoder/ms-marco-MiniLM-L-12-v2``. 한국어 변별이 더 필요
+    하고 GPU 가 있으면 다국어 ``BAAI/bge-reranker-v2-m3`` 등으로 교체 가능(동일 인터페이스).
+    CPU 에서 대형 모델은 응답 지연 KPI 를 위반할 수 있으니 device(mps/cuda) 가속 권장.
 
     Args:
         model_name: 모델 이름. 기본값은 ms-marco-MiniLM-L-12.

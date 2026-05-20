@@ -4957,3 +4957,903 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
    실제 점수 기준으로 작동한다.
 3. 재평가 결과로 527 §3 재갱신 (v0.2.1) + §3.5 saturation 원인 정정.
 4. 임계값 미세조정 후 Pool 가중치 그리드 서치 / 생성기 prompt 튜닝.
+
+---
+
+## 2026-05-20 — feature17c-4: 첨부 청크 인덱싱 wiring fix (첨부 검색 0건 근본 해소)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17b 재평가(reports/evaluation_20260520_034348.json)에서 가장 큰
+  약점이던 **첨부 활용 Precision@3 12% (1/8)** 의 진짜 원인을 진단한 결과, Pool
+  가중치 문제가 아니라 **첨부 내용이 운영 Qdrant 에 인덱싱 자체가 안 되던 것**으로
+  확정. 데모/평가 적재 스크립트(`scripts/ingest_samples.py`)가 본문(`chunk_page`)만
+  적재하고 `chunk_attachment`(첨부)를 한 번도 호출하지 않았다. 청커·임베딩·인덱서는
+  이미 첨부를 완전히 지원하므로(무수정), 적재 스크립트에 wiring 만 추가해 해소.
+
+### 1. 진단 — 첨부 활용 8건의 검색 결과 분포 (baseline)
+
+| EVAL | 의도 | n_src | top1 | 매칭 결과 |
+|------|------|-------|------|-----------|
+| EVAL-019 (OOMKill) | 장애대응 | **0** | null | 검색 0건 |
+| EVAL-021 (DiskPressure) | 장애대응 | **0** | null | 검색 0건 |
+| EVAL-024 (Datadog 핵심 메트릭) | 운영가이드 | **0** | null | 검색 0건 |
+| EVAL-025 (Datadog 알람 임계값) | 운영가이드 | 1 | 88 | 부모 페이지 본문('모니터 시작하기')만 매칭 |
+| EVAL-034 (온보딩 1주차) | 운영가이드 | **0** | null | 검색 0건 |
+| EVAL-035 (ArgoCD 권한 요청) | 운영가이드 | 1 | 89 | 부모 페이지 본문만 매칭 |
+| EVAL-044 (Q1 평균 노드 수) | 이력조회 | **0** | null | 검색 0건 |
+| EVAL-046 (야간 비용 절감) | 이력조회 | **0** | null | 검색 0건 |
+
+- 8건 중 6건이 n_src=0 (검색 후보 0건). 첨부 청크가 인덱스에 존재하지 않아 어떤
+  필터·가중치로도 매칭 불가. 나머지 2건도 첨부가 아닌 부모 페이지 본문에 매칭.
+- 즉 **순위(ranking)·Pool 가중치 문제가 아니라 인덱싱 누락**. Pool 가중치 그리드
+  서치는 인덱싱 fix 이후에야 의미가 생긴다 (이번 세션 보류, 사용자 결정).
+
+### 2. 근본 원인 — ingest_samples.py 가 chunk_attachment 미호출
+
+- `scripts/ingest_samples.py` main 루프: `chunks.extend(chunk_page(page))` 만 수행.
+  `chunk_attachment(attachment, page)` 호출 누락 → 첨부 docx/xlsx 청크가 생성·적재
+  되지 않음. 평가는 `--use-real-adapters` 로 이 스크립트가 적재한 Qdrant 를 읽으므로,
+  첨부 청크 부재가 전건 검색 0건으로 직결.
+- **이미 완비되어 있던 것 (무수정)**:
+  - `app/ingestion/chunker/attachment.py` `chunk_attachment` — docx(Heading 1/2/3
+    섹션) / xlsx(시트→N행 그룹) 완전 구현. `local_path` 로 실 파일 직접 read.
+  - `app/adapters/json_fixture.py` `_map_attachments` — `local_path` 를
+    `samples/attachments/<filename>` 로, `download_url` 을 file:// URI 로 채움.
+  - `app/ingestion/embedding.py` `pool_embedding_texts` — 첨부 청크 title pool 을
+    `attachment_filename + section_header` 로 구성 (attachment_filename 가중 이미 반영).
+  - `app/ingestion/indexer.py` — source_type=ATTACHMENT 청크 3 Pool 적재 +
+    download_url payload 처리.
+  - `app/pipeline/ingestion_graph.py` `_chunk_documents_node` / `_process_attachment`
+    — **실 운영 ingestion 그래프는 첨부 청킹을 이미 정상 수행** (본문 + 유효 첨부).
+    누락은 데모/평가 적재 경로(scripts)에 국한.
+
+### 3. Fix — collect_chunks 헬퍼 분리 + 첨부 청킹 호출
+
+- `scripts/ingest_samples.py`:
+  - 청크 수집 로직을 순수 헬퍼 `collect_chunks(adapter) -> CollectedChunks` 로 분리
+    (Qdrant·모델 불요 → 단위 테스트 가능. CLAUDE.md "테스트 불가 구조면 구조 개선" 정합).
+  - 각 첨부에 `chunk_attachment(attachment, page)` 호출 → 본문 + 첨부 청크 합본.
+  - 미지원 유형(PDF/CSV=feature4-B 미구현 → `ValueError`)·파일 파싱 실패(임의 예외)는
+    `skipped_attachments` 에 (id, 사유) 기록 후 skip — 적재는 중단 없이 계속.
+  - main() 출력에 본문/첨부 청크 수 + skip 내역 표기.
+- **설계 결정 메모 (분석기 게이트 우회)**: `attachment_analyzer.analyze_attachment`
+  는 `extracted_text` 가 채워졌다고 가정하는 유효성 게이트인데, 데모 어댑터는
+  extracted_text 를 빈 문자열로 둔다 (실 운영에서는 추출 어댑터가 채우는 책임).
+  데모/평가 1회 적재는 `chunk_attachment` 가 `local_path` 로 파일을 직접 읽는
+  feature4-A 데모 용법(attachment.py 문서화)을 따르므로 분석기 게이트를 우회하고
+  청커를 직접 호출한다. **분석기 자체는 무수정** — 실 ingestion 그래프 경로는
+  분석기 게이트를 그대로 사용한다.
+
+### 4. 회귀 (`tests/scripts/test_ingest_samples.py` 신규 4건)
+
+- `test_collect_chunks_includes_attachment_chunks` — 실 samples 적재 시 본문 청크 +
+  첨부 청크 동시 수집, ATTACHMENT source_type, attachment_filename 보유, 4개 첨부
+  파일명 전부 청크 생성 확인.
+- `test_collect_chunks_total_is_body_plus_attachment` — 총합 = 본문 + 첨부, download_url
+  매핑 4건 이상.
+- `test_collect_chunks_skips_unsupported_attachment_type` — chunk_attachment 가
+  ValueError(PDF/CSV) → skip 기록, 적재 중단 없음, download_url 은 수집.
+- `test_collect_chunks_skips_parse_failure` — 임의 예외(손상 파일) → "파싱 실패" skip.
+- 첨부 청킹은 python-docx/openpyxl 로 실 파일 직접 read → sentence-transformers 등
+  embedding extras 불요, Qdrant·모델 없이 실행.
+
+### 5. 수정 파일
+
+- `scripts/ingest_samples.py` — collect_chunks 헬퍼 + CollectedChunks + 첨부 청킹 호출
+- `tests/scripts/test_ingest_samples.py` (신규, 4건)
+- `docs/ai/working-log.md` (본 단락)
+- `docs/ai/current-plan.md` (feature17c 첨부 인덱싱 항목 갱신)
+
+### 6. 검증 명령 / 결과
+
+- 본 세션 격리 검증 (사용자 Mac 외, Python 3.10 샌드박스):
+  - 4개 첨부 파일 직접 파싱 — docx 헤딩 44/14개, xlsx 시트 6/4개 + 행 다수 → 모두
+    청크 생성 가능 확인. EVAL 질문 대상 내용(OOMKill / DiskPressure / 메트릭 임계값 /
+    온보딩 "첫 주(Week 1)" / Q1 일자별 노드 수) 모두 첨부 본문에 존재.
+  - collect_chunks 제어 흐름(정상/ValueError skip/예외 skip) 재현 검증 통과.
+  - `ruff check .` All checks passed / `ruff format --check .` 141 files formatted.
+  - app import 회귀(pytest)는 StrEnum(3.11) 제약으로 사용자 Mac 에서 실행.
+
+### 후속 (사용자 Mac)
+
+1. `pytest tests/scripts/test_ingest_samples.py -v` (3.11) — 신규 4건 통과 확인.
+2. `./scripts/verify.sh` — 666 + 4 = **670 passed 예상**.
+3. **첨부 청크 재적재** — `python scripts/ingest_samples.py`
+   (`--use-mongo-cache` 시 mongo 필요). 멱등성(version_number)으로 기존 본문 청크는
+   재임베딩 skip, 신규 첨부 청크만 임베딩됨. 출력에 "본문 N + 첨부 M" 표기 확인.
+4. **50건 재평가** — `python scripts/run_evaluation.py --use-real-adapters --rouge-l
+   --bert-score` → 첨부 활용 8건 n_src>0 및 Precision@3 개선 확인 (before 12% 1/8).
+   전체 Precision@3 (before 68%) 변화도 함께 기록.
+5. before/after 결과를 본 단락에 추가 기록 → (사용자 결정 시) 527 v0.3.0 docx 반영.
+6. **후속 관찰 (이번 세션 범위 외)**: `app/api/deps.py::_ingest_samples` (PoC Mode A,
+   fake 임베더 경로) 도 동일하게 `chunk_page` 만 호출 → Mode A 데모에서도 첨부 검색
+   0건. 평가(real adapters)와 무관해 본 change-set 에서 제외. 동일 fix 적용 여부는
+   사용자 결정 (app→scripts 의존 방지 위해 deps.py 에 인라인 또는 app/ 공유 헬퍼 추출).
+
+### 7. 사용자 Mac 실측 결과 (재적재 + 재평가, 2026-05-20)
+
+- 재적재: `python scripts/ingest_samples.py` → **PageObject 92건 → Chunk 425건
+  (본문 374 + 첨부 51)**. 첨부 청크 51건이 정상 적재됨 (이전엔 0건).
+- 재평가: `reports/evaluation_20260520_044827.json` (vs baseline 034348).
+
+| 지표 | baseline(034348) | after(044827) | 변화 |
+|------|------------------|---------------|------|
+| 의도 분류 정확도 | 94% (47/50) | 94% (47/50) | = |
+| Precision@3 | 68% (34/50) | **72% (36/50)** | ▲ +2 hits |
+| 환각 비율(NOT_SUPPORTED) | 37.0% | **34.4%** | ▼ |
+| 응답 P95 | 18.1초 | **13.9초** | ▼ |
+| ROUGE-L F1 | 0.207 | 0.217 | ▲ |
+| BERTScore F1 | 0.674 | 0.677 | ▲ |
+| Top-1 평균 | 86.46 | 86.39 | = |
+
+- **첨부 활용 8건 before→after** (n_src / top1):
+  - EVAL-019 (OOMKill) 0→0 / EVAL-021 (DiskPressure) 0→0 / EVAL-024 (Datadog 핵심
+    메트릭) 0→0 / EVAL-025 (알람 임계값) 1→1(부모 본문) / EVAL-034 (온보딩 1주차)
+    **0→1(부모 본문, top1 86)** / EVAL-035 (ArgoCD 권한) 1→1(부모 본문) /
+    EVAL-044 (Q1 평균 노드 수) 0→0 / EVAL-046 (야간 비용 절감) 0→0.
+  - 즉 첨부 청크 51건을 적재했음에도 **첨부 활용 질의는 여전히 대부분 첨부 청크를
+    검색하지 못함** (5건 n_src=0 유지, hit 된 3건도 모두 부모 페이지 본문). 인덱싱
+    누락은 해소됐으나, 검색 단계에서 첨부 청크가 후보로 등장하지 못하는 **2차 원인**
+    이 별도로 존재함을 실측으로 확인.
+
+### 8. 2차 원인 진단 — metadata_filters 키 이름 불일치 (router 복수형 ↔ payload 단수형)
+
+- 코드 추적 결과: 라우터 `query_routing_agent/schemas/routing.py::MetadataFilter
+  .to_dict()` 가 emit 하는 키는 **`space_keys` / `document_types` / `source_types`
+  (복수형)** 인데, Qdrant payload 인덱스 필드(`app/storage/qdrant_client.py`
+  `_KEYWORD_INDEX_FIELDS`)는 **`space_key` / `doc_type` / `source_type` (단수형)**.
+  `labels` 만 양쪽 일치.
+- `app/query/search_node.py::_coerce_metadata_filters` 는 키를 그대로 통과시키고,
+  `qdrant_client._build_combined_filter` 가 `FieldCondition(key=<router 키>)` 로
+  필터를 만든다 → 라우터가 `space_keys`/`document_types`/`source_types` 를 비어있지
+  않게 채우면 **존재하지 않는 payload 필드로 must 필터** → 해당 질의 검색 0건.
+- baseline 68% 가 유지된 이유: 본문 질의는 라우터가 대개 빈 metadata_filters 를
+  emit → `_coerce` 가 빈 값을 거름 → 필터 미적용 → 정상 검색. 반면 첨부 활용 질의는
+  "매뉴얼 / 정의서 / 통계 / 체크리스트" 등 문서 유형·공간을 명시해 LLM 이
+  `document_types`·`space_keys` 를 채울 가능성이 높음 → 키 불일치로 0건. (가설:
+  `--debug-route "<EVAL-019 질의>" --use-real-adapters` 로 라우터 출력 metadata
+  _filters 확인 시 확정 가능 — 사용자 Mac.)
+- 또한 `attachment_required` (bool) 은 `_coerce` 가 str/list 가 아니라 드롭 중 —
+  첨부 질의에서 `source_type=attachment` 필터로 활용할 수 있는 신호가 버려짐.
+- **fix 위치는 본 담당자 영역** (`_coerce_metadata_filters` 어댑터). vendoring 라우터는
+  무수정 보존, 어댑터에서 router 복수형 키 → payload 단수형 필드명으로 매핑하면 해소.
+  단, 이는 attachment wiring 과 별개의 change-set 이며 모든 질의의 필터 동작에
+  영향을 주므로 회귀·재평가를 동반해야 함 → feature17c-5 후보 (사용자 동의 후 진행).
+
+---
+
+## 2026-05-20 — feature17c-5: metadata_filters 키 매핑 fix (router 복수형 → payload 단수형)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17c-4 재평가에서 실측 확인된 2차 원인(첨부 청크 적재 후에도 첨부
+  질의 5건 검색 0건)을 해소. 라우터 `MetadataFilter.to_dict()` 의 복수형 키
+  (`space_keys`/`document_types`/`source_types`)를 Qdrant payload 단수형 인덱스 필드
+  (`space_key`/`doc_type`/`source_type`)로 매핑. vendoring 라우터는 무수정 보존하고
+  본 담당자 어댑터(`app/query/search_node.py`)에서만 정합.
+
+### 1. 회귀 안전성 분석 (왜 단조 비harmful 인가)
+
+- 현재 통과 중인 질의(baseline Precision 68%)는 라우터가 **빈 metadata_filters** 를
+  emit → `_coerce` 가 빈 값을 거름 → 필터 미적용. 키 매핑은 빈 값에 영향 없음 → **무변경**.
+- 비어있지 않은 복수형 키를 emit 하는 질의는 **현재 존재하지 않는 payload 필드 필터로
+  검색 0건**(통과 중일 수 없음). 매핑 후: 값이 payload 와 일치하면 결과 반환(개선),
+  불일치하면 여전히 0건(중립). 따라서 현재 통과 질의에 회귀를 주지 않고, 현재 0건
+  질의만 개선되거나 그대로다 → **단조 개선/중립**.
+- `labels` 는 양쪽 동일하므로 매핑 불필요(기존 동작 유지). 단수형 payload 키를 직접
+  전달하는 경우(기존 회귀 `{"doc_type": "incident"}` 등)도 매핑에 없으므로 그대로
+  통과 → **후방 호환**.
+
+### 2. Fix — `_coerce_metadata_filters` 복수형 키 rename
+
+- `_ROUTER_PLURAL_TO_PAYLOAD_KEY = {space_keys→space_key, document_types→doc_type,
+  source_types→source_type}` 신설. 루프에서 `payload_key = MAP.get(raw_key, raw_key)`
+  로 복수형만 rename, 그 외 키는 그대로 통과.
+- `date_range`(dict) / `attachment_required`(bool) 은 str/list 가 아니라 기존 타입
+  거름 로직으로 자연히 드롭(단순 match 대상이 아님). 빈 list/빈 문자열 거름도 유지.
+
+### 3. 회귀 (`tests/query/test_search_node.py` +4건)
+
+- `test_hybrid_search_maps_plural_document_types_to_doc_type` — `document_types:
+  ["incident"]` (복수형) → doc_type=incident 청크만 매칭(in-memory Qdrant end-to-end).
+  매핑 전이라면 존재하지 않는 "document_types" 필드 필터로 0건이 되던 케이스.
+- `test_hybrid_search_maps_plural_space_keys_to_space_key` — `space_keys:["CLOUD"]`
+  매칭 시 결과>0, `["DEVOPS"]` 불일치 시 0건(필터 실제 적용 확인).
+- `test_hybrid_search_maps_plural_source_types_to_source_type` — `source_types:
+  ["page"]` → PAGE 청크 매칭.
+- `test_hybrid_search_drops_non_payload_filter_keys` — date_range/attachment_required
+  드롭 → 필터 미적용.
+- 기존 단수형 키 회귀(`{"doc_type": ...}`)·빈 값 회귀는 그대로 통과(후방 호환).
+
+### 4. 수정 파일
+
+- `app/query/search_node.py` — `_ROUTER_PLURAL_TO_PAYLOAD_KEY` + `_coerce_metadata
+  _filters` 복수형 키 rename
+- `tests/query/test_search_node.py` — 키 매핑 회귀 +4
+- `docs/ai/working-log.md` (본 단락)
+- `docs/ai/current-plan.md` (feature17c-5 추가)
+
+### 5. 검증 명령 / 결과
+
+- 본 세션 격리 검증 (Python 3.10 샌드박스):
+  - `_coerce` rename 로직 9 케이스(복수형 rename / 단수형 passthrough / 빈 값 드롭 /
+    mixed / dict·bool 드롭 / labels 유지) 재현 통과.
+  - `ruff check` All checks passed / `ruff format --check` 2 files formatted.
+  - app import 회귀(pytest)는 StrEnum(3.11) 제약으로 사용자 Mac.
+
+### 후속 (사용자 Mac)
+
+1. `pytest tests/query/test_search_node.py -v` (3.11) — 신규 4건 + 기존 회귀 통과.
+2. `./scripts/verify.sh` — 670 + 4 = **674 passed 예상** (mypy app 포함).
+3. **재적재 불요** (인덱스·payload 무변경, 검색 어댑터 필터 키만 수정). 바로 재평가:
+   `python scripts/run_evaluation.py --use-real-adapters --rouge-l --bert-score`.
+4. 첨부 활용 8건 n_src·Precision before(12%→feature17c-4 후 동일)/after 비교 +
+   전체 Precision@3 (feature17c-4 후 72%) 변화 기록. **회귀 안전성 분석상 하락은
+   없어야 함** — 하락 시 라우터가 doc_type-비호환 document_types 값을 emit 하는지
+   `--debug-route` 로 확인.
+5. (선택) `--debug-route "<EVAL-019/024/044 질의>" --use-real-adapters` 로 라우터가
+   실제 emit 하는 metadata_filters 값 확인 — 첨부 질의가 space_keys 만 채우면 첨부
+   청크가 검색되고, document_types(자유서술 값)를 함께 채우면 doc_type 불일치로 여전히
+   0건일 수 있음(첨부 청크 doc_type=docx/xlsx). 이 경우 첨부 질의에 한해 document_types
+   필터를 완화하거나 attachment_required→source_type=attachment 활용을 후속 검토.
+6. before/after 결과를 본 단락에 추가 기록 → (사용자 결정 시) 527 v0.3.0 docx 반영.
+
+### 6. 사용자 Mac 실측 결과 (재평가, 2026-05-20) — 집계 무변화, 정정 포함
+
+- 재적재 없이 재평가 2회 실행 (`reports/evaluation_20260520_051939.json`,
+  `..._052925.json`). 둘 다 feature17c-5 적용 후.
+
+| 지표 | 17c-4(044827) | 17c-5 run1(051939) | 17c-5 run2(052925) |
+|------|---------------|--------------------|--------------------|
+| Precision@3 | 72% (36/50) | 70% (35/50) | 72% (36/50) |
+| 환각 비율 | 34.4% | — | 33.8% |
+| ROUGE-L | 0.217 | — | 0.202 |
+| BERTScore | 0.677 | — | 0.674 |
+| 의도 정확도 | 94% | — | 94% |
+
+- **결론: feature17c-5 는 집계 지표를 유의미하게 움직이지 못했다.** Precision@3 는
+  70~72% 로 17c-4 와 사실상 동일.
+- **정정 (앞 §1 "단조 비-harmful" 분석 보강)**: 동일 코드(17c-5 적용 후) 2회 실행이
+  서로 다름 — EVAL-019 첨부 질의가 run1 n_src=0 / run2 n_src=2, Precision 35↔36.
+  → 첨부 개별 항목의 실행 간 차이는 **라우터 LLM(GPT-4o) 비결정성** 때문이며 코드
+  변경 효과로 귀속 불가. 앞서 "현재 통과 질의에 회귀 없음"은 집계 수준에서는 성립
+  (Precision 평탄)하나, **개별 항목 단조성은 LLM 비결정성으로 보장되지 않음** — 과신
+  이었음을 정정한다. (`_coerce` 키 매핑 자체의 정확성은 in-memory Qdrant end-to-end
+  단위 회귀 4건으로 검증됨 — 코드는 옳다.)
+
+### 7. 미해결 — 첨부 질의 결정적 0건 (다음 진단 필요)
+
+- EVAL-021(DiskPressure) / EVAL-024(Datadog 핵심 메트릭) / EVAL-044(Q1 평균 노드
+  수) / EVAL-046(야간 비용 절감)은 **모든 실행에서 일관되게 n_src=0**. 이들 답은
+  첨부에만 존재(본문에 없음)하는데, 첨부 청크 51건이 적재됐고 키 매핑도 고쳤음에도
+  검색 후보가 0건 → feature17c-4·17c-5 가 닿지 못한 **결정적 블로커가 별도로 존재**.
+- **가설(미검증, --debug-route 로 확정 필요)**: 라우터가 이들 질의에 `source_types`
+  또는 `document_types` 를 결정적으로 채우면, 17c-5 의 키 rename 후 `source_type`/
+  `doc_type` 필터가 활성화되어 **첨부 청크(source_type=attachment, doc_type=docx/
+  xlsx)를 must 필터로 배제**할 수 있다. 이 경우 17c-5 는 첨부 질의에 한해 오히려
+  배제를 활성화. 반대로 라우터가 빈 필터를 emit 하면 0건의 원인은 ACL 또는 임베딩
+  유사도 → 별도 원인.
+- **결정적 다음 진단 (사용자 Mac, 비용 작음)**:
+  1. `python scripts/run_evaluation.py --debug-route "EKS 운영 상세 매뉴얼 첨부에
+     따르면 노드 디스크 압박 (DiskPressure) 발생 시 권장 절차는?" --use-real-adapters`
+     → 라우터가 emit 하는 `metadata_filters`(space_keys/document_types/source_types/
+     attachment_required) 실측. 비어 있는지, source_type/doc_type 을 채우는지 확인.
+  2. `--debug-rerank` 동일 질의 → 검색 후보가 0건인지(필터로 전부 배제) vs 후보는
+     있는데 rerank/select 에서 떨어지는지 구분.
+- **이후 fix 방향 (진단 결과 의존, 추측 구현 금지)**:
+  - 라우터가 source_type=page / 본문 doc_type 을 채워 첨부를 배제하는 게 확인되면 →
+    `_coerce` 또는 search_node 에서 `attachment_required=true`(또는 의도) 시
+    source_type/doc_type 필터를 첨부 포함하도록 완화(어댑터 영역, vendoring 무수정).
+  - 라우터가 빈 필터인데도 0건이면 → ACL/임베딩 매칭(첨부 청크 ACL 상속·임베딩 입력)
+    재점검. 별도 change-set.
+
+---
+
+## 2026-05-20 — feature17c-6: metadata filter 0건 fallback 재검색 (검색 0건 구조적 방지)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17c-5 §7 의 "첨부 질의 결정적 0건" 근본 원인을 코드 정적 분석으로
+  확정하고, 구조적 fallback 으로 해소. 사용자가 RAG 폴더 전체(Agent 영역 포함) 수정
+  권한 부여 + Agent 담당자 허락 확인.
+
+### 1. 근본 원인 확정 (정적 분석)
+
+- `run_query` → 그래프는 `after_search_branch` 로 분기: `hybrid_search` 후보 0건이면
+  `empty_retrieval → END` 로 빠져 **`sources` 가 빈 채 종료**. 즉 평가의 `n_src=0`
+  ⟺ **hybrid_search 후보 0건**(생성/검증 단계 문제 아님).
+- `QdrantPoolStore.search` 는 `query_points(limit=top_k)` 로 **score 하한이 없다** →
+  필터(ACL must + metadata must)를 통과한 포인트가 하나라도 있으면 top_k 까지 반환.
+  따라서 후보 0건 ⟺ **ACL+metadata 필터가 모든 포인트를 배제**.
+- ACL 은 결정적(평가 사용자 7 space 허용). 따라서 결정적 0건의 원인은 **라우터가 emit
+  한 metadata filter 가 hard must 로 전부 배제**하는 것. 라우터의 metadata filter 는
+  LLM 추출값(자유서술 document_types 등)이라 payload(space_key/doc_type/source_type)
+  와 불일치하면 must 결합으로 전체 검색이 0건이 된다.
+- 정합 증거: EVAL-024(첨부, page 100009) 0건 vs EVAL-025(**같은 page 100009** 본문)
+  hit. 같은 페이지·ACL 인데 결과가 다른 것은 hard 필터가 전부 배제하는 게 아니라
+  **질의별로 라우터가 다른 metadata filter 를 emit** 하기 때문(LLM). 즉 일부 질의는
+  payload 불일치 필터를 받아 통째로 0건이 된다.
+
+### 2. Fix — 0건 시 metadata filter 완화 재검색
+
+- `app/query/search_node.py`:
+  - Pool 검색+RRF 결합 로직을 `_search_and_fuse(...)` 헬퍼로 분리(임베딩은 1회만
+    계산해 주입).
+  - `hybrid_search` 본체: metadata filter 적용 검색 결과가 **0건이고 metadata filter
+    가 있었으면**, ACL 은 유지한 채 `metadata_filters=None` 으로 **1회 재검색**.
+  - **0건일 때만 동작** → 유효 필터의 부분집합 결과를 덮어쓰지 않음(회귀 안전). 라우터
+    LLM 의 잘못된 추출 필터가 전체 검색을 무력화하지 못하도록 하는 구조적 가드.
+- 설계 정합: `_coerce` 의 "잘못된 값으로 검색이 망가지는 것보다 필터 미적용이 안전"
+  철학의 연장. 저신뢰 후보가 복구되어도 검증(NOT_SUPPORTED)·formatter 저신뢰 분기가
+  잘못된 답을 차단하므로, 0건보다 best-effort 후보가 RAG 로서 우월.
+
+### 3. 회귀 (`tests/query/test_search_node.py` +2건)
+
+- `test_hybrid_search_falls_back_when_metadata_filter_matches_nothing` — payload 에
+  없는 `doc_type:"does_not_exist"` → 1차 0건 → fallback 완화 재검색으로 ACL 통과
+  후보({a,b}) 복구.
+- `test_hybrid_search_no_fallback_when_metadata_filter_matches_subset` — `doc_type:
+  "incident"` 는 "a" 매칭(0건 아님) → fallback 미발동 → "a" 만 반환(필터 결과 보존).
+- 기존 회귀(키 매핑 4 / 빈 값 / 단수형 passthrough / pool_weights)는 모두 유지.
+
+### 3-b. PoC 경로(Mode A) 첨부 청킹 누락 동반 수정
+
+- 사용자가 RAG 폴더 전체(Agent 영역 포함) 수정 권한을 부여함에 따라, feature17c-4
+  에서 후속 관찰로 남겨둔 `app/api/deps.py::_ingest_samples`(PoC Mode A, fake 임베더
+  경로)의 동일 첨부 청킹 누락도 수정. `chunk_attachment` 호출 추가(미지원 유형·파싱
+  실패 skip) → Mode A 데모에서도 첨부 검색 가능. 실 운영 ingestion 그래프는 이미
+  첨부 청킹하므로 무관. `app→scripts` 의존 회피를 위해 deps.py 에 인라인(헬퍼 공유 X).
+- 회귀: `tests/api/test_deps.py::test_ingest_samples_includes_attachment_chunks` —
+  index_chunks mock 으로 적재 청크 캡처 → ATTACHMENT source_type + 4 첨부 파일명 확인.
+
+### 4. 수정 파일
+
+- `app/query/search_node.py` — `_search_and_fuse` 분리 + 0건 fallback 재검색
+- `app/api/deps.py` — `_ingest_samples` 첨부 청킹 추가 (PoC Mode A 경로, 3-b)
+- `tests/query/test_search_node.py` — fallback 회귀 +2
+- `tests/api/test_deps.py` — PoC 첨부 청킹 회귀 +1
+- `docs/ai/working-log.md` (본 단락)
+- `docs/ai/current-plan.md` (feature17c-6 추가)
+
+### 5. 검증 명령 / 결과
+
+- 본 세션 격리 검증 (Python 3.10 샌드박스):
+  - fallback 제어 흐름(0건→완화 재검색 / 부분매칭→미발동 / None·빈 필터→미발동)
+    시뮬 통과.
+  - `ruff check .` All checks passed / `ruff format --check .` 141 files formatted.
+  - app import 회귀(pytest)는 StrEnum(3.11) 제약으로 사용자 Mac.
+
+### 후속 (사용자 Mac)
+
+1. `pytest tests/query/test_search_node.py tests/api/test_deps.py -v` (3.11) —
+   신규(search_node 6 = 17c-5 4 + 17c-6 2 / deps 1) + 기존 회귀 통과.
+2. `./scripts/verify.sh` — 674 + 2(search_node) + 1(deps) = **677 passed 예상**
+   (mypy app 포함).
+3. **재적재 불요**. 바로 재평가: `python scripts/run_evaluation.py --use-real-adapters
+   --rouge-l --bert-score`.
+4. 첨부 활용 8건 n_src·Precision + 전체 Precision@3 (현 72%) before/after 기록.
+   기대: 라우터가 payload 불일치 필터를 emit 하던 질의(EVAL-021/024/044/046 등)가
+   0건 → 후보 복구로 전환. 첨부 청크가 충분히 관련되면 rerank 상위로 올라와 첨부
+   Precision 개선, 아니면 최소한 본문 best-effort 후보로 NOT_SUPPORTED 감소 가능.
+   **회귀 안전성 분석상 하락 없음** — 하락 시 보고.
+5. (선택) `--debug-route`/`--debug-rerank` 로 fallback 발동 여부·복구 후보 확인.
+6. before/after 결과를 본 단락에 추가 기록 → (사용자 결정 시) 527 v0.3.0 docx 반영.
+
+---
+
+## 2026-05-20 — feature17c-6 재평가 결과 + 검색 recall 근본 원인 재진단 (200자 프리뷰 병목)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 코드 변경 없음(진단·기록). 17c-6 재평가가 집계 무변화(Precision 72%)인
+  이유를 끝까지 추적해, **n_src=0 의 진짜 의미와 검색 recall 병목**을 확정.
+
+### 1. 17c-6 재평가 실측 (reports/evaluation_20260520_055216.json)
+
+- Precision@3 72%(36/50) — 17c-4/5 와 동일. not_supported 35.1%. 첨부 8건도 거의
+  동일(EVAL-019 는 실행마다 0↔2 변동=LLM 비결정성).
+- **n_src=0 항목 12건**: EVAL-006/010/019/021/022/024/032/036/038/041/044/046.
+  첨부 외 본문 질의가 다수 포함됨 → "첨부만의 문제"가 아니라 전반적 recall 문제.
+
+### 2. n_src=0 의 진짜 의미 — "검색 0건"이 아니라 "생성기 거부"
+
+- 12건 모두 **verification 항목이 존재**하고 답변이 명시적 거부체:
+  "제공된 context에는 …에 대한 정보는 …확인할 수 없습니다" / "출처로 뒷받침되지 않아
+  보류". 즉 **generate 노드가 실행됨 = 검색은 후보를 반환**(empty_retrieval 아님).
+- `state.sources` 는 generator 가 **실제 인용한 청크**(`_agent_sources_to_rag_sources`)
+  로만 채워진다 → 생성기가 아무 청크도 인용 못 하면(=받은 context 에 답 없음) n_src=0.
+- 결론: 앞선 "n_src=0 ⟺ 검색 0건"(17c-6 §1)은 **부분적으로 틀림**. 실제로는 검색은
+  후보를 주는데 **정답 청크가 top_chunks 에 안 들어가거나, 들어가도 200자만 전달**되어
+  생성기가 거부하는 경우가 지배적. (17c-6 fallback 은 진짜 검색 0건만 방어 — 여전히
+  유효한 robustness 가드이나 본 병목의 주 레버는 아님.)
+
+### 3. 근본 병목 — rerank·생성기가 200자 text_preview 로 동작
+
+- `app/ingestion/vector_store.py::build_point_payload` 는 payload 에 `text_preview =
+  chunk.text[:200]` 만 저장(풀텍스트는 `chunk_lookup`(Mongo) 별도 컬렉션, db-schema
+  §2.5).
+- `app/query/search_node.py::_chunk_from_search_hit` 는 `chunk.text = payload
+  ["text_preview"]`(200자)로 candidate 를 재구성.
+- `app/query/rerank_node.py` 는 `passages = [chunk.text ...]`(200자 프리뷰)로
+  Cross-Encoder 점수 산출. `app/query/generator.py::_chunk_to_top_context_payload`
+  도 `"content": chunk.text`(200자)로 LLM 컨텍스트 구성.
+- 즉 **재순위·답변 생성 전 구간이 200자 프리뷰로만 동작**. 정답이 200자 뒤(섹션
+  도입부·헤딩 다음)에 있는 청크는 (a) reranker 가 낮게 점수→top-K 탈락, (b) 선택돼도
+  LLM 이 200자만 보고 "정보 없음" 거부. → 본문·첨부 공통 recall 실패.
+- 게다가 사용자가 `ingest_samples.py` 를 `--use-mongo-cache` **없이** 실행
+  ("Fake cache + chunk_lookup 사용" 로그) → 풀텍스트가 Mongo 에 영속 안 됨 →
+  평가의 `build_real_deps`(MongoChunkTextLookup) 가 읽을 chunk_lookup 이 **사실상
+  비어 있음**. 설령 rerank/generator 가 chunk_lookup 을 조회하도록 고쳐도 데이터가
+  없으면 무효 — 적재 단계 동반 필요.
+
+### 4. 일부 평가 항목은 코퍼스에 답이 없음 (잘못된 bootstrap 라벨)
+
+- 코퍼스(samples) 정적 확인 결과:
+  - **EVAL-021 (DiskPressure)**: EKS docx 에 "DiskPressure/디스크 압박" **0건**
+    (OOMKill 만 1건). → 생성기 거부가 **정답**(환각 아님). 답이 없는 질문.
+  - **EVAL-046 (야간 시간대 비용 절감)**: 통계 xlsx 에 야간/비용/절감/cost **0건**
+    (시간대별 CPU 평균만 존재, 비용 데이터 없음). → 거부가 정답.
+  - **EVAL-044 (Q1 평균 노드 수)**: 일자별 노드 수 원자료는 있으나 "평균"은 미산출
+    → 집계가 필요해 단순 검색·생성으로는 한계(경계 케이스).
+  - 반면 **답이 코퍼스에 분명히 있는데 0건인 진짜 recall 실패**: EVAL-006(RDS
+    PostgreSQL 운영 가이드 페이지 존재), EVAL-022(ElastiCache Redis 운영 가이드),
+    EVAL-024(Datadog 메트릭 정의서 "클러스터 메트릭" 시트), EVAL-032/041(Terraform
+    버전 관리/코딩 컨벤션 페이지), EVAL-038(GCP IAM 권한 관리 페이지).
+- 함의: 현재 Precision 72%·환각 35% 의 일부는 **답이 없는 질문에 올바르게 거부**한
+  것이라 부당하게 나쁘게 보임. 평가셋 정제(답 없는 항목 제거/수정)와 recall fix 를
+  분리해야 정확한 측정이 가능.
+
+### 5. fix 방향 (사용자 결정 — DB 스키마 트레이드오프)
+
+- **Option A — Qdrant payload 에 풀텍스트(`text`) 저장**: `build_point_payload` 가
+  `text`(full)+`text_preview`(200자, UI용) 동시 저장 → `_chunk_from_search_hit` 가
+  full `text` 로 재구성 → rerank·generator 가 **코드 변경 없이**(generator=Agent 영역
+  무수정) 풀텍스트 사용. Mongo 의존 제거. 단점: payload 3 Pool × full text 로 커짐
+  (데모 코퍼스엔 무시 가능, 운영 대규모엔 메모리 부담). db-schema §1.2 변경 필요.
+- **Option B — rerank·generator 가 chunk_lookup 풀텍스트 조회**: payload 스키마 유지.
+  단점: `ingest_samples.py --use-mongo-cache` 로 chunk_lookup populate 필수(운영
+  footgun), rerank 가 전 candidate Mongo 조회(부하), generator(Agent) 수정 필요.
+- **권장: Option A** (본 프로젝트 코퍼스 규모·데모 성격상 단순·견고. 운영 스케일
+  필요 시 후속에 Option B 로 전환). 단 DB 스키마 결정이라 사용자 확인 후 진행.
+- 병행 권장: 평가셋의 답 없는 항목(EVAL-021/046) 정제 — 별도 결정.
+
+---
+
+## 2026-05-20 — feature17c-7: Qdrant payload 풀텍스트 저장 (200자 프리뷰 recall 병목 해소)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 사용자 결정(Option A)에 따라, 재순위·답변 생성이 200자 프리뷰가 아닌
+  **풀 텍스트**로 동작하도록 Qdrant payload 에 풀 텍스트(`text`)를 동봉. 평가셋의
+  답 없는 항목 정제는 이번 change-set 에서 제외(사용자 결정).
+
+### 1. 변경 내용
+
+- `app/ingestion/vector_store.py::build_point_payload` — payload 에 `"text":
+  chunk.text`(풀 텍스트) 추가. `text_preview`(200자)는 UI 출처 카드용으로 유지.
+- `app/query/search_node.py::_chunk_from_search_hit` — `chunk.text` 를
+  `payload["text"]`(풀 텍스트)로 복원. legacy 인덱스(text 없음)는 `text_preview`
+  로 fallback(후방 호환).
+- `app/query/rerank_node.py::_chunk_to_source` — `chunk.text` 가 풀 텍스트가 되었으
+  므로 `Source.text_preview` 를 200자로 절단(`_SOURCE_TEXT_PREVIEW_LIMIT`). UI
+  미리보기 폭 유지.
+- **Agent 영역(generator) 무수정**: generator 는 `chunk.text` 를 그대로 컨텍스트로
+  쓰는데, 그 값이 자동으로 풀 텍스트가 되어 별도 수정 없이 풀 텍스트 컨텍스트를
+  받는다. rerank 도 `chunk.text` 로 점수 산출 → 풀 텍스트 기반 재순위. 즉 Pipeline
+  레이어 한 곳(payload+재구성) 변경으로 rerank·generation 양쪽이 동시에 고쳐진다.
+- `docs/db-schema.md` §1.2 — `text` 필드 추가 + 운영 스케일 트레이드오프 명시.
+
+### 2. 효과 (가설 — 사용자 Mac 재평가로 확정)
+
+- 정답이 청크의 200자 뒤(섹션 도입부·헤딩 다음)에 있어도 (a) reranker 가 풀 텍스트로
+  점수 산출 → top-K 탈락 방지, (b) 생성기가 풀 텍스트 컨텍스트 → "정보 없음" 거부
+  감소 → n_src>0 + 환각(NOT_SUPPORTED) 감소 + Precision 개선 기대.
+- 답이 코퍼스에 분명히 있는데 0건이던 EVAL-006/022/024/032/038/041 등이 주 수혜
+  대상. 답이 없는 EVAL-021/046 은 여전히(올바르게) 거부.
+
+### 3. 회귀
+
+- `tests/ingestion/test_vector_store.py::test_build_point_payload_stores_full_text`
+  — payload 에 풀 텍스트 저장 + text_preview 200자 절단 유지.
+- `tests/query/test_search_node.py::test_hybrid_search_reconstructs_full_text_not_preview`
+  — 200자 초과 본문이 candidate.text 에 풀로 복원됨(end-to-end :memory: Qdrant).
+- `tests/query/test_search_node.py::test_chunk_from_search_hit_falls_back_to_preview_for_legacy_payload`
+  — legacy payload(text 없음)는 text_preview fallback.
+- 기존 회귀: 짧은 본문 픽스처라 풀 텍스트==프리뷰 → test_search_node/test_rerank_node/
+  test_vector_store 의 text_preview·text 단언 모두 유지.
+- **회귀 상호작용 정정 (사용자 verify.sh 에서 발견)**: 17c-5 의
+  `test_hybrid_search_maps_plural_space_keys_to_space_key` 의 "miss(DEVOPS)→0건"
+  단언이 17c-6 fallback 도입으로 깨짐(0건 → filter 완화 재검색으로 CLOUD 후보 복구).
+  fallback 이 의도대로 동작한 것이라 코드가 아닌 테스트가 낡음. candidate 수로는
+  rename 검증이 불가(fallback 이 항상 복구)하므로, 키 rename 을 fallback 무관한
+  `_coerce_metadata_filters` 단위 테스트(`test_coerce_metadata_filters_renames_
+  plural_keys_to_payload_fields`)로 교체. document_types e2e 테스트는 subset 매칭
+  (incident 만 매칭→{a})이라 fallback 과 무관하게 유효해 유지.
+
+### 4. 수정 파일
+
+- `app/ingestion/vector_store.py` — payload 에 `text` 추가
+- `app/query/search_node.py` — `_chunk_from_search_hit` 풀 텍스트 복원
+- `app/query/rerank_node.py` — `_chunk_to_source` text_preview 200자 절단 + 상수
+- `tests/ingestion/test_vector_store.py` — 회귀 +1
+- `tests/query/test_search_node.py` — 회귀 +2 (주석 1건 갱신)
+- `docs/db-schema.md` — §1.2 `text` 필드
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증 명령 / 결과
+
+- 본 세션 격리 검증 (Python 3.10 샌드박스): `ruff check .` All checks passed /
+  `ruff format --check` 통과. payload `text` 선택 로직(full→preview fallback) 자명.
+  app import 회귀(pytest)는 StrEnum(3.11) 제약으로 사용자 Mac.
+
+### 후속 (사용자 Mac) — ★재적재 필수★
+
+1. `pytest tests/ingestion/test_vector_store.py tests/query/test_search_node.py -v` (3.11).
+2. `./scripts/verify.sh` — 677 + 3 = **680 passed 예상** (mypy app 포함).
+3. **★재적재 필수★** (payload 스키마 변경 — text 필드 추가). 기존 인덱스에는 text 가
+   없으므로 반드시 재적재해야 풀 텍스트가 저장된다:
+   `python scripts/ingest_samples.py` (멱등성으로 version 동일 시 스킵될 수 있으니,
+   필요하면 Qdrant 컬렉션 초기화 후 재적재 — `docker compose down -v && up` 또는
+   컬렉션 drop. 재적재 로그의 청크 수 확인).
+   - 멱등성 주의: `should_skip_embedding` 이 version_number 동일이면 재임베딩을
+     스킵하므로, payload 갱신을 위해 **컬렉션을 비우고 재적재**하는 것이 확실하다.
+4. `python scripts/run_evaluation.py --use-real-adapters --rouge-l --bert-score` →
+   before(072925/055216, Precision 72% / 환각 35% / 12 zero-source) 대비
+   Precision@3 / not_supported / 첨부·본문 0-source 항목 수 변화 기록.
+5. before/after 를 본 단락에 추가 기록 → (사용자 결정 시) 527 v0.3.0 docx 반영.
+
+---
+
+## 2026-05-20 — feature17c-8: 첨부 download_url lookup 실패 graceful degrade (쿼리 가용성)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 17c-7 재적재 후 재평가가 `pymongo ServerSelectionTimeoutError` 로 크래시
+  하는 것을 발견(사용자가 `docker compose up -d qdrant` 로 Qdrant 만 띄우고 Mongo 는
+  미기동). rerank 의 첨부 download_url 조회(`_fetch_attachment_download_urls`)가
+  chunk_lookup(Mongo) 장애를 그대로 전파해 **쿼리 전체가 실패**하던 robustness 버그를
+  수정.
+
+### 1. 원인
+
+- `app/api/deps.py::build_real_deps` 는 `MongoChunkTextLookup` 을 wiring. query 경로의
+  유일한 Mongo 접점은 rerank 의 첨부 download_url 배치 조회다.
+- `_fetch_attachment_download_urls` 가 `lookup.fetch_many` 예외를 잡지 않아 Mongo
+  미기동/장애 시 `ServerSelectionTimeoutError` 가 rerank 노드 → 그래프 → run_query
+  로 전파되어 50건 평가가 1건째에서 중단.
+- download_url 은 **UI 출처 카드의 부가 정보**(첨부 다운로드 링크)이지 검색·생성
+  필수 데이터가 아니다. 특히 17c-7 이후 첨부 청크는 **payload 풀텍스트로 검색·생성
+  되므로 chunk_lookup 없이도 동작**한다(download_url 만 누락).
+
+### 2. Fix
+
+- `_fetch_attachment_download_urls` 의 `lookup.fetch_many` 를 try/except 로 감싸,
+  조회 실패 시 `logger.warning` 후 빈 dict 반환 → download_url 없이 graceful degrade.
+  본문·첨부 검색·생성 품질에는 영향 없음.
+- `app/query/rerank_node.py` 에 `logging` + 모듈 logger 추가.
+
+### 3. 회귀 (`tests/query/test_rerank_node.py` +1)
+
+- `test_download_url_lookup_failure_degrades_gracefully` — fetch_many 가 RuntimeError
+  를 던지는 lookup 으로도 rerank 가 top_chunks/sources 를 정상 생성 + download_url=None.
+
+### 4. 수정 파일
+
+- `app/query/rerank_node.py` — fetch_many 예외 graceful degrade + logger
+- `tests/query/test_rerank_node.py` — 회귀 +1
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증 / 후속 (사용자 Mac)
+
+- `./scripts/verify.sh` — 680 + 1 = **681 passed 예상**.
+- **재평가 재실행**: 17c-8 로 Mongo 미기동이어도 크래시 없이 완주한다. 단 첨부
+  download_url 을 UI 에서 보려면 Mongo 기동 권장 — `docker compose up -d` (qdrant +
+  mongo + mysql 전체). recall fix(17c-7) 효과 측정은 Mongo 불요(payload 풀텍스트).
+  - `docker compose up -d` → (이미 17c-7 재적재 완료: 본문 374 + 첨부 51 = 425건) →
+    `python scripts/run_evaluation.py --use-real-adapters --rouge-l --bert-score`.
+- 재평가 결과(Precision@3 / not_supported / 0-source 항목 수)를 17c-7 §후속 에 기록.
+
+---
+
+## 2026-05-20 — feature17c-7/8 재평가 실측 (★Precision KPI 충족★)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 코드 변경 없음(측정·기록). 17c-7(payload 풀텍스트) + 17c-8(download_url
+  graceful degrade) 적용 후, 컬렉션 초기화 재적재(425건) + Mongo 기동 후 50건 재평가.
+
+### 1. 실측 결과 (reports/evaluation_20260520_063441.json)
+
+| 지표 | baseline 17c-3(034348) | 17c-6(055216) | **17c-7/8(063441)** | KPI |
+|------|------------------------|----------------|----------------------|-----|
+| 의도 분류 정확도 | 94% | 94% | **94%** (47/50) | 90% ✅ |
+| **Precision@3** | 68% | 72% | **80% (40/50)** | 75% ✅ **충족** |
+| n_src=0 항목 수 | — | 12 | **6** | — |
+| NOT_SUPPORTED 비율 | 37.0% | 35.1% | 39.2% (76/194) | 15% ⚠ |
+| verification 문장 수 | 154 | 151 | **194** | — |
+| 응답 P95 | 18.1초 | 15.0초 | 19.4초 | streaming 권장 |
+| ROUGE-L F1 | 0.207 | — | 0.201 | — |
+| BERTScore F1 | 0.674 | — | 0.669 | — |
+| Top-1 평균 | 86.46 | — | 86.09 | — |
+
+- **Precision@3 68→80% (KPI 75% 충족)** — 풀텍스트 fix 가 recall 병목을 실제로
+  해소했음을 실측 확인. n_src=0 항목 12→6 으로 절반 감소.
+
+### 2. n_src=0 → sources 회복 (6건)
+
+- **회복(12→6)**: EVAL-010 / 019 / 022 / 036 / 038 / 046 — 200자 프리뷰 한계로
+  거부되던 질의가 풀텍스트 컨텍스트로 답변·인용 생성.
+- **잔여 0건 6건 분류**:
+  - 답이 코퍼스에 없음(올바른 거부): **EVAL-021**(DiskPressure — docx 미수록).
+  - 집계 필요(경계): **EVAL-044**(Q1 평균 노드 수 — 일자별 원자료만, 평균 미산출).
+  - **진짜 잔여 recall 실패**(정답 페이지 존재하나 미검색): **EVAL-006**(RDS 백업
+    복구 p100028) / **EVAL-024**(Datadog 클러스터 메트릭 p100009, 검증에서 BLOCKED)
+    / **EVAL-032**(Terraform 버전 p100039) / **EVAL-041**(Terraform 네이밍 p100040).
+    → 정답 청크가 검색 후보/rerank top 에 못 들어옴. Pool 가중치/임베딩/청크 단위
+    문제 → 다음 단계(원 미션의 Pool 가중치 그리드 서치) 대상.
+
+### 3. NOT_SUPPORTED 비율 상승 해석 (35→39%)
+
+- verification 문장 수가 151→194 로 증가 — 풀텍스트로 생성기가 **거부 대신 더 많은
+  답변을 시도**하면서 문장 총량이 늘었다. NOT_SUPPORTED count 57→76, 비율 39%.
+- 즉 "환각 증가"가 아니라 "답변 시도 증가에 따른 per-sentence 검증 부담 증가" 측면이
+  크다. 다만 절대 비율은 KPI(15%) 초과 상태로 잔존 — 생성기 prompt 튜닝(Agent 영역,
+  보류) + 잔여 recall 개선으로 함께 낮춰야 함. 별도 측정·튜닝 대상.
+
+### 4. latency 상승 (P95 15→19초)
+
+- 풀텍스트 → rerank passage·LLM 컨텍스트 토큰 증가로 처리 시간 증가(트레이드오프).
+  설계서 §4.6.4 streaming 사용 시 첫 토큰 1초대로 체감 완화(본 저장소 streaming 경로
+  보유). non-streaming P95 는 KPI 측정 대상 외(BFF/UI stream=true 권고 유지).
+
+### 5. 후속 (다음 세션 후보)
+
+- **잔여 recall 4건(006/024/032/041)** — Pool 가중치 그리드 서치(의도별 title/
+  content/label 조합) + 정답 페이지가 왜 후보에 안 드는지 `--debug-rerank` 로 후보
+  분포 확인. 청크 단위(섹션 과대/과소)·E5 한국어 임베딩 품질도 점검.
+- **NOT_SUPPORTED 39%** — 생성기 prompt 보수성 튜닝(Agent 영역 — 담당자 협의/이관).
+- **평가셋 정제** — EVAL-021(DiskPressure)/046(야간비용) 등 코퍼스에 답 없는 항목
+  분리(is_answerable 플래그)해 Precision/환각 측정 공정성 확보(사용자 결정 대기).
+- 527 리포트 v0.3.0 docx 갱신(Precision KPI 충족 반영) — 사용자 결정 대기.
+
+---
+
+## 2026-05-20 — feature17c-9: Pool 가중치 그리드 서치 도구 + debug-rerank 후보 분포
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 잔여 recall 4건(EVAL-006/024/032/041 — 정답 페이지 존재하나 rerank top-3
+  진입 실패, 형제 페이지 경합)을 진단·튜닝하기 위한 도구를 `scripts/run_evaluation.py`
+  에 추가. 코드 경로(검색·rerank·생성) 자체는 무변경 — 측정·실험 도구만 확장.
+
+### 1. 형제 페이지 경합 진단 (정적)
+
+- 잔여 4건의 정답 페이지는 코퍼스에 존재하나 유사 형제 페이지가 다수라 rerank top-3
+  경합에서 밀리는 것으로 추정:
+  - Terraform 페이지 4개(100034 State Lock / 100038 버전관리정책 / 100039 모듈구조 /
+    100040 코딩컨벤션) → EVAL-032("모듈의 버전 관리" exp 100039) / EVAL-041("네이밍
+    컨벤션" exp 100040) 가 형제와 경합.
+  - RDS 2개(100018 장애대응 / 100028 운영가이드) → EVAL-006(exp 100028).
+  - EVAL-024(Datadog 클러스터 메트릭 exp 100009)는 검증에서 BLOCKED(부분 검색 후
+    NOT_SUPPORTED 과반).
+- → fine-grained 검색 정밀도 문제. Pool 가중치(title/content/label) 조정으로 정답
+  페이지를 상위로 끌어올릴 수 있는지 실험 필요. 단, 후보 분포 실측이 선행돼야 함.
+
+### 2. `--debug-rerank` 후보 페이지 분포 출력 확장
+
+- 기존: raw logit 분포 + T별 sigmoid 미리보기만 출력(temperature 결정용).
+- 추가: **후보별 page 분포 테이블** — rerank logit 내림차순으로 `rank | T4score |
+  logit | src(page/ATT) | page_id | filename·title / section` + Top-5 마커. 정답
+  page_id 가 후보(Top-20)에 있는지, rerank 후 몇 위인지(Top-5/3 진입 여부)를 한 번에
+  확인 → recall 실패가 검색 누락인지 rerank 밀림인지 판별. intent/pool_weights/
+  metadata_filters 도 함께 출력.
+
+### 3. `--pool-weights` 그리드 서치 오버라이드
+
+- `--pool-weights 'title:0.25,content:0.6,label:0.15'` — 모든 질의의 라우터 pool
+  _weights 를 강제 오버라이드(라우팅 정확도·의도 분류는 그대로, 가중 융합만 교체).
+- 구현: `_run_evaluation` 이 deps.router_node 를 래퍼로 교체 — 래퍼가 실 manage_router
+  (provider/config captured)를 호출한 뒤 `state.pool_weights` 를 오버라이드. vendoring
+  라우터·search_node 무수정.
+- `_parse_pool_weights` — title/content/label 단축키 → Pool 이름 매핑 + 3 Pool 강제.
+- summary 에 `pool_weights_override` 기록 — 어떤 가중치로 측정했는지 리포트에 남김.
+
+### 4. 수정 파일
+
+- `scripts/run_evaluation.py` — `--pool-weights` + `_parse_pool_weights` + 라우터
+  래핑 오버라이드 + `--debug-rerank` 후보 분포 테이블 + summary.pool_weights_override
+- `tests/scripts/test_run_evaluation.py` — `_parse_pool_weights` 회귀 +4
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증 / 사용법 (사용자 Mac)
+
+- `./scripts/verify.sh` — 681 + 4 = **685 passed 예상**.
+- **잔여 4건 후보 분포 진단** (full eval 불요, 질의당 수 초):
+  - `python scripts/run_evaluation.py --debug-rerank "Terraform 모듈의 버전 관리 규칙은?" --use-real-adapters`
+    (EVAL-032) → 100039 가 후보에 있는지/몇 위인지 확인. 006/024/041 도 동일.
+  - 정답 page_id 가 Top-20 후보에 없으면 → 검색(임베딩/Pool) 문제, 있는데 Top-3 밖이면
+    → rerank/Pool 가중치 문제.
+- **Pool 가중치 그리드 서치** (조합당 ~10분 + OpenAI 비용):
+  - baseline 비교용으로 의도별 가중치 조합을 바꿔가며:
+    `python scripts/run_evaluation.py --use-real-adapters --pool-weights 'title:0.4,content:0.5,label:0.1'`
+    등 → Precision@3 / 잔여 4건 hit 여부 비교. 결과를 본 단락에 기록.
+- 진단 결과에 따라 fix 방향 결정(추측 구현 금지): 검색 누락이면 임베딩 입력·Pool 구성,
+  rerank 밀림이면 Pool 가중치 또는 청크 granularity.
+
+### 6. 도구 버그 fix (사용자 Mac 에서 발견) — 라우터 래퍼 annotation
+
+- `--pool-weights` 1차 실행이 `NameError: name 'RagState' is not defined` 로 크래시.
+  LangGraph `add_node` 가 노드 콜러블에 `get_type_hints` 를 호출하는데, 래퍼
+  `_router_with_pool_override(state: RagState)` 의 annotation 을 run_evaluation 모듈
+  globals 에서 평가하려다 실패(RagState 는 함수 내부 lazy import). annotation 을
+  `state: Any`(모듈 상단 import 됨)로 변경해 해결. verify 685 passed 유지.
+
+### 7. `--debug-rerank` 실측 진단 (EVAL-032 / EVAL-006) — recall 실패의 진짜 원인
+
+실측 결과, 잔여 recall 실패는 **검색 누락이 아니라 Cross-Encoder 재순위 변별력 부족 +
+코퍼스 노이즈**임이 확정:
+
+- **EVAL-032 (Terraform 모듈의 버전 관리, 정책절차)**: 정답 페이지 100039(모듈 구조)는
+  후보에 있으나 **rank #13/#15 — Top-5 밖**. Top-5 를 datadog_docs.json 의 일반 제품
+  문서("Terraform 시작하기", page_id dda…)와 FAQ·State Lock 이 점령. logit 8.42→6.65
+  로 **매우 평탄** → ms-marco Cross-Encoder 가 유사 Terraform 페이지를 변별 못 함.
+  "버전 관리 정책" 페이지 100038 조차 #8/#10. → Pool 가중치로 #13 을 Top-3 까지 끌어
+  올리긴 어려움.
+- **EVAL-006 (RDS 백업복구, 운영가이드)**: 정답 페이지 100028 은 **#4 — Top-3 밖 한 끗**.
+  Top-3 = 100018(RDS 장애대응) / 100045(보안 기준선) / **100024(Route53 — 완전 무관,
+  logit 6.149 > 100028 의 5.497)**. Cross-Encoder 가 무관 페이지를 정답보다 높게 랭크.
+  게다가 검색된 100028 섹션이 "인스턴스 현황"/"성능 모니터링" 으로 **"백업과 복구"
+  섹션이 후보에 없음** → 해당 섹션 청크의 임베딩 매칭 실패(또는 섹션 부재).
+
+### 8. 종합 진단 — 병목은 이제 Cross-Encoder 변별력 + 코퍼스 노이즈
+
+- **(A) Cross-Encoder 변별력**: `cross-encoder/ms-marco-MiniLM-L-12-v2` 는 영어 MS-MARCO
+  학습 모델로, **한국어 기술 문서 간 미세 변별이 약함**(logit 평탄, 무관 페이지를 상위로).
+  → 가장 임팩트 큰 레버는 **다국어/한국어 reranker 교체**(예: `BAAI/bge-reranker-v2-m3`,
+  `Dongjin-kr/ko-reranker`). config `cross_encoder_model` 교체 + 점수 스케일 달라지므로
+  temperature(T=4)·임계값(select 0.55/0.65, formatter 55, golden 0.80) 재튜닝 + 재평가
+  필요. 큰 실험(모델 다운로드 + 재튜닝 cascade)이라 사용자 결정·실행 대상.
+- **(B) 코퍼스 노이즈**: datadog_docs.json 의 일반 제품 가이드("~ 시작하기")가 Confluence
+  답변 페이지와 Top-K 경합. 평가 목적상 노이즈. (의도적 포함이면 유지, 아니면 분리 검토.)
+- **(C) Pool 가중치**: #4 같은 경계 케이스(EVAL-006)는 가중치로 Top-3 진입 가능성 있으나,
+  #13(EVAL-032)은 어려움. `--pool-weights` 그리드로 경계 케이스 효과만 측정 권장.
+- **(D) 청크 granularity**: EVAL-006 의 "백업과 복구" 섹션이 후보에 없음 → 섹션 청킹·
+  임베딩 입력 점검(별도).
+
+### 9. 권장 우선순위 (사용자 결정)
+
+1. **다국어 reranker 교체 실험** (A) — 가장 임팩트 큼. config 교체 + 재튜닝 + 재평가.
+   원하면 본 담당자가 config 와이어링 + 임계값 재튜닝 프레임워크를 준비.
+2. **Pool 가중치 그리드** (C) — `--pool-weights` 로 경계 케이스(006 등) 즉시 측정(저비용).
+3. **평가셋 정제 + 코퍼스 노이즈 분리** (B) — 측정 공정성.
+
+---
+
+## 2026-05-20 — feature17c-10: 다국어 Cross-Encoder reranker 교체 (한국어 변별력)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17c-9 진단(§7~8)에서 확정된 "ms-marco Cross-Encoder 의 한국어
+  변별력 부족" 병목을 해소하기 위해, reranker 모델을 다국어 모델로 교체. 사용자 선택
+  (다국어 reranker 교체, 임팩트 최대).
+
+### 1. 변경 — config 기본값 교체 (reranker impl 무변경, 모델 비종속)
+
+- `app/config.py`:
+  - `cross_encoder_model`: `cross-encoder/ms-marco-MiniLM-L-12-v2` →
+    **`BAAI/bge-reranker-v2-m3`** (다국어, 한국어 포함).
+  - `cross_encoder_temperature`: `4.0` → **`1.0`**. bge reranker 는 sigmoid(logit)
+    자체가 관련도로 보정된 모델이라 T>1 은 분포를 0.5 로 압축(악화). ms-marco 의
+    saturation 완화용 T=4 hack 을 직접 sigmoid(T=1)로 되돌린다.
+- `app/query/reranker/cross_encoder.py` — 클래스 docstring 을 모델 비종속으로 갱신
+  (impl 은 `CrossEncoder(model_name)` 로 임의 HF cross-encoder 로드 → bge 포함 무변경).
+- `.env.example` — `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3` +
+  `RAG_CROSS_ENCODER_TEMPERATURE=1.0` + 설명.
+
+### 2. 왜 reranker impl 코드 변경이 불필요한가
+
+- `CrossEncoderRerankerImpl.__init__` 가 `CrossEncoder(model_name, device=device)` 로
+  config 모델을 로드하고 `predict()` logit 에 `sigmoid(logit/T)` 를 적용한다. bge-
+  reranker-v2-m3 는 표준 sequence-classification cross-encoder(XLM-RoBERTa 기반,
+  trust_remote_code 불요)라 동일 경로로 로드된다. 즉 모델 교체는 config 값 변경만으로
+  충분.
+
+### 3. 임계값 영향 (중요 — Precision@3 무관, 분기/Golden 만 영향)
+
+- Precision@3 는 Cross-Encoder **점수 순위**로 결정 → bge 가 한국어 변별을 잘하면
+  순위가 개선되어 정답 페이지가 Top-3 진입(직접 효과).
+- select_reranked(LOW 0.55 / NARROW 0.65) / formatter(LOW_CONFIDENCE_SCORE 55) /
+  extract_golden_set(top1-threshold 0.80) 임계값은 ms-marco T=4 sigmoid 분포 기준이라
+  bge T=1 분포에선 미세 어긋날 수 있으나, 이는 **저신뢰/NARROW 분기·Golden 추출에만
+  영향**(순위·Precision@3 무관). bge 분포를 --debug-rerank 로 확인 후 재튜닝(후속).
+
+### 4. 회귀
+
+- 코드 회귀 영향 0 — reranker 테스트는 `__new__` + stub 으로 모델 미로드. test_deps
+  `test_build_real_deps_passes_model_names_from_settings` 는 `settings.cross_encoder
+  _model` 을 동적으로 단언하므로 기본값 변경에 무관(통과). verify 685 유지 예상.
+
+### 5. 수정 파일
+
+- `app/config.py` — cross_encoder_model / temperature 기본값 교체
+- `app/query/reranker/cross_encoder.py` — docstring(모델 비종속)
+- `.env.example` — bge 모델 + T=1.0
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 6. 후속 (사용자 Mac) — ★.env 갱신 + 모델 다운로드 + 재평가★
+
+1. **.env 갱신** (★필수★ — .env 값이 config 기본값보다 우선):
+   `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3` / `RAG_CROSS_ENCODER_TEMPERATURE=1.0`.
+2. `./scripts/verify.sh` — 685 passed 유지.
+3. **모델 다운로드**(최초 1회, ~2.3GB) — 첫 --debug-rerank/평가 실행 시 자동.
+4. **bge logit 분포 확인** — `python scripts/run_evaluation.py --debug-rerank
+   "Terraform 모듈의 버전 관리 규칙은?" --use-real-adapters` → 정답 페이지 100039 가
+   Top-3 로 올라오는지 + logit 분포(평탄 해소 여부) 확인. EVAL-006/024/041 도.
+5. **재평가** — `python scripts/run_evaluation.py --use-real-adapters --rouge-l
+   --bert-score` → Precision@3 (현 80%) / 잔여 4건 hit / 환각 변화 기록.
+6. bge 분포 보고 LOW/NARROW/formatter/golden 임계값 재튜닝 필요 시 조정(저신뢰 분기
+   정합). 결과를 본 단락에 추가 기록.
+- 롤백: 효과 미흡 시 .env 를 ms-marco + T=4 로 되돌리면 즉시 원복(config 무관).
+
+### 7. bge 교체 실측 (--debug-rerank, EVAL-032) — ★변별력 극적 개선★
+
+- 사용자 Mac `.env` 에 bge-v2-m3 + T=1.0 적용 후 EVAL-032 재진단:
+
+| | ms-marco (17c-9) | **bge-v2-m3 (17c-10)** |
+|---|---|---|
+| 정답 100039 순위 | **#13/#15** (Top-5 밖) | **#1** (logit 0.951) ✅ |
+| 100038(버전관리) | #8/#10 | #2/#3 |
+| 100040(코딩컨벤션) | #14 | #4 |
+| datadog "Terraform 시작하기" 노이즈 | Top-5 점령 | #8/#11/#14 (logit ~0) |
+| Route53(무관) | #9 | #15 (logit 0.002) |
+
+- bge 가 **정답 Terraform 페이지를 #1, 노이즈/무관 페이지를 거의 0 logit** 으로
+  정확히 변별. EVAL-032 는 이제 Precision@3 hit 예상. ms-marco 의 평탄/오랭크 문제 해소.
+- **임계값 영향**: bge raw logit 이 작아(max 0.951) T=1 sigmoid Top-1 score ≈ 72.
+  → extract_golden_set `--top1-threshold 0.80` 은 **도달 불가(bge max ~72)** → Golden
+  추출 0건. Golden 추출 시 `--top1-threshold 0.70` 권장. select_reranked LOW 0.55/
+  NARROW 0.65·formatter 55 는 Precision@3 순위와 무관(분기/플래그만) — bge 분포 보고
+  후속 미세조정. (Precision@3 자체는 순위 기반이라 즉시 개선.)
+
+## 2026-05-20 — feature17c-11: Cross-Encoder device 설정 (bge 평가 속도)
+
+- 변경 사항: bge-reranker-v2-m3(2.27GB/560M)는 CPU 자동 선택 시 50건 평가가 매우 느림
+  (질의당 20쌍 풀텍스트 재순위 → 25~40분). `cross_encoder_device` 설정을 추가해 Apple
+  Silicon(mps)·NVIDIA(cuda) 가속을 허용.
+- `app/config.py` — `cross_encoder_device: str | None = None`(기본 자동).
+- `app/api/deps.py` — `CrossEncoderRerankerImpl(..., device=settings.cross_encoder_device)`.
+- `.env.example` — `# RAG_CROSS_ENCODER_DEVICE=mps` 안내.
+- 회귀: reranker impl 은 이미 device 파라미터 보유(무변경). test_deps reranker_init
+  단언은 model 동적 검사라 무관(통과). 685 유지 예상.
+- 대안(속도 우선): `.env` 의 RAG_CROSS_ENCODER_MODEL 을 `BAAI/bge-reranker-base`
+  (278M, 다국어/한국어, ~8x 빠름)로 두면 정확도 약간 양보하고 반복 속도 확보.
+
+## 2026-05-20 — feature17c-12: bge 원복 결정 (지연 KPI 우선) + 평가 비용 분석
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 사용자 결정에 따라 reranker 를 ms-marco 로 원복. bge-v2-m3 가 한국어 변별
+  은 우수하나(EVAL-032 #13→#1) CPU 추론이 너무 느려 50건 평가가 25분+ → 기획서 KPI
+  #4(응답 P95 최소 8초/목표 5초) 위반. 재순위는 답변 생성 전 단계라 SSE 로 가릴 수 없음.
+
+### 1. 결정 근거 (기획서/설계서 실측 대조)
+
+- 기획서 KPI #4(TABLE 33): 응답 P95 최소 8초/목표 5초. 리스크 #3: P95 5초 초과 →
+  SSE 스트리밍 대응(생성 지연만 은닉, 재순위 지연은 별개).
+- **Precision@3 는 ms-marco + 풀텍스트(17c-7)만으로 이미 80%(목표 75% 충족)** →
+  bge 교체는 잔여 4건용 선택적 고도화였고 KPI 필수가 아님.
+- → 지연 KPI 우선으로 ms-marco(T=4) 원복. bge 는 운영 GPU(EKS)에서 재검토.
+- 원복 범위: `app/config.py`(model ms-marco-MiniLM-L-12-v2 / temperature 4.0),
+  `.env.example`(ms-marco + T=4), reranker docstring. `cross_encoder_device` 설정
+  (17c-11)은 유용·무해해 유지(대형 모델 GPU 가속용). 사용자 `.env` 도 ms-marco + T=4
+  로 환원 필요.
+
+### 2. 평가 비용 분석 (사용자 우려 — $134 토큰 한도)
+
+- **reranker 는 [Pipeline]=로컬 모델 → OpenAI 비용 0** (설계서 §3.1). 비용은 평가가
+  50건 전부를 풀 파이프라인(router+generator+verifier LLM 호출)에 통과시키는 데서 발생.
+- 질의당 OpenAI 호출 ≈ 3건(router 1 + generator 1 + verifier 1~2단계 의심문장만).
+  토큰 개략: router ~1.5K in, generator ~5K in(Top-5 ~4000토큰[설계 420] + 프롬프트),
+  verifier ~2.5K in, 출력 합 ~1K → 질의당 ~9K in + ~1K out. 50건 ≈ **450K in + 50K out**.
+- 모델 믹스(설계 [344]: 정책/이력→GPT-4o-mini, 장애/운영→GPT-4o; 검증 항상 mini)
+  감안 시 **full 50건 1회 ≈ 대략 $0.5~2** (전부 GPT-4o 최악 가정 ~$1.7, mini 라우팅 시
+  더 저렴). $134 한도 대비 1회 1~1.5% → 현재까지 ~7회 실행 ≈ $5~14 추정. **여유 충분**.
+  (정확치는 OpenAI usage 대시보드 확인 권장 — 본 추정은 토큰 기반 개략.)
+  BERTScore/ROUGE-L 은 로컬(API 비용 0).
+- **비용 절감 테스트 수칙**:
+  - 진단은 `--debug-rerank`(router 1콜 + 로컬 검색/재순위, generator/verifier 미호출)
+    /`--debug-route`(router만) → 거의 무료. 검색·reranker 튜닝은 이걸로 반복.
+  - full 50건 평가(--use-real-adapters)는 마일스톤 측정에만. 매 수정마다 돌리지 말 것.
+  - 반복 측정엔 축소 eval-set(예: 10건 subset JSON) 권장 — 비용 1/5. (필요 시
+    run_evaluation 에 `--limit N` 추가 가능 — 본 담당자 제공 가능.)

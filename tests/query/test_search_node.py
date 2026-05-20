@@ -148,7 +148,7 @@ def test_hybrid_search_returns_chunks_with_reconstructed_metadata(
     assert candidate.metadata.space_key == "CLOUD"
     assert candidate.metadata.source_type is SourceType.PAGE
     assert candidate.metadata.doc_type.value == "operation"
-    # text는 payload의 text_preview (5-A: 첫 200자)
+    # text는 payload의 풀 텍스트 text (feature17c-7). 픽스처 본문이 짧아 프리뷰와 동일.
     assert candidate.text in {"alpha", "beta", "gamma"}
     # token_count는 5-A 후속(2026-05-18)에서 payload에 동봉 — 인덱싱한 청크의
     # token_count(120)가 재구성 후에도 보존되어야 한다.
@@ -414,3 +414,213 @@ def test_hybrid_search_mixed_empty_and_valid_metadata_filters(
     result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
     # doc_type=incident 만 적용 → "a" 청크만 매칭.
     assert {c.metadata.chunk_id for c in result.candidates} == {"a" * 40}
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-20 feature17c-5 — 라우터 복수형 키 → payload 단수형 필드명 매핑 회귀
+#
+# 라우터 MetadataFilter.to_dict() 는 space_keys / document_types / source_types
+# (복수형) 를 emit 하는데 Qdrant payload 인덱스 필드는 space_key / doc_type /
+# source_type (단수형) 이다. 키가 그대로 통과하면 존재하지 않는 payload 필드로
+# must 필터가 만들어져 검색 0건이 된다. _coerce_metadata_filters 가 복수형 키를
+# rename 하면 정상 필터링된다.
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_search_maps_plural_document_types_to_doc_type(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """라우터 복수형 document_types → payload doc_type 으로 매핑되어 정상 필터링된다."""
+    s = QdrantPoolStore.in_memory(_settings(), dense_dimension=8)
+    s.bootstrap_collections()
+    chunks = [
+        _chunk(chunk_id="a" * 40, text="alpha", doc_type="incident"),
+        _chunk(chunk_id="b" * 40, chunk_index=1, text="alpha", doc_type="operation"),
+    ]
+    index_chunks(
+        chunks,
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=s,
+        cache=FakeEmbeddingCache(),
+    )
+
+    # 복수형 키. rename 전에는 존재하지 않는 "document_types" 필드 필터 → 0건.
+    state = _make_state(query="alpha", metadata_filters={"document_types": ["incident"]})
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
+    assert {c.metadata.chunk_id for c in result.candidates} == {"a" * 40}
+
+
+def test_coerce_metadata_filters_renames_plural_keys_to_payload_fields() -> None:
+    """라우터 복수형 키 → payload 단수형 필드명 rename (결정론적 단위 검증).
+
+    end-to-end candidate 수로는 feature17c-6 fallback(0건 시 filter 완화 재검색)이
+    개입해 rename 여부를 분리 검증하기 어렵다. 키 매핑은 `_coerce_metadata_filters`
+    수준에서 직접 단언한다(fallback 무관).
+    """
+    from app.query.search_node import _coerce_metadata_filters
+
+    # 복수형 → 단수형 rename.
+    assert _coerce_metadata_filters({"space_keys": ["CLOUD"]}) == {"space_key": ["CLOUD"]}
+    assert _coerce_metadata_filters({"document_types": ["incident"]}) == {"doc_type": ["incident"]}
+    assert _coerce_metadata_filters({"source_types": ["page"]}) == {"source_type": ["page"]}
+    # labels 는 양쪽 동일, 단수형 payload 키 직접 전달은 그대로 통과(후방 호환).
+    assert _coerce_metadata_filters({"labels": ["eks"]}) == {"labels": ["eks"]}
+    assert _coerce_metadata_filters({"doc_type": "incident"}) == {"doc_type": "incident"}
+    # payload match 대상이 아닌 키(dict/bool)는 거른다.
+    non_payload = {"date_range": {"from": "x"}, "attachment_required": True}
+    assert _coerce_metadata_filters(non_payload) is None
+    # 빈 list/문자열도 거른다(필터 미적용).
+    assert _coerce_metadata_filters({"space_keys": [], "document_types": []}) is None
+
+
+def test_hybrid_search_maps_plural_source_types_to_source_type(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder, store: QdrantPoolStore
+) -> None:
+    """라우터 복수형 source_types → payload source_type 매핑 (PAGE 청크에 'page' 매칭)."""
+    state = _make_state(query="alpha", metadata_filters={"source_types": ["page"]})
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=store)
+    assert len(result.candidates) > 0
+
+
+def test_hybrid_search_drops_non_payload_filter_keys(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder, store: QdrantPoolStore
+) -> None:
+    """date_range(dict) / attachment_required(bool) 은 단순 match 대상이 아니라 거른다."""
+    state = _make_state(
+        query="alpha",
+        metadata_filters={
+            "date_range": {"from": "2026-01-01", "to": "2026-12-31"},
+            "attachment_required": True,
+        },
+    )
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=store)
+    # 두 키 모두 거름 → 필터 미적용 → 검색 정상 반환.
+    assert len(result.candidates) > 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-20 feature17c-6 — metadata filter 0건 fallback 회귀
+#
+# 라우터의 LLM 추출 metadata filter 가 payload 와 불일치하면 must 결합으로 전체
+# 검색이 0건이 된다(첨부/공간 명시 질의가 통째로 검색 실패). filter 결과가 0건이면
+# ACL 은 유지한 채 filter 만 완화해 1회 재검색하는 fallback 으로 방지한다.
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_search_falls_back_when_metadata_filter_matches_nothing(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """payload 에 없는 doc_type 으로 0건이 되면 filter 완화 재검색으로 후보를 복구한다."""
+    s = QdrantPoolStore.in_memory(_settings(), dense_dimension=8)
+    s.bootstrap_collections()
+    chunks = [
+        _chunk(chunk_id="a" * 40, text="alpha", doc_type="incident"),
+        _chunk(chunk_id="b" * 40, chunk_index=1, text="alpha", doc_type="operation"),
+    ]
+    index_chunks(
+        chunks,
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=s,
+        cache=FakeEmbeddingCache(),
+    )
+
+    # 어떤 청크의 doc_type 과도 일치하지 않는 필터 → 1차 검색 0건 → fallback 발동.
+    state = _make_state(query="alpha", metadata_filters={"doc_type": "does_not_exist"})
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
+    # fallback(metadata filter 완화)으로 ACL 통과 후보가 복구된다.
+    assert {c.metadata.chunk_id for c in result.candidates} == {"a" * 40, "b" * 40}
+
+
+def test_hybrid_search_no_fallback_when_metadata_filter_matches_subset(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """유효 필터가 일부라도 매칭하면 fallback 없이 그 부분집합만 반환(필터 결과 보존)."""
+    s = QdrantPoolStore.in_memory(_settings(), dense_dimension=8)
+    s.bootstrap_collections()
+    chunks = [
+        _chunk(chunk_id="a" * 40, text="alpha", doc_type="incident"),
+        _chunk(chunk_id="b" * 40, chunk_index=1, text="alpha", doc_type="operation"),
+    ]
+    index_chunks(
+        chunks,
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=s,
+        cache=FakeEmbeddingCache(),
+    )
+
+    # doc_type=incident 는 "a" 만 매칭 → 0건 아님 → fallback 미발동 → "a" 만 반환.
+    state = _make_state(query="alpha", metadata_filters={"doc_type": "incident"})
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
+    assert {c.metadata.chunk_id for c in result.candidates} == {"a" * 40}
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-20 feature17c-7 — payload 풀텍스트 재구성 회귀
+#
+# payload 에 풀 텍스트(text)를 저장하고, _chunk_from_search_hit 가 200자 프리뷰가
+# 아닌 풀 텍스트로 candidate 를 재구성해 rerank·생성기가 풀 텍스트로 동작하게 한다.
+# legacy 인덱스(text 없음)는 text_preview 로 fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_search_reconstructs_full_text_not_preview(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """인덱싱한 청크 본문이 200자를 넘어도 candidate.text 는 풀 텍스트로 복원된다."""
+    s = QdrantPoolStore.in_memory(_settings(), dense_dimension=8)
+    s.bootstrap_collections()
+    long_text = "alpha " + "메모리 limits 상향 또는 애플리케이션 메모리 사용 분석 " * 30
+    assert len(long_text) > 200  # 프리뷰(200자) 한계를 넘는 본문.
+    index_chunks(
+        [_chunk(chunk_id="a" * 40, text=long_text)],
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=s,
+        cache=FakeEmbeddingCache(),
+    )
+
+    state = _make_state(query="alpha")
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
+    candidate = next(c for c in result.candidates if c.metadata.chunk_id == "a" * 40)
+    # 200자 프리뷰가 아니라 풀 텍스트가 복원되어야 한다 (rerank·생성기 입력).
+    assert candidate.text == long_text
+    assert len(candidate.text) > 200
+
+
+def test_chunk_from_search_hit_falls_back_to_preview_for_legacy_payload() -> None:
+    """legacy 인덱스(payload 에 text 없음)는 text_preview(200자)로 fallback 한다."""
+    from app.query.search_node import _chunk_from_search_hit
+    from app.storage.qdrant_client import SearchHit
+
+    payload = {
+        "chunk_id": "a" * 40,
+        "page_id": "P1",
+        "page_title": "EKS 운영 가이드",
+        "section_header": "개요",
+        "section_path": "Cloud 운영 문서 > 개요",
+        "chunk_index": 0,
+        "labels": ["eks"],
+        "doc_type": "operation",
+        "space_key": "CLOUD",
+        "allowed_groups": ["space:CLOUD"],
+        "allowed_users": [],
+        "webui_link": "/display/CLOUD/eks",
+        "last_modified": "2026-04-22T08:15:00+09:00",
+        "source_type": "page",
+        "attachment_id": None,
+        "attachment_filename": None,
+        "attachment_mime": None,
+        "extracted_format": None,
+        "token_count": 120,
+        # text 키 없음 (legacy) — text_preview 만 존재.
+        "text_preview": "레거시 프리뷰 본문",
+    }
+    chunk = _chunk_from_search_hit(SearchHit(chunk_id="a" * 40, score=0.9, payload=payload))
+    assert chunk.text == "레거시 프리뷰 본문"

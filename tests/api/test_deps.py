@@ -398,6 +398,51 @@ def test_build_poc_deps_shares_chunk_lookup_with_ingest_samples(
     assert captured["chunk_lookup"] is deps.chunk_lookup
 
 
+def test_ingest_samples_includes_attachment_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_ingest_samples 는 본문뿐 아니라 첨부(docx/xlsx) 청크도 적재한다 (feature17c-4 PoC).
+
+    index_chunks 를 mock 해 적재 직전 chunks 를 캡처하고, ATTACHMENT source_type 청크가
+    포함되는지 + 4개 첨부 파일명이 모두 청크를 생성하는지 검증한다 (Qdrant I/O 불요).
+    """
+    from pathlib import Path
+
+    from app.api import deps as deps_module
+    from app.schemas.enums import SourceType
+    from app.storage.chunk_lookup import FakeChunkTextLookup
+
+    captured: dict[str, Any] = {}
+
+    def _capture_index_chunks(chunks: Any, **_kwargs: Any) -> None:
+        captured["chunks"] = list(chunks)
+
+    monkeypatch.setattr(deps_module, "index_chunks", _capture_index_chunks)
+
+    samples_dir = Path(__file__).resolve().parents[2] / "samples"
+    store = QdrantPoolStore.in_memory(_settings(), dense_dimension=8)
+    deps_module._ingest_samples(
+        store=store,
+        dense=FakeDenseEmbedder(dimension=8),
+        sparse=FakeSparseEmbedder(),
+        samples_dir=samples_dir,
+        chunk_lookup=FakeChunkTextLookup(),
+    )
+
+    chunks = captured["chunks"]
+    attachment_chunks = [c for c in chunks if c.metadata.source_type is SourceType.ATTACHMENT]
+    assert attachment_chunks, "첨부 청크가 적재 대상에 포함되어야 한다"
+    body_chunks = [c for c in chunks if c.metadata.source_type is SourceType.PAGE]
+    assert body_chunks, "본문 청크도 그대로 유지되어야 한다"
+    filenames = {c.metadata.attachment_filename for c in attachment_chunks}
+    assert filenames == {
+        "EKS_운영_상세_매뉴얼_v2.3.docx",
+        "모니터링_메트릭_정의서_v1.4.xlsx",
+        "EKS_노드_월간_사용량_통계_2026Q1.xlsx",
+        "신규입사자_온보딩_체크리스트_2026.docx",
+    }
+
+
 # --- build_poc_ingestion_deps / build_real_ingestion_deps (feature6 후속) ---
 
 

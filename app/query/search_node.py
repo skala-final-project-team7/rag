@@ -101,10 +101,75 @@ def _hybrid_search_acl_guarded(
     dense_query_vectors = dense_embedder.encode_queries(query_texts)
     sparse_query_vectors = sparse_embedder.encode_queries(query_texts)
 
-    # --- 3. 3 Pool × N query × {dense, sparse} 검색 ---
+    # --- 3. Pool 검색 + 결합 ---
+    pool_weights = state.pool_weights or _DEFAULT_POOL_WEIGHTS
+    metadata_filters = _coerce_metadata_filters(state.metadata_filters)
+
+    candidates = _search_and_fuse(
+        store=store,
+        acl_filter=acl_filter,
+        query_texts=query_texts,
+        dense_query_vectors=dense_query_vectors,
+        sparse_query_vectors=sparse_query_vectors,
+        pool_weights=pool_weights,
+        top_k=top_k,
+        metadata_filters=metadata_filters,
+    )
+
+    # --- 4. metadata filter 0건 fallback (feature17c-6) ---
+    # 라우터가 추출한 metadata filter 는 LLM 추정값이라 payload(space_key/doc_type/
+    # source_type 등)와 불일치할 수 있다. 불일치 시 must 결합으로 전체 검색이 0건이
+    # 되어(query_points 에 score 하한이 없어 필터 통과 포인트가 없으면 곧 0건) 첨부·
+    # 특정 공간 명시 질의가 통째로 검색 실패하던 문제(EVAL-021/024/044/046)를 방지한다.
+    # metadata filter 적용 결과가 0건이면 ACL 은 유지한 채 metadata filter 만 완화해
+    # 1회 재검색한다 — 0건일 때만 동작하므로 유효 필터 결과를 덮어쓰지 않는다(회귀 안전).
+    if not candidates and metadata_filters:
+        candidates = _search_and_fuse(
+            store=store,
+            acl_filter=acl_filter,
+            query_texts=query_texts,
+            dense_query_vectors=dense_query_vectors,
+            sparse_query_vectors=sparse_query_vectors,
+            pool_weights=pool_weights,
+            top_k=top_k,
+            metadata_filters=None,
+        )
+
+    state.candidates = candidates
+    return state
+
+
+def _search_and_fuse(
+    *,
+    store: QdrantPoolStore,
+    acl_filter: dict[str, Any],
+    query_texts: list[str],
+    dense_query_vectors: list[list[float]],
+    sparse_query_vectors: list[Any],
+    pool_weights: dict[str, float],
+    top_k: int,
+    metadata_filters: dict[str, str | list[str]] | None,
+) -> list[Chunk]:
+    """3 Pool × N query × {dense, sparse} 검색 → 9-A RRF 결합 → Chunk 재구성.
+
+    ``hybrid_search`` 본체에서 분리해 metadata filter 유무로 동일 검색을 재실행할 수
+    있게 한다(feature17c-6 fallback). 임베딩은 호출자가 1회만 계산해 주입한다.
+
+    Args:
+        store: Qdrant Multi-Pool 저장소.
+        acl_filter: ``build_acl_filter`` 출력 dict (모든 검색에 must 결합).
+        query_texts: 원/확장 쿼리 텍스트(임베딩 인덱스와 1:1).
+        dense_query_vectors: query별 dense 벡터.
+        sparse_query_vectors: query별 sparse 벡터.
+        pool_weights: Pool 가중치(라우터 또는 fallback).
+        top_k: Pool별·최종 상위 N.
+        metadata_filters: payload 필드 match 필터(None 이면 ACL 만 적용).
+
+    Returns:
+        RRF 결합 후 Top-N ``Chunk`` 목록(검색 0건이면 빈 list).
+    """
     pool_rankings: dict[str, dict[str, list[str]]] = {pool: {} for pool in POOL_NAMES}
     all_hits: dict[str, SearchHit] = {}
-    metadata_filters = _coerce_metadata_filters(state.metadata_filters)
 
     for pool_name in POOL_NAMES:
         for idx, _ in enumerate(query_texts):
@@ -130,17 +195,24 @@ def _hybrid_search_acl_guarded(
             for hit in (*dense_hits, *sparse_hits):
                 all_hits[hit.chunk_id] = hit
 
-    # --- 4. 9-A 결정론 결합 (RRF → Pool 가중 → Top-N) ---
-    pool_weights = state.pool_weights or _DEFAULT_POOL_WEIGHTS
     top_chunk_ids = fuse_and_rank(pool_rankings, pool_weights, limit=top_k)
-
-    # --- 5. chunk_id → Chunk 재구성 (payload 기반) ---
-    state.candidates = [
+    return [
         _chunk_from_search_hit(all_hits[chunk_id])
         for chunk_id in top_chunk_ids
         if chunk_id in all_hits
     ]
-    return state
+
+
+# 라우터(`query_routing_agent` MetadataFilter.to_dict) 가 emit 하는 복수형 키 →
+# Qdrant payload 인덱스 필드명(qdrant_client._KEYWORD_INDEX_FIELDS, db-schema §1.3).
+# vendoring 라우터는 무수정 보존하므로 본 어댑터에서 키를 정합한다. 매핑에 없는 키는
+# 그대로 통과시킨다(payload 필드명을 직접 전달하는 경우 후방 호환). ``labels`` 는 양쪽
+# 동일하므로 매핑 불필요.
+_ROUTER_PLURAL_TO_PAYLOAD_KEY: dict[str, str] = {
+    "space_keys": "space_key",
+    "document_types": "doc_type",
+    "source_types": "source_type",
+}
 
 
 def _coerce_metadata_filters(
@@ -150,7 +222,16 @@ def _coerce_metadata_filters(
 
     QdrantPoolStore는 ``str | list[str]`` 만 받는다(MatchValue/MatchAny). 라우터가 채운
     값이 그 두 타입이 아니면 None으로 떨어뜨려 무시한다 — 잘못된 값으로 검색이 망가지는
-    것보다 필터 미적용이 안전하다.
+    것보다 필터 미적용이 안전하다. 이로써 ``date_range``(dict) / ``attachment_required``
+    (bool) 처럼 단순 match 대상이 아닌 항목은 자연히 거른다.
+
+    또한 라우터 ``MetadataFilter.to_dict`` 는 ``space_keys`` / ``document_types`` /
+    ``source_types`` 처럼 **복수형 키** 를 emit 하는데 Qdrant payload 인덱스 필드는
+    ``space_key`` / ``doc_type`` / ``source_type`` 처럼 **단수형** 이다. 키가 그대로
+    통과하면 존재하지 않는 payload 필드로 must 필터가 만들어져 검색이 0건이 된다
+    (2026-05-20 feature17c-5 — 첨부/공간 명시 질의가 검색 0건이 되던 2차 원인 수정).
+    ``_ROUTER_PLURAL_TO_PAYLOAD_KEY`` 로 복수형 키만 payload 필드명으로 rename 하고,
+    그 외 키(이미 단수형인 payload 필드명 직접 전달 포함)는 그대로 통과시킨다.
 
     빈 list (``[]``) / 빈 문자열 (``""``) 은 명시적으로 거른다 — Qdrant ``MatchAny
     (any=[])`` 는 어떤 값과도 매칭되지 않아 must 결합 시 모든 결과를 차단한다 (2026-
@@ -159,14 +240,16 @@ def _coerce_metadata_filters(
     if not metadata_filters:
         return None
     coerced: dict[str, str | list[str]] = {}
-    for key, value in metadata_filters.items():
+    for raw_key, value in metadata_filters.items():
+        # 복수형 라우터 키는 payload 단수형으로 rename, 그 외는 그대로 통과.
+        payload_key = _ROUTER_PLURAL_TO_PAYLOAD_KEY.get(raw_key, raw_key)
         if isinstance(value, str):
             if value:  # 빈 문자열 거름.
-                coerced[key] = value
+                coerced[payload_key] = value
         elif isinstance(value, list):
             # 빈 list 거름 + 모든 원소가 str 일 때만 받음.
             if value and all(isinstance(item, str) for item in value):
-                coerced[key] = value
+                coerced[payload_key] = value
     return coerced or None
 
 
@@ -174,11 +257,12 @@ def _chunk_from_search_hit(hit: SearchHit) -> Chunk:
     """SearchHit.payload(db-schema §1.2) → Chunk 도메인 객체 재구성.
 
     Cross-Encoder reranker(9-B-3) / 답변 생성기 / 응답 포맷터가 ``Chunk`` 모양을 요구하므로
-    검색 단계에서 변환한다. ``text`` 는 payload의 ``text_preview`` (첫 200자) — 9-B-3
-    재순위화는 text_preview로 점수 산출하며, 운영에서 풀 텍스트가 필요해지면 별도
-    chunk lookup 어댑터를 추가한다. ``token_count`` 는 5-A 후속(2026-05-18)에서
-    payload에 동봉했으므로 payload에서 직접 복원한다. legacy 인덱스에 필드가 없으면
-    0으로 fallback (후방 호환).
+    검색 단계에서 변환한다. ``text`` 는 payload의 풀 텍스트 ``text`` 를 사용한다
+    (feature17c-7) — 재순위화·답변 생성이 200자 프리뷰가 아닌 풀 텍스트로 동작해야
+    정답이 200자 뒤에 있는 청크가 rerank 탈락·생성기 거부되지 않는다. legacy 인덱스에
+    ``text`` 필드가 없으면 ``text_preview`` (첫 200자)로 fallback (후방 호환).
+    ``token_count`` 는 5-A 후속(2026-05-18)에서 payload에 동봉했으므로 payload에서
+    직접 복원한다. legacy 인덱스에 필드가 없으면 0으로 fallback (후방 호환).
     """
     payload = hit.payload
     metadata = ChunkMetadata(
@@ -202,7 +286,9 @@ def _chunk_from_search_hit(hit: SearchHit) -> Chunk:
         extracted_format=_parse_extracted_format(payload.get("extracted_format")),
         token_count=int(payload.get("token_count") or 0),
     )
-    return Chunk(text=str(payload.get("text_preview") or ""), metadata=metadata)
+    # 풀 텍스트(text) 우선, 없으면 legacy 인덱스 호환으로 text_preview(200자) fallback.
+    text = str(payload.get("text") or payload.get("text_preview") or "")
+    return Chunk(text=text, metadata=metadata)
 
 
 def _parse_doc_type(value: object) -> DocType | AttachmentType:

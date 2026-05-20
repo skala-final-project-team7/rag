@@ -121,6 +121,18 @@ def test_build_point_payload_text_preview_keeps_short_text() -> None:
     assert payload["text_preview"] == "짧은 본문"
 
 
+def test_build_point_payload_stores_full_text() -> None:
+    """feature17c-7 — payload 에 풀 텍스트(text)를 저장한다 (rerank·생성기 풀텍스트용).
+
+    text_preview(200자)는 UI 미리보기로 유지하고, text 는 절단 없이 전체를 담는다.
+    """
+    payload = build_point_payload(_page_chunk("가" * 500), version_number=1)
+    assert payload["text"] == "가" * 500
+    assert len(payload["text"]) == 500
+    # 미리보기는 여전히 200자로 절단 (UI 출처 카드용).
+    assert payload["text_preview"] == "가" * 200
+
+
 def test_build_point_payload_includes_token_count() -> None:
     # 5-A 후속(2026-05-18) — Chunk 재구성 정합. 청커가 산출한 token_count를
     # payload에 동봉해 검색 단계(_chunk_from_search_hit)에서 그대로 복원하도록 한다.

@@ -35,7 +35,7 @@ CONTENT_POOL = "content_pool"
 LABEL_POOL = "label_pool"
 POOL_NAMES = (TITLE_POOL, CONTENT_POOL, LABEL_POOL)
 
-# db-schema.md §1.2 — text_preview는 청크 본문 첫 200자
+# db-schema.md §1.2 — text_preview는 청크 본문 첫 200자 (UI 출처 카드용 미리보기)
 TEXT_PREVIEW_LIMIT = 200
 
 
@@ -81,5 +81,10 @@ def build_point_payload(chunk: Chunk, version_number: int) -> dict[str, Any]:
             metadata.extracted_format.value if metadata.extracted_format else None
         ),
         "token_count": metadata.token_count,
+        # text: 청크 풀 텍스트 (db-schema §1.2, feature17c-7). 재순위화(Cross-Encoder)·
+        # 답변 생성기가 200자 프리뷰가 아닌 풀 텍스트로 동작하도록 payload 에 동봉한다
+        # (이전엔 chunk_lookup(Mongo) 별도 조회였으나 미적재 시 200자만 쓰여 recall 저하).
+        # text_preview 는 UI 출처 카드용 미리보기로 유지한다.
+        "text": chunk.text,
         "text_preview": chunk.text[:TEXT_PREVIEW_LIMIT],
     }

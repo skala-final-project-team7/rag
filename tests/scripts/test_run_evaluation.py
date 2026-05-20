@@ -194,3 +194,43 @@ def test_precision_match_returns_false_when_no_expected_page_ids() -> None:
 
     sources = [_fake_source("/display/CLOUD/A")]
     assert _precision_match(sources, set(), {"100001": "/display/CLOUD/A"}) is False
+
+
+# ---------------------------------------------------------------------------
+# feature17c-9 — Pool 가중치 그리드 서치 오버라이드 파서
+# ---------------------------------------------------------------------------
+
+
+def test_parse_pool_weights_maps_short_keys_to_pool_names() -> None:
+    """title/content/label 단축키 → title_pool/content_pool/label_pool 매핑 + float 변환."""
+    from scripts.run_evaluation import _parse_pool_weights
+
+    assert _parse_pool_weights("title:0.25,content:0.6,label:0.15") == {
+        "title_pool": 0.25,
+        "content_pool": 0.6,
+        "label_pool": 0.15,
+    }
+
+
+def test_parse_pool_weights_rejects_unknown_key() -> None:
+    """미지의 Pool 키는 ValueError."""
+    from scripts.run_evaluation import _parse_pool_weights
+
+    with pytest.raises(ValueError, match="미지의 Pool"):
+        _parse_pool_weights("title:0.5,body:0.5,label:0.0")
+
+
+def test_parse_pool_weights_requires_all_three_pools() -> None:
+    """3 Pool 을 모두 명시하지 않으면 ValueError."""
+    from scripts.run_evaluation import _parse_pool_weights
+
+    with pytest.raises(ValueError, match="3 Pool"):
+        _parse_pool_weights("title:0.5,content:0.5")
+
+
+def test_parse_pool_weights_rejects_malformed_item() -> None:
+    """':' 없는 항목은 ValueError."""
+    from scripts.run_evaluation import _parse_pool_weights
+
+    with pytest.raises(ValueError, match="잘못된 pool-weights"):
+        _parse_pool_weights("title=0.5,content:0.3,label:0.2")
