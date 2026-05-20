@@ -659,6 +659,11 @@ BE 담당자 명세 확정 후 진행.
     - [x] **진단**: NOT_SUPPORTED 가 44/50 항목·전 의도에 균일 분산 → 병목은 생성기
       prompt 가 아니라 **문장별 검증기(verifier)**. 다음 세션은 문장 단위 진단(토큰/
       cited chunk/2단계 사유) 후 결정.
+  - [x] **feature17c-15** — 검증 진단 도구 `--debug-verify`: 단일 질의 풀 파이프라인 후
+    문장별 1단계(토큰/미확인토큰/인용청크) + 2단계 raw label/score/reason + 미확인 토큰
+    위치분류(in_cited=1단계FP / in_other_topk=citation정밀도 / absent=recall·생성갭)
+    출력 + reports JSON. 순수 헬퍼 회귀 +4. 거의 무료(단건). **사용자 Mac 진단 실행 →
+    결과 기반 fix 결정**(verifier.py 토큰정규화 / _LABEL_MAP 매핑 / citation / recall).
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선

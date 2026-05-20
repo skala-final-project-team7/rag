@@ -96,6 +96,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--debug-verify",
+        type=str,
+        default=None,
+        help=(
+            "단일 질문의 문장별 검증 진단 출력 — 환각(NOT_SUPPORTED) 근본 원인 분류 "
+            "(feature17c-15). 1단계 토큰/미확인토큰/인용청크 + 2단계 raw label/score/reason "
+            "+ 미확인 토큰 위치(인용청크/타 top-k/부재). 운영 LLM 필요 → --use-real-adapters 권장. "
+            "reports/debug_verify_<ts>.json 에도 구조화 저장."
+        ),
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=3,
@@ -131,6 +142,9 @@ def main() -> int:
 
     if args.debug_rerank:
         return _run_debug_rerank(args.debug_rerank, use_real=args.use_real_adapters)
+
+    if args.debug_verify:
+        return _run_debug_verify(args.debug_verify, use_real=args.use_real_adapters)
 
     if not args.eval_set.exists():
         print(f"[err] eval-set not found: {args.eval_set}")
@@ -337,6 +351,210 @@ def _run_debug_rerank(query: str, *, use_real: bool) -> int:
             f"T4 {round(s4 * 100):>3} / T8 {round(s8 * 100):>3}"
         )
     return 0
+
+
+def _classify_token_location(*, grounded_in_cited: bool, grounded_in_any: bool) -> str:
+    """미확인 검증 토큰의 위치를 분류한다 (feature17c-15, 순수 함수).
+
+    NOT_SUPPORTED 의 근본 원인을 분리하기 위한 진단 분류:
+    - ``in_cited``: 인용 청크 텍스트에 존재(1단계가 미확인으로 봤으나 실재 — 워드 경계/
+      형식 차이로 인한 1단계 false positive 후보).
+    - ``in_other_topk``: 인용 청크엔 없으나 다른 Top-K 청크엔 존재 → **citation 정밀도**
+      문제(생성기가 근거 청크를 잘못 인용).
+    - ``absent``: 어느 Top-K 청크에도 없음 → **recall/생성 갭**(코퍼스 미검색 또는
+      생성기가 컨텍스트 밖 토큰을 만들어냄).
+
+    grounding 판정은 호출자가 ``app.query.verifier._token_grounded`` 로 계산해 넘긴다
+    (단일 소스 유지). 본 함수는 두 boolean 으로 분류만 수행해 단위 테스트가 쉽다.
+    """
+    if grounded_in_cited:
+        return "in_cited"
+    if grounded_in_any:
+        return "in_other_topk"
+    return "absent"
+
+
+def _run_debug_verify(query: str, *, use_real: bool) -> int:
+    """단일 질문의 문장별 검증 진단 — 환각(NOT_SUPPORTED) 근본 원인 분류 (feature17c-15).
+
+    환각 KPI 미달의 병목이 생성기 prompt 가 아니라 문장별 검증기로 진단됨(feature17c-14
+    §8). 본 모드는 단일 질의를 풀 파이프라인에 통과시킨 뒤, 각 문장에 대해 1단계 규칙
+    검증(검증 토큰·미확인 토큰·인용 청크)과 2단계 LLM 평가자의 **raw label/score/reason**
+    (운영 경로에서는 status 로 매핑되며 버려지는 정보)을 함께 노출한다. 미확인 토큰은
+    인용 청크/타 Top-K/부재로 위치 분류해, NOT_SUPPORTED 가 (a) citation 정밀도, (b)
+    recall/생성 갭, (c) 1단계 false positive, (d) 2단계 보수 매핑(LOW_CONFIDENCE/
+    NOT_CHECKED→NOT_SUPPORTED) 중 무엇에서 오는지 데이터로 분리한다.
+
+    비용: 단일 질의 풀 파이프라인 1회 + 의심 문장 2단계 재호출(소수). 거의 무료.
+    운영 LLM 평가자가 있어야 raw label 이 의미 있으므로 ``--use-real-adapters`` 권장.
+    """
+    from datetime import datetime
+
+    from app.api.deps import build_poc_deps, build_real_deps
+    from app.config import get_settings
+    from app.pipeline.query_graph import build_query_graph
+    from app.query.acl import build_acl_filter
+    from app.query.verifier import (
+        _extract_checkable_tokens,
+        _gather_cited_text,
+        _token_grounded,
+        verify_answer_rules,
+    )
+    from app.query.verifier_evaluator import (
+        _chunks_to_normalized_contexts,
+        _sentence_check_to_target,
+    )
+    from app.schemas.rag_state import RagState
+
+    settings = get_settings()
+    deps = build_real_deps(settings) if use_real else build_poc_deps(settings)
+    graph = build_query_graph(deps)
+
+    eval_groups = [
+        "space:CLOUD",
+        "space:CCC",
+        "space:DEVOPS",
+        "space:SEC",
+        "space:ONBOARD",
+        "space:PROJ",
+        "space:DATADOG_KR",
+    ]
+    state = RagState(
+        query=query,
+        user_id="eval-user",
+        groups=eval_groups,
+        conversation_id="eval-conv-debug-verify",
+        acl_filter=build_acl_filter("eval-user", eval_groups),
+    )
+    result_dict = graph.invoke(state)
+    final = RagState.model_validate(result_dict)
+    answer = final.answer or ""
+    top_chunks = final.top_chunks
+    verification_by_id = {v.sentence_id: v for v in final.verification}
+
+    print(f"[debug-verify] query={query!r}")
+    print(
+        f"[debug-verify] intent={final.intent.value if final.intent else None} "
+        f"n_top_chunks={len(top_chunks)} n_sentences_verified={len(final.verification)}"
+    )
+    if not answer:
+        print("[debug-verify] 답변 없음(검색 0건 또는 거부) — 진단할 문장 없음.")
+        return 0
+
+    rule_result = verify_answer_rules(answer, top_chunks)
+    all_text = "\n".join(c.text for c in top_chunks)
+    normalized_contexts = _chunks_to_normalized_contexts(top_chunks)
+
+    records: list[dict[str, Any]] = []
+    for check in rule_result.sentences:
+        cited_text = _gather_cited_text(check.cited_chunks, top_chunks)
+        token_recs: list[dict[str, Any]] = []
+        for tok in check.unverified_tokens:
+            token_recs.append(
+                {
+                    "token": tok,
+                    "location": _classify_token_location(
+                        grounded_in_cited=_token_grounded(tok, cited_text),
+                        grounded_in_any=_token_grounded(tok, all_text),
+                    ),
+                }
+            )
+        raw_label: str | None = None
+        raw_score: float | None = None
+        raw_reason: str | None = None
+        if check.is_suspicious and use_real and deps.verifier_provider is not None:
+            target = _sentence_check_to_target(check, top_chunks=top_chunks)
+            try:
+                evaluation = deps.verifier_provider.evaluate_sentence(
+                    target, normalized_contexts
+                )
+                raw_label = getattr(evaluation.label, "value", str(evaluation.label))
+                raw_score = evaluation.score
+                raw_reason = evaluation.reason
+            except Exception as exc:  # noqa: BLE001 — 진단 도구: 평가자 실패도 기록만.
+                raw_reason = f"<evaluate_sentence error: {exc}>"
+        final_v = verification_by_id.get(check.sentence_id)
+        records.append(
+            {
+                "sentence_id": check.sentence_id,
+                "sentence": check.sentence,
+                "cited_chunks": check.cited_chunks,
+                "checkable_tokens": _extract_checkable_tokens(check.sentence),
+                "unverified_tokens": token_recs,
+                "suspicious": check.is_suspicious,
+                "stage2_raw_label": raw_label,
+                "stage2_score": raw_score,
+                "stage2_reason": raw_reason,
+                "final_status": final_v.status.value if final_v else "PASS",
+            }
+        )
+
+    _print_debug_verify(records)
+
+    output_path = Path("reports") / f"debug_verify_{datetime.utcnow():%Y%m%d_%H%M%S}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "query": query,
+        "intent": final.intent.value if final.intent else None,
+        "use_real_adapters": use_real,
+        "answer": answer,
+        "n_top_chunks": len(top_chunks),
+        "sentences": records,
+        "summary": _summarize_debug_verify(records),
+    }
+    output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"\n[debug-verify] report = {output_path}")
+    return 0
+
+
+def _summarize_debug_verify(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """debug-verify 레코드에서 진단 집계를 산출한다 (순수, 테스트 가능)."""
+    final_dist: dict[str, int] = {}
+    raw_label_dist: dict[str, int] = {}
+    token_loc_dist: dict[str, int] = {}
+    for r in records:
+        final_dist[r["final_status"]] = final_dist.get(r["final_status"], 0) + 1
+        if r["final_status"] == "NOT_SUPPORTED" and r["stage2_raw_label"]:
+            raw_label_dist[r["stage2_raw_label"]] = (
+                raw_label_dist.get(r["stage2_raw_label"], 0) + 1
+            )
+        for t in r["unverified_tokens"]:
+            token_loc_dist[t["location"]] = token_loc_dist.get(t["location"], 0) + 1
+    return {
+        "n_sentences": len(records),
+        "final_status_dist": final_dist,
+        "not_supported_raw_label_dist": raw_label_dist,
+        "unverified_token_location_dist": token_loc_dist,
+    }
+
+
+def _print_debug_verify(records: list[dict[str, Any]]) -> None:
+    """debug-verify 레코드를 사람이 읽기 좋은 형식으로 출력한다."""
+    for r in records:
+        flag = "SUSPECT" if r["suspicious"] else "PASS   "
+        print()
+        print(f"  [s{r['sentence_id']}] {flag} final={r['final_status']}")
+        print(f"    문장: {r['sentence'][:120]}")
+        print(f"    인용청크: {r['cited_chunks']} | 검증토큰: {r['checkable_tokens']}")
+        if r["unverified_tokens"]:
+            locs = ", ".join(f"{t['token']}({t['location']})" for t in r["unverified_tokens"])
+            print(f"    미확인토큰: {locs}")
+        if r["stage2_raw_label"] is not None:
+            print(
+                f"    2단계 raw: label={r['stage2_raw_label']} "
+                f"score={r['stage2_score']} reason={(r['stage2_reason'] or '')[:100]}"
+            )
+    summary = _summarize_debug_verify(records)
+    print()
+    print("[debug-verify] 집계:")
+    print(f"  문장 {summary['n_sentences']}개 final 분포: {summary['final_status_dist']}")
+    print(f"  NOT_SUPPORTED 의 2단계 raw label 분포: {summary['not_supported_raw_label_dist']}")
+    print(f"  미확인 토큰 위치 분포: {summary['unverified_token_location_dist']}")
+    print(
+        "  해석: in_other_topk=citation 정밀도 / absent=recall·생성 갭 / "
+        "in_cited=1단계 FP / LOW_CONFIDENCE·NOT_CHECKED=2단계 보수 매핑."
+    )
 
 
 def _run_evaluation(
