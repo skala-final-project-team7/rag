@@ -345,3 +345,72 @@ def test_hybrid_search_accepts_list_metadata_filter(
     state = _make_state(query="alpha", metadata_filters={"doc_type": ["incident", "operation"]})
     result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
     assert {c.metadata.chunk_id for c in result.candidates} == {"a" * 40, "b" * 40}
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-20 fix — 빈 list / 빈 문자열 metadata filter 회귀
+#
+# 라우터가 빈 배열 (space_keys=[], labels=[] 등) 을 metadata_filters 에 채우면
+# _coerce_metadata_filters 가 그대로 통과시켜 Qdrant MatchAny(any=[]) 가 생성
+# 되고 must 결합 시 모든 검색 결과가 차단되던 버그. 본 fix 는 빈 list / 빈
+# 문자열을 거른다.
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_search_drops_empty_list_metadata_filter(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder, store: QdrantPoolStore
+) -> None:
+    """빈 list 만 채워진 metadata_filters — 필터 미적용 효과 (검색 정상 반환)."""
+    state = _make_state(
+        query="alpha",
+        metadata_filters={
+            "space_keys": [],
+            "labels": [],
+            "document_types": [],
+            "source_types": [],
+        },
+    )
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=store)
+    # 모든 metadata_filters 값이 빈 list 라 필터 미적용 → 검색 결과 정상.
+    assert len(result.candidates) > 0
+
+
+def test_hybrid_search_drops_empty_string_metadata_filter(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder, store: QdrantPoolStore
+) -> None:
+    """빈 문자열 metadata_filters — 필터 미적용 효과."""
+    state = _make_state(query="alpha", metadata_filters={"doc_type": ""})
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=store)
+    assert len(result.candidates) > 0
+
+
+def test_hybrid_search_mixed_empty_and_valid_metadata_filters(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    """빈 list 는 거르고 유효 list 만 적용 — 라우터 실 출력 패턴."""
+    s = QdrantPoolStore.in_memory(_settings(), dense_dimension=8)
+    s.bootstrap_collections()
+    chunks = [
+        _chunk(chunk_id="a" * 40, text="alpha", doc_type="incident"),
+        _chunk(chunk_id="b" * 40, chunk_index=1, text="alpha", doc_type="operation"),
+    ]
+    index_chunks(
+        chunks,
+        version_by_page_id={"P1": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=s,
+        cache=FakeEmbeddingCache(),
+    )
+
+    state = _make_state(
+        query="alpha",
+        metadata_filters={
+            "space_keys": [],  # 거름
+            "labels": [],  # 거름
+            "doc_type": ["incident"],  # 유효 적용
+        },
+    )
+    result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
+    # doc_type=incident 만 적용 → "a" 청크만 매칭.
+    assert {c.metadata.chunk_id for c in result.candidates} == {"a" * 40}

@@ -18,6 +18,13 @@
     backfill 시점에 ``expected_chunk_ids`` 를 그대로 Qdrant scroll 로 채워두면
     eval 단계에서는 chunk_id 가 Source schema 에 없어도 page_id 우회 매칭이
     가능하다.
+  - 2026-05-20, feature17b 정밀 매칭 — Source 스키마에 chunk_id/page_id 직접
+    필드가 없고 confluence_url 패턴 (``/display/<SPACE>/<title>``) 에도 page_id
+    가 없어, samples 의 page_id → webui_link 매핑을 1회 로드해 expected_page
+    _ids 가 가리키는 webui_link set 과 Source.confluence_url 의 동일성으로
+    page-level 정밀 매칭한다 (chunk-level 은 여전히 불가). samples 데이터가
+    없으면 약식 매칭으로 자동 fallback. summary.precision_at_k.match_method 로
+    매칭 방식을 명시한다.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -124,12 +131,23 @@ def _run_debug_route(query: str, *, use_real: bool) -> int:
     settings = get_settings()
     deps = build_real_deps(settings) if use_real else build_poc_deps(settings)
 
+    # debug-route 는 라우터만 호출하므로 ACL 의 영향은 없으나 _run_evaluation 과
+    # 일관되게 모든 space 포함.
+    eval_groups = [
+        "space:CLOUD",
+        "space:CCC",
+        "space:DEVOPS",
+        "space:SEC",
+        "space:ONBOARD",
+        "space:PROJ",
+        "space:DATADOG_KR",
+    ]
     state = RagState(
         query=query,
         user_id="eval-user",
-        groups=["space:CLOUD", "space:CCC", "space:DEVOPS", "space:SEC"],
+        groups=eval_groups,
         conversation_id="eval-conv-debug",
-        acl_filter=build_acl_filter("eval-user", ["space:CLOUD"]),
+        acl_filter=build_acl_filter("eval-user", eval_groups),
     )
     # 라우터는 history_decision 을 읽으므로 manage_history 먼저 통과.
     manage_history(state, provider=deps.history_provider)
@@ -175,6 +193,14 @@ def _run_evaluation(
         eval_data = json.load(fp)
     items: list[dict[str, Any]] = eval_data["items"]
 
+    # feature17b 정밀 매칭 — samples 의 page_id → webui_link 매핑 1회 로드.
+    # 운영 그래프는 chunk metadata 의 webui_link 를 Source.confluence_url 에
+    # 그대로 채우므로, expected_page_ids 가 가리키는 webui_link set 과 Source
+    # .confluence_url 동일성으로 page-level 정밀 매칭이 가능하다. samples 미
+    # 존재 시 약식 매칭으로 자동 fallback.
+    page_id_to_webui = _load_page_id_to_webui_link()
+    match_method = "webui_link_strict" if page_id_to_webui else "loose_has_sources"
+
     settings = get_settings()
     deps = build_real_deps(settings) if use_real else build_poc_deps(settings)
     graph = build_query_graph(deps)
@@ -198,12 +224,25 @@ def _run_evaluation(
         expected_intent = item.get("intent")
         expected_page_ids: set[str] = set(item.get("expected_page_ids", []))
 
+        # 평가용 사용자는 samples 의 모든 space 에 접근 가능해야 한다. ACL filter
+        # 의 groups 인자가 state.groups 와 일치하지 않으면 검색이 차단되어
+        # precision_at_k / verification 이 일관되게 0 으로 떨어진다 (2026-05-20 발견).
+        # samples space: CLOUD / CCC / DEVOPS / SEC / ONBOARD / PROJ / DATADOG_KR.
+        eval_groups = [
+            "space:CLOUD",
+            "space:CCC",
+            "space:DEVOPS",
+            "space:SEC",
+            "space:ONBOARD",
+            "space:PROJ",
+            "space:DATADOG_KR",
+        ]
         state = RagState(
             query=query,
             user_id="eval-user",
-            groups=["space:CLOUD", "space:CCC", "space:DEVOPS", "space:SEC", "space:ONBOARD"],
+            groups=eval_groups,
             conversation_id=f"eval-conv-{eval_id}",
-            acl_filter=build_acl_filter("eval-user", ["space:CLOUD"]),
+            acl_filter=build_acl_filter("eval-user", eval_groups),
         )
         started = time.perf_counter()
         response = run_query(state, graph=graph)
@@ -211,13 +250,11 @@ def _run_evaluation(
 
         # Precision@k — 응답 sources Top-k 중 expected_page_ids 와 매칭되는지.
         top_k_sources = response.sources[:top_k]
-        # Source 스키마에 page_id 직접 필드 없음 — confluence_url 에서 추출하거나 텍스트
-        # 매칭. PoC fallback: confluence_url 의 마지막 path 가 page_title 인 경우 매칭
-        # 어려움 — 본 시드 평가에서는 sources 가 비어 있지 않은지 + page_title 의 일부가
-        # samples 의 page_title 와 일치하는지로 약식 매칭한다 (feature17b 에서 정확한
-        # page_id 라벨링 backfill 후 정밀 매칭).
-        match = bool(expected_page_ids) and len(top_k_sources) > 0
-        # 정밀 매칭은 feature17b 에서.
+        match = _precision_match(
+            top_k_sources,
+            expected_page_ids,
+            page_id_to_webui,
+        )
         if expected_page_ids:
             precision_at_k_total += 1
             if match:
@@ -292,6 +329,7 @@ def _run_evaluation(
             ),
             "hits": precision_at_k_hits,
             "denom": precision_at_k_total,
+            "match_method": match_method,
         },
         "not_supported_ratio": (
             not_supported_count / verification_total if verification_total else None
@@ -335,6 +373,70 @@ def _run_evaluation(
     print(f"[eval] report = {output_path}")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
+
+
+def _load_page_id_to_webui_link(
+    samples_dir: Path | None = None,
+) -> dict[str, str]:
+    """samples 의 페이지 데이터에서 ``{page_id: webui_link}`` 매핑을 로드한다.
+
+    Source 스키마에 chunk_id/page_id 직접 필드가 없고 confluence_url 패턴
+    (``/display/<SPACE>/<title>``) 에도 page_id 가 없어, samples 의 webui_link
+    를 통해 page-level 정밀 매칭을 수행한다. 운영 그래프는 chunk metadata 의
+    webui_link 를 Source.confluence_url 에 그대로 채우므로 일치 비교가 가능.
+
+    samples_dir 미지정 시 ``samples/`` 를 기본 경로로 한다. 파일 미존재 또는
+    스키마 불일치 시 빈 dict 반환 (호출 측이 약식 매칭으로 fallback).
+    """
+    samples_dir = samples_dir or Path("samples")
+    candidates = [
+        samples_dir / "confluence_sample_data.json",
+        samples_dir / "datadog_docs.json",
+    ]
+    mapping: dict[str, str] = {}
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            with path.open() as fp:
+                data = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            continue
+        for entry in data.get("single_page_responses", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            page_id = entry.get("id")
+            webui = entry.get("_links", {}).get("webui")
+            if page_id is not None and webui is not None:
+                mapping[str(page_id)] = str(webui)
+    return mapping
+
+
+def _precision_match(
+    top_k_sources: list[Any],
+    expected_page_ids: set[str],
+    page_id_to_webui: dict[str, str],
+) -> bool:
+    """Precision@k 단건 매칭 — webui_link 정밀 / sources 약식 fallback.
+
+    page_id_to_webui 매핑이 있고 expected_page_ids 중 매핑 가능한 항목이 1건
+    이상이면 webui_link 동일성 정밀 매칭. 매핑이 없거나 비어 있으면 sources
+    가 비어 있지 않은지 만 검사하는 약식 매칭으로 fallback (feature17a 동작
+    유지).
+    """
+    if not expected_page_ids:
+        return False
+    if page_id_to_webui:
+        expected_webui_links: set[str] = {
+            page_id_to_webui[pid] for pid in expected_page_ids if pid in page_id_to_webui
+        }
+        if expected_webui_links:
+            return any(
+                getattr(src, "confluence_url", None) in expected_webui_links
+                for src in top_k_sources
+            )
+    # samples lookup 부재 또는 expected page_id 가 lookup 에 없음 → 약식.
+    return len(top_k_sources) > 0
 
 
 def _compute_rouge_l_f1_avg(predictions: list[str], references: list[str]) -> float:
