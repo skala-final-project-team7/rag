@@ -71,6 +71,12 @@ class RagState(BaseModel):
     # 검색·재순위화 (§4.5)
     candidates: list[Chunk] = Field(default_factory=list)  # Hybrid Search Top-20
     top_chunks: list[Chunk] = Field(default_factory=list)  # Cross-Encoder Top-5
+    # Cross-Encoder 재순위화 점수 map (chunk_id → score 0~1). feature17c-3 (2026-05-20):
+    # top_chunks(Chunk)는 점수를 싣지 못하므로, rerank_node 가 select_reranked 결과의
+    # 실제 Cross-Encoder 점수를 본 map 에 저장한다. 답변 생성기(generator)가 이 map 을
+    # 읽어 출처 카드 점수(Source.score)에 실제 rerank 점수를 반영한다 — map 이 비어 있으면
+    # generator 는 순서 보존용 fallback 값을 쓴다(후방 호환).
+    rerank_scores: dict[str, float] = Field(default_factory=dict)
     # 답변 생성·검증·포맷 (§4.6~4.8)
     answer: str | None = None
     sources: list[Source] = Field(default_factory=list)

@@ -22,8 +22,11 @@ from dataclasses import dataclass
 # rag-pipeline-design.md §6 4.5, §8
 RERANK_TOP_K = 5  # 기본 재순위화 Top-K
 RERANK_NARROW_TOP_K = 3  # 5위 점수가 낮을 때 축소하는 Top-K
-NARROW_SCORE_THRESHOLD = 0.30  # 5위 점수가 이 미만이면 Top-3로 축소
-LOW_CONFIDENCE_THRESHOLD = 0.20  # 최고 점수가 이 미만이면 저신뢰 분기
+# feature17c-2 (2026-05-20): Cross-Encoder temperature scaling(T=4) 도입으로 점수
+# 분포가 sigmoid(원본) 대비 펴졌다(강관련 ~0.88 / 중관련 ~0.77 / 무관 ~0.51). 임계값을
+# T=4 분포 기준으로 재조정 — NARROW 0.30→0.65, LOW 0.20→0.55. T 변경 시 함께 재조정.
+NARROW_SCORE_THRESHOLD = 0.65  # 5위 점수가 이 미만이면 Top-3로 축소
+LOW_CONFIDENCE_THRESHOLD = 0.55  # 최고 점수가 이 미만이면 저신뢰 분기
 
 
 @dataclass

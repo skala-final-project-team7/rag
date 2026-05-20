@@ -23,7 +23,10 @@ from app.schemas.enums import Intent, LlmModel, VerificationStatus
 from app.schemas.response import QueryResponse, Source, Verification
 
 # api-spec.md "표준 분기 응답" 임계값
-LOW_CONFIDENCE_SCORE = 20  # Cross-Encoder 최고 점수(0~100)가 이 미만이면 저신뢰 분기
+# feature17c-2 (2026-05-20): Cross-Encoder temperature scaling(T=4)로 Source.score
+# 분포가 펴져(강관련 ~88 / 중관련 ~77 / 무관 ~51) saturation(전부 100)이 해소됨에 따라
+# 저신뢰 임계값을 20→55 로 재조정 (select_reranked LOW_CONFIDENCE_THRESHOLD 0.55 와 정합).
+LOW_CONFIDENCE_SCORE = 55  # Cross-Encoder 최고 점수(0~100)가 이 미만이면 저신뢰 분기
 VERIFICATION_BLOCK_RATIO = 0.5  # NOT_SUPPORTED 비율이 이 값을 초과하면 답변 차단
 
 # 답변 차단 시 대체하는 저신뢰 응답 메시지.

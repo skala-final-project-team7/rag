@@ -327,7 +327,11 @@ def _build_generation_input_payload(state: RagState) -> dict[str, Any]:
         },
         "search_results": {
             "top_contexts": [
-                _chunk_to_top_context_payload(chunk, index=index)
+                _chunk_to_top_context_payload(
+                    chunk,
+                    index=index,
+                    rerank_score=state.rerank_scores.get(chunk.metadata.chunk_id),
+                )
                 for index, chunk in enumerate(state.top_chunks, start=1)
             ],
         },
@@ -335,17 +339,27 @@ def _build_generation_input_payload(state: RagState) -> dict[str, Any]:
     }
 
 
-def _chunk_to_top_context_payload(chunk: Chunk, *, index: int) -> dict[str, Any]:
+def _chunk_to_top_context_payload(
+    chunk: Chunk, *, index: int, rerank_score: float | None = None
+) -> dict[str, Any]:
     """RAG Chunk 를 agent TopContext dict 로 변환한다.
 
     context_id 는 chunk_id 의 짧은 별칭("ctx-{index:03d}-{chunk_id[:8]}")으로 합성해
-    검증 1단계의 ``[#N]`` 마커 N(1-based 순번)과 의미상 연결한다. agent 의 _
-    sort_key 는 rerank_score → score → 입력 순으로 정렬하므로, 본 어댑터는 rag
-    rerank Top-K 순서를 그대로 보존하기 위해 rerank_score 에 동일 폭의 내림차순
-    값을 부여한다 (1 - 0.001*index).
+    검증 1단계의 ``[#N]`` 마커 N(1-based 순번)과 의미상 연결한다.
+
+    feature17c-3 (2026-05-20): ``rerank_score`` 가 주어지면(rerank_node 가 RagState.
+    rerank_scores 에 저장한 실제 Cross-Encoder 점수) 그것을 그대로 전달한다. agent 는
+    이 값을 GeneratedSource.rerank_score 로 보존하고(citation_mapping), generator 의
+    ``_agent_sources_to_rag_sources`` 가 ``rerank_score × 100`` 으로 Source.score 를
+    산출하므로, 실제 rerank 점수가 출처 카드 점수까지 도달한다.
+
+    ``rerank_score`` 가 None(rerank_scores 미제공·legacy 경로)이면, agent 의 _sort_key
+    (rerank_score → score → 입력 순)가 rag rerank Top-K 순서를 보존하도록 ``1 - 0.001*
+    index`` fallback 값을 부여한다(기존 동작).
     """
     metadata = chunk.metadata
     context_id = f"ctx-{index:03d}-{metadata.chunk_id[:8]}"
+    effective_rerank_score = rerank_score if rerank_score is not None else 1.0 - 0.001 * index
     return {
         "context_id": context_id,
         "document_id": metadata.page_id,
@@ -355,7 +369,7 @@ def _chunk_to_top_context_payload(chunk: Chunk, *, index: int) -> dict[str, Any]
         "source_url": metadata.webui_link or f"chunk://{metadata.chunk_id}",
         "content": chunk.text,
         "score": 0.0,
-        "rerank_score": 1.0 - 0.001 * index,
+        "rerank_score": effective_rerank_score,
         "metadata": {
             "page_id": metadata.page_id,
             "attachment_filename": metadata.attachment_filename,

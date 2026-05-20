@@ -82,6 +82,15 @@ def main() -> int:
         help="단일 질문 라우터 디버깅 모드 — 의도/pool_weights/rewritten_queries 만 출력.",
     )
     parser.add_argument(
+        "--debug-rerank",
+        type=str,
+        default=None,
+        help=(
+            "단일 질문의 검색 후보 raw Cross-Encoder logit 분포 출력 — temperature "
+            "결정용 (feature17c-1). 운영 reranker(predict_logits) 필요 → --use-real-adapters 권장."
+        ),
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=3,
@@ -104,6 +113,9 @@ def main() -> int:
 
     if args.debug_route:
         return _run_debug_route(args.debug_route, use_real=args.use_real_adapters)
+
+    if args.debug_rerank:
+        return _run_debug_rerank(args.debug_rerank, use_real=args.use_real_adapters)
 
     if not args.eval_set.exists():
         print(f"[err] eval-set not found: {args.eval_set}")
@@ -170,6 +182,97 @@ def _run_debug_route(query: str, *, use_real: bool) -> int:
             indent=2,
         )
     )
+    return 0
+
+
+def _run_debug_rerank(query: str, *, use_real: bool) -> int:
+    """단일 질문의 검색 후보 raw Cross-Encoder logit 분포 출력 — temperature 결정용.
+
+    feature17c-1 — ms-marco logit 이 sigmoid 를 saturate 시켜 Source.score 가 모두
+    100 으로 변별력을 잃던 문제의 적정 temperature(T) 를 데이터 기반으로 정하기 위해,
+    실제 검색 후보(Top-20)의 raw logit 분포와 T별 sigmoid 점수 미리보기를 출력한다.
+    """
+    import math
+
+    from app.api.deps import build_poc_deps, build_real_deps
+    from app.config import get_settings
+    from app.query.acl import build_acl_filter
+    from app.query.history import manage_history
+    from app.query.router import manage_router
+    from app.query.search_node import hybrid_search
+    from app.schemas.rag_state import RagState
+
+    settings = get_settings()
+    deps = build_real_deps(settings) if use_real else build_poc_deps(settings)
+
+    reranker = deps.reranker
+    if not hasattr(reranker, "predict_logits"):
+        print(
+            "[err] 주입된 reranker 에 predict_logits 가 없다 (Fake reranker). "
+            "--use-real-adapters 로 실 CrossEncoderRerankerImpl 을 사용하라."
+        )
+        return 1
+
+    eval_groups = [
+        "space:CLOUD",
+        "space:CCC",
+        "space:DEVOPS",
+        "space:SEC",
+        "space:ONBOARD",
+        "space:PROJ",
+        "space:DATADOG_KR",
+    ]
+    state = RagState(
+        query=query,
+        user_id="eval-user",
+        groups=eval_groups,
+        conversation_id="eval-conv-debug-rerank",
+        acl_filter=build_acl_filter("eval-user", eval_groups),
+    )
+    manage_history(state, provider=deps.history_provider)
+    manage_router(state, provider=deps.routing_provider, routing_config=deps.routing_config)
+    hybrid_search(
+        state,
+        dense_embedder=deps.dense_embedder,
+        sparse_embedder=deps.sparse_embedder,
+        store=deps.store,
+    )
+
+    candidates = state.candidates
+    if not candidates:
+        print(f"[debug-rerank] 검색 후보 0건 — query={query!r}")
+        return 0
+
+    query_text = (
+        state.history_decision.contextualized_question
+        if state.history_decision and state.history_decision.contextualized_question
+        else state.query
+    )
+    passages = [c.text for c in candidates]
+    logits = reranker.predict_logits(query_text, passages)
+    ordered = sorted(logits, reverse=True)
+
+    def _sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x)) if x >= 0 else math.exp(x) / (1.0 + math.exp(x))
+
+    n = len(ordered)
+    print(f"[debug-rerank] query={query!r}")
+    print(f"[debug-rerank] 후보 {n}건 raw logit 분포:")
+    print(f"  max={ordered[0]:.3f} / min={ordered[-1]:.3f} / mean={sum(ordered) / n:.3f}")
+    print(f"  Top-1 logit = {ordered[0]:.3f}")
+    print()
+    print("  T별 Top-1 sigmoid 점수 (round*100):")
+    for t in (1.0, 2.0, 3.0, 4.0, 5.0, 8.0):
+        s = _sigmoid(ordered[0] / t)
+        print(f"    T={t:>4}: {s:.4f} → score {round(s * 100)}")
+    print()
+    print("  상위 5개 logit → T=1 vs T=4 vs T=8 score:")
+    for i, lg in enumerate(ordered[:5]):
+        s1, s4, s8 = _sigmoid(lg), _sigmoid(lg / 4), _sigmoid(lg / 8)
+        print(
+            f"    #{i + 1} logit={lg:>7.3f} → T1 {round(s1 * 100):>3} / "
+            f"T4 {round(s4 * 100):>3} / T8 {round(s8 * 100):>3}"
+        )
     return 0
 
 
