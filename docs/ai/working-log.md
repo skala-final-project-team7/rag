@@ -6046,3 +6046,68 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   + cited chunk + unverified_tokens + 2단계 판정 사유) 추가 → NOT_SUPPORTED 가 토큰이
   실제로 인용 청크에 없어서인지(citation/recall), 검증기 과민(false positive)인지 분리.
   생성기 추가 튜닝은 이 진단 후 결정(추측 구현 금지). 진단은 단건/소수 질의라 거의 무료.
+
+---
+
+## 2026-05-20 — feature17c-15: 검증 진단 도구 --debug-verify (환각 근본원인 분류)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17c-14 §8 진단(병목=문장별 검증기)을 데이터로 확정하기 위한
+  저비용 진단 모드를 `scripts/run_evaluation.py` 에 추가. 코드 경로(검색·rerank·생성·
+  검증) 무변경 — 측정·진단 도구만 확장. 추측 fix 전에 근본 원인을 분리하는 단계.
+
+### 1. 왜 이 도구인가 (검증 경로 정적 분석)
+
+- 환각 KPI(NOT_SUPPORTED)는 2단계 거친다: **1단계**(`app/query/verifier.py`, Pipeline)
+  문장의 수치·식별자 토큰이 인용 청크 텍스트에 있는지 대조 → 미확인 시 의심.
+  **2단계**(`app/query/verifier_evaluator.py`, 어댑터→agent) 의심 문장만 LLM 평가.
+- ★발견★ 2단계 `_LABEL_MAP`(우리 어댑터)이 **LOW_CONFIDENCE / NOT_CHECKED 까지
+  NOT_SUPPORTED 로 매핑**(환각 차단 우선 정책). 즉 LLM 이 "확신 없음/미검사"여도 환각
+  집계. 1·2단계 모두 vendoring 아닌 **우리 영역**이라 in-scope 레버.
+- 082545 분포(균일 ~37%, 44/50 항목)는 생성기 환각보다 검증기 과민/매핑을 시사 →
+  근본 원인을 (a) citation 정밀도, (b) recall/생성 갭, (c) 1단계 false positive,
+  (d) 2단계 보수 매핑으로 분리해야 정확한 fix 가능. 그 데이터를 뽑는 도구.
+
+### 2. --debug-verify "질의" (거의 무료)
+
+- 단일 질의를 풀 파이프라인에 통과시킨 뒤(그래프 invoke → final RagState 재구성), 각
+  문장에 대해 출력·JSON 저장:
+  - 1단계: 문장, 인용청크, 검증토큰, 미확인토큰.
+  - 미확인토큰 **위치 분류**(`_classify_token_location`): `in_cited`(인용에 실재=1단계
+    FP 후보) / `in_other_topk`(인용 밖 Top-K 에 존재=citation 정밀도) / `absent`(어느
+    Top-K 에도 없음=recall·생성 갭). grounding 은 `verifier._token_grounded` 재사용.
+  - 2단계 **raw label/score/reason**(운영 경로에선 status 로 매핑돼 버려지는 정보를
+    의심 문장에 한해 evaluate_sentence 재호출로 복원) + 실제 run 의 final_status.
+  - 집계(`_summarize_debug_verify`): final 분포 / NOT_SUPPORTED 의 raw label 분포 /
+    토큰 위치 분포 → (a)~(d) 중 어디가 주범인지 한눈에.
+- 비용: 단일 질의 풀 파이프라인 1회 + 의심 문장 2단계 재호출(소수) ≈ 무료. 운영 LLM
+  필요(raw label 의미) → `--use-real-adapters` 권장. `reports/debug_verify_<ts>.json` 저장.
+
+### 3. 수정 파일
+
+- `scripts/run_evaluation.py` — `--debug-verify` argparse + main 분기 + `_run_debug_verify`
+  + 순수 헬퍼 `_classify_token_location` / `_summarize_debug_verify` / `_print_debug_verify`
+- `tests/scripts/test_run_evaluation.py` — 순수 헬퍼 회귀 +4 (위치 분류 3 + 집계 1)
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 4. 검증
+
+- 샌드박스(3.10): `ruff` 통과 / `py_compile` OK / `pytest tests/scripts/test_run
+  _evaluation.py` **22 passed**(18+4). (`_run_debug_verify` 본체는 app import 라 Mac 실행.)
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 693 + 4 = **697 passed 예상**.
+
+### 5. ★다음 단계 — 사용자 Mac 진단 실행 후 fix 결정★
+
+- 의도별 대표 항목으로 진단(거의 무료). NOT_SUPPORTED 가 실제로 잡히는 문장 위주로:
+  - `python scripts/run_evaluation.py --debug-verify "RDS 백업 복구 절차는?" --use-real-adapters`
+  - 4종 의도 각 1건(장애/운영/정책/이력) 권장. `reports/debug_verify_*.json` 생성.
+- 결과 해석 → fix 방향(추측 금지, 데이터 기반):
+  - `absent` 다수 → recall/생성 갭(검색·청크 granularity, 생성기 컨텍스트 밖 토큰).
+  - `in_other_topk` 다수 → citation 정밀도(생성기 인용 매핑) — Agent 협의 또는 1단계가
+    인용 청크 외 Top-K 까지 보도록 grounding 범위 조정(우리 영역).
+  - `in_cited` 다수 → 1단계 토큰 매칭 false positive(형식·워드경계·범위표기 '00~07')
+    → `verifier.py` 토큰 정규화 개선(우리 영역, vendoring 무관, 가장 깨끗한 fix).
+  - NOT_SUPPORTED 의 raw label 이 LOW_CONFIDENCE/NOT_CHECKED 우세 → 2단계 매핑 정책
+    재검토(`_LABEL_MAP`, 우리 어댑터). UNSUPPORTED 우세면 진짜 미근거 → 생성/검색.
+- 진단 JSON 을 본 담당자가 읽고(저장소 파일 접근 가능) 분석 → 해당 fix 를 다음 세션에
+  구현. 본 단락에 진단 결과·결정 추가 기록.

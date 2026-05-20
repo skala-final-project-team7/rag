@@ -322,3 +322,80 @@ def test_summarize_hallucination_handles_empty_results() -> None:
     assert out["verification_total"] == 0
     assert out["answerable_n_items"] == 0
     assert out["non_answerable_n_items"] == 0
+
+
+# ---------------------------------------------------------------------------
+# feature17c-15 — 검증 진단 (--debug-verify) 순수 헬퍼
+# ---------------------------------------------------------------------------
+
+
+def test_classify_token_location_in_cited() -> None:
+    """인용 청크에 존재하면 in_cited (1단계 false positive 후보)."""
+    from scripts.run_evaluation import _classify_token_location
+
+    assert (
+        _classify_token_location(grounded_in_cited=True, grounded_in_any=True) == "in_cited"
+    )
+
+
+def test_classify_token_location_in_other_topk() -> None:
+    """인용엔 없으나 다른 Top-K 에 있으면 in_other_topk (citation 정밀도)."""
+    from scripts.run_evaluation import _classify_token_location
+
+    assert (
+        _classify_token_location(grounded_in_cited=False, grounded_in_any=True)
+        == "in_other_topk"
+    )
+
+
+def test_classify_token_location_absent() -> None:
+    """어느 Top-K 에도 없으면 absent (recall·생성 갭)."""
+    from scripts.run_evaluation import _classify_token_location
+
+    assert (
+        _classify_token_location(grounded_in_cited=False, grounded_in_any=False) == "absent"
+    )
+
+
+def _verify_rec(
+    *,
+    sid: int,
+    final: str,
+    suspicious: bool = True,
+    raw_label: str | None = None,
+    locations: list[str] | None = None,
+) -> dict:
+    return {
+        "sentence_id": sid,
+        "sentence": f"sentence {sid}",
+        "cited_chunks": [1],
+        "checkable_tokens": [],
+        "unverified_tokens": [{"token": f"t{i}", "location": loc} for i, loc in
+                              enumerate(locations or [])],
+        "suspicious": suspicious,
+        "stage2_raw_label": raw_label,
+        "stage2_score": None,
+        "stage2_reason": None,
+        "final_status": final,
+    }
+
+
+def test_summarize_debug_verify_distributions() -> None:
+    """final 상태/raw label/토큰 위치 분포를 집계한다."""
+    from scripts.run_evaluation import _summarize_debug_verify
+
+    records = [
+        _verify_rec(sid=1, final="PASS", suspicious=False),
+        _verify_rec(sid=2, final="NOT_SUPPORTED", raw_label="low_confidence",
+                    locations=["absent", "in_other_topk"]),
+        _verify_rec(sid=3, final="NOT_SUPPORTED", raw_label="unsupported",
+                    locations=["absent"]),
+        _verify_rec(sid=4, final="SUPPORTED", raw_label="supported", locations=[]),
+    ]
+    out = _summarize_debug_verify(records)
+
+    assert out["n_sentences"] == 4
+    assert out["final_status_dist"] == {"PASS": 1, "NOT_SUPPORTED": 2, "SUPPORTED": 1}
+    # NOT_SUPPORTED 만 raw label 집계
+    assert out["not_supported_raw_label_dist"] == {"low_confidence": 1, "unsupported": 1}
+    assert out["unverified_token_location_dist"] == {"absent": 2, "in_other_topk": 1}
