@@ -102,3 +102,95 @@ def test_compute_bert_score_f1_avg_raises_without_library(
 
     with pytest.raises(ImportError, match="evaluation"):
         _compute_bert_score_f1_avg(["pred"], ["ref"])
+
+
+# ---------------------------------------------------------------------------
+# feature17b 정밀 매칭 회귀 (2026-05-20) — _load_page_id_to_webui_link / _precision_match
+# ---------------------------------------------------------------------------
+
+
+def test_load_page_id_to_webui_link_reads_confluence_and_datadog(tmp_path) -> None:
+    """samples 의 두 JSON 파일에서 page_id → webui_link 매핑이 합쳐져 로드된다."""
+    import json
+
+    from scripts.run_evaluation import _load_page_id_to_webui_link
+
+    samples_dir = tmp_path / "samples"
+    samples_dir.mkdir()
+    (samples_dir / "confluence_sample_data.json").write_text(
+        json.dumps(
+            {
+                "single_page_responses": [
+                    {"id": "100001", "_links": {"webui": "/display/CLOUD/A"}},
+                    {"id": "100002", "_links": {"webui": "/display/CLOUD/B"}},
+                ]
+            }
+        )
+    )
+    (samples_dir / "datadog_docs.json").write_text(
+        json.dumps(
+            {
+                "single_page_responses": [
+                    {"id": "dd001", "_links": {"webui": "https://docs/x"}},
+                ]
+            }
+        )
+    )
+
+    mapping = _load_page_id_to_webui_link(samples_dir=samples_dir)
+    assert mapping == {
+        "100001": "/display/CLOUD/A",
+        "100002": "/display/CLOUD/B",
+        "dd001": "https://docs/x",
+    }
+
+
+def test_load_page_id_to_webui_link_returns_empty_when_samples_missing(tmp_path) -> None:
+    """samples 디렉토리가 없거나 파일이 없으면 빈 dict 반환 (호출 측이 fallback)."""
+    from scripts.run_evaluation import _load_page_id_to_webui_link
+
+    mapping = _load_page_id_to_webui_link(samples_dir=tmp_path / "no_such")
+    assert mapping == {}
+
+
+def _fake_source(confluence_url: str):
+    """Source 의 confluence_url 만 채운 가벼운 sentinel."""
+    return types.SimpleNamespace(confluence_url=confluence_url)
+
+
+def test_precision_match_strict_hit_via_webui_link() -> None:
+    """expected_page_ids 의 webui_link 중 하나가 sources confluence_url 에 있으면 hit."""
+    from scripts.run_evaluation import _precision_match
+
+    mapping = {"100001": "/display/CLOUD/A", "100002": "/display/CLOUD/B"}
+    sources = [_fake_source("/display/CLOUD/B"), _fake_source("/display/CLOUD/Z")]
+
+    assert _precision_match(sources, {"100001", "100002"}, mapping) is True
+
+
+def test_precision_match_strict_miss_when_webui_link_not_in_sources() -> None:
+    """expected_page_ids 의 webui_link 가 sources 에 없으면 miss."""
+    from scripts.run_evaluation import _precision_match
+
+    mapping = {"100001": "/display/CLOUD/A"}
+    sources = [_fake_source("/display/CLOUD/Z")]
+
+    assert _precision_match(sources, {"100001"}, mapping) is False
+
+
+def test_precision_match_falls_back_to_loose_when_mapping_empty() -> None:
+    """samples lookup 부재 시 sources 비어 있지 않으면 hit (약식)."""
+    from scripts.run_evaluation import _precision_match
+
+    sources = [_fake_source("/whatever")]
+
+    # mapping 자체가 비어 있음 → loose fallback.
+    assert _precision_match(sources, {"100001"}, {}) is True
+
+
+def test_precision_match_returns_false_when_no_expected_page_ids() -> None:
+    """expected_page_ids 가 비어 있으면 항상 miss (집계 대상 제외)."""
+    from scripts.run_evaluation import _precision_match
+
+    sources = [_fake_source("/display/CLOUD/A")]
+    assert _precision_match(sources, set(), {"100001": "/display/CLOUD/A"}) is False

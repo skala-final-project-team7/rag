@@ -151,15 +151,22 @@ def _coerce_metadata_filters(
     QdrantPoolStore는 ``str | list[str]`` 만 받는다(MatchValue/MatchAny). 라우터가 채운
     값이 그 두 타입이 아니면 None으로 떨어뜨려 무시한다 — 잘못된 값으로 검색이 망가지는
     것보다 필터 미적용이 안전하다.
+
+    빈 list (``[]``) / 빈 문자열 (``""``) 은 명시적으로 거른다 — Qdrant ``MatchAny
+    (any=[])`` 는 어떤 값과도 매칭되지 않아 must 결합 시 모든 결과를 차단한다 (2026-
+    05-20 라우터의 빈 배열 metadata_filters 가 검색 0건을 일관 유발하던 버그 수정).
     """
     if not metadata_filters:
         return None
     coerced: dict[str, str | list[str]] = {}
     for key, value in metadata_filters.items():
         if isinstance(value, str):
-            coerced[key] = value
-        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
-            coerced[key] = value
+            if value:  # 빈 문자열 거름.
+                coerced[key] = value
+        elif isinstance(value, list):
+            # 빈 list 거름 + 모든 원소가 str 일 때만 받음.
+            if value and all(isinstance(item, str) for item in value):
+                coerced[key] = value
     return coerced or None
 
 
