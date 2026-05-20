@@ -173,7 +173,10 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     from answer_verification_agent.evaluator.providers import OpenAIEvaluatorProvider
     from app.ingestion.embedder.dense import E5DenseEmbedder
     from app.ingestion.embedder.sparse import BM25SparseEmbedder
-    from app.query.openai_transport import build_openai_chat_transport
+    from app.query.openai_transport import (
+        CONSERVATIVE_SYSTEM_GUARD,
+        build_openai_chat_transport,
+    )
     from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
     from app.query.routing_transport import build_openai_routing_transport
     from app.storage.chunk_lookup import MongoChunkTextLookup
@@ -230,9 +233,15 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
         model=settings.llm_answer_model,
         fallback_model=settings.llm_aux_model,
     )
+    # feature17c-14 — 환각 보수성 guard (opt-in). settings.generator_conservative_guard
+    # True 일 때만 CONSERVATIVE_SYSTEM_GUARD 를 transport 에 주입(기본 None=기존 동작).
+    generator_guard = CONSERVATIVE_SYSTEM_GUARD if settings.generator_conservative_guard else None
     generator_provider = OpenAIAnswerLLMProvider(
         api_key=openai_api_key,
-        transport=build_openai_chat_transport(api_key=openai_api_key),
+        transport=build_openai_chat_transport(
+            api_key=openai_api_key,
+            system_prompt_suffix=generator_guard,
+        ),
     )
 
     return QueryGraphDeps(

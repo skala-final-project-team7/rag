@@ -5857,3 +5857,150 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   - full 50건 평가(--use-real-adapters)는 마일스톤 측정에만. 매 수정마다 돌리지 말 것.
   - 반복 측정엔 축소 eval-set(예: 10건 subset JSON) 권장 — 비용 1/5. (필요 시
     run_evaluation 에 `--limit N` 추가 가능 — 본 담당자 제공 가능.)
+
+---
+
+## 2026-05-20 — feature17c-13: 환각 측정 공정화 (is_answerable 분리)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 코퍼스에 정답 근거가 없어 시스템이 거부하는 것이 올바른 항목(정상 거부)이
+  NOT_SUPPORTED 로 집계돼 환각 비율을 과대 측정하는 문제를 데이터·집계 로직으로 분리.
+  코드 경로(검색/rerank/생성/검증) 무변경 — 측정 공정화만. API 비용 0.
+
+### 1. 변경 — evaluation_set.json `is_answerable` 플래그
+
+- 50건 각 item 에 `is_answerable` 필드 추가. 정적 확인 결과 코퍼스에 정답이 없는
+  **EVAL-021(DiskPressure)** / **EVAL-046(야간비용)** 만 `false`, 나머지 48건 `true`.
+  - 두 항목은 claude_bootstrap 라벨로 expected_answer_excerpt/page 가 생성됐으나
+    정적 확인 시 해당 디테일이 코퍼스에 미수록 → 시스템의 거부가 정답.
+  - EVAL-044(Q1 평균 노드 수)는 일자별 원자료는 있으나 평균 미산출인 **경계 항목** —
+    정적으로 "답 없음" 확정이 아니라 보수적으로 `true` 유지(과대 분리 방지).
+- `design_constraints.notes` 에 필드 의미 1줄 추가.
+
+### 2. 변경 — run_evaluation.py 집계 분리
+
+- `_summarize_hallucination(results)` 순수 헬퍼 신설(앱 의존 없음 → 샌드박스 단위테스트 가능):
+  - 전체 지표 `not_supported_ratio`(투명성 위해 유지) + **공정 지표
+    `not_supported_ratio_answerable`**(is_answerable=false 제외) 동시 산출.
+  - `answerable_n_items` / `non_answerable_n_items` / `non_answerable_correct_refusal
+    _n_items`(non-answerable 중 검색 0건=올바른 거부) 진단 카운트.
+- 루프 인라인 누적 제거 → 루프 후 헬퍼로 산출. 각 result 에 `is_answerable` 기록.
+- **Precision@k 헤드라인(80%)·기타 지표 무변경** — 환각 집계만 분리(미션 범위 준수).
+
+### 3. baseline(063441) 데이터 재집계 실측 (★효과는 작음 — 정직 보고★)
+
+| 지표 | 값 |
+|------|-----|
+| 전체 NOT_SUPPORTED | 39.18% (76/194) |
+| **answerable 만(공정)** | **38.74% (74/191)** |
+| non-answerable 항목 | 2건(EVAL-021/046) |
+| └ 올바른 거부(검색 0건) | 1건 (EVAL-021 n_src=0). EVAL-046 은 n_src=1 로 답변 시도 |
+
+- **핵심: is_answerable 분리 효과는 39.18→38.74%, 약 0.5pp 에 불과.** 환각 76문장 중
+  답없는 항목 기여는 2문장뿐이고, 나머지 74문장은 모두 answerable 항목에서 발생.
+  → "답없는 항목 때문에 39% 과대 측정"이라는 가정의 실제 효과는 작으며, **환각 KPI
+  미달(목표 15%)의 본질은 answerable 항목의 생성기 보수성 부족**임이 데이터로 확인됨.
+- 측정 공정성 인프라 자체는 옳으므로 도입(향후 평가셋에 답없는 항목이 늘면 자동 분리).
+- EVAL-046(non-answerable인데 n_src=1로 답변 시도)은 거부 실패 케이스 — 생성기 prompt
+  보수성 튜닝(Agent 영역) 후보로 기록.
+- ※ 위 수치는 baseline 리포트 results 에 신규 플래그를 입혀 재집계한 값. 사용자 Mac
+  실 재평가는 LLM 비결정성으로 미세 상이할 수 있음(인프라는 검증 완료).
+
+### 4. 수정 파일
+
+- `samples/evaluation_set.json` — `is_answerable`(021/046=false, 48건 true) + notes 1줄
+- `scripts/run_evaluation.py` — `_summarize_hallucination` 헬퍼 + summary 와이어링 +
+  result `is_answerable` 기록 + docstring 변경내역
+- `tests/scripts/test_run_evaluation.py` — `_summarize_hallucination` 회귀 +4
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증
+
+- 샌드박스(Python 3.10): `ruff check` 통과 / `pytest tests/scripts/test_run_evaluation.py`
+  **18 passed**(기존 14 + 신규 4). evaluation_set.json 유효성·플래그 카운트 확인.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 685 + 4 = **689 passed 예상**.
+
+### 6. 후속 (사용자 Mac)
+
+- 재평가 시 summary 에 `not_supported_ratio_answerable` 가 공정 지표로 출력됨. 527
+  리포트의 환각 지표는 이 값을 기준으로 보고 권장(전체값과 병기).
+- 본질 개선(answerable 38.7%)은 생성기 prompt 보수성 튜닝(Agent 영역) 과제로 잔존
+  → feature17c-14 로 착수(어댑터 seam, opt-in).
+
+---
+
+## 2026-05-20 — feature17c-14: 생성기 환각 보수성 guard (어댑터 seam, opt-in)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17c-13 에서 환각의 본질이 answerable 항목의 생성기 미근거 문장
+  (NOT_SUPPORTED 38.7%)임을 확인 → 생성기 보수성을 강화하는 prompt guard 를 도입.
+  **Agent 담당자 변경 허락 + 사용자 결정으로 진행.** 단, CLAUDE.md 절대 규칙·본 영역
+  제약(vendoring 무수정, 어댑터에서만 조정)을 지켜 vendored 프롬프트를 직접 고치지
+  않고 **transport 어댑터 경계에 주입**, **기본 OFF(opt-in)** 로 구현.
+
+### 1. 구조 분석 — 왜 어댑터 seam 인가
+
+- 생성기 시스템 프롬프트는 `answer_generation_agent/generation/prompt_template.py`
+  의 `_build_system_prompt()` 에 하드코딩되어 있고, `AnswerGenerationService.generate`
+  가 `build_prompt_payload()` 를 직접 호출 → **외부 주입 인자/seam 이 없음**.
+- 단, `OpenAIAnswerLLMProvider` 는 transport callable 을 주입받고, 본 저장소 어댑터
+  `app/query/openai_transport.py` 의 `_normalize_messages` 가 system/developer 메시지를
+  단일 system 메시지로 합친다 → **이 어댑터 경계가 vendoring 무수정으로 system 프롬프트를
+  보강할 유일한 깨끗한 지점**. (사용자 선택: 어댑터 seam / vendored 직접수정 거부.)
+
+### 2. 변경 내용
+
+- `app/query/openai_transport.py`:
+  - `CONSERVATIVE_SYSTEM_GUARD` 상수 신설 — 미근거 문장 억제 지침 5줄(인용 context
+    내 사실만 진술 / context 밖 추론·일반지식·권고 금지 / 미근거는 unsupported_gaps /
+    추측성 표현 금지 / citation 없는 문장 미출력). vendored system_prompt 를 약화하지
+    않고 **끝에 보강**(append).
+  - `build_openai_chat_transport(system_prompt_suffix=None)` 인자 추가.
+  - `_normalize_messages(messages, *, system_suffix=None)` — suffix 가 비지 않으면
+    합쳐진 system part 마지막에 추가. system 부재 시 suffix 단독 system 생성.
+- `app/config.py`: `generator_conservative_guard: bool = False`(기본 OFF).
+- `app/api/deps.py`: True 일 때만 `CONSERVATIVE_SYSTEM_GUARD` 를 transport 에 주입
+  (기본 None=기존 동작 무변).
+- `.env.example`: `# RAG_GENERATOR_CONSERVATIVE_GUARD=false` + A/B 안내.
+
+### 3. 왜 opt-in(기본 OFF) 인가 — 트레이드오프·미검증
+
+- 효과(NOT_SUPPORTED 감소)는 **본 세션에서 측정 불가**: 앱 단위 테스트는 Mac(3.11)
+  필요, full eval 은 비용. baseline 리포트엔 문장 텍스트가 없어 실패 모드 정밀 진단도
+  불가. → 켜고 끄며 `not_supported_ratio_answerable`(feature17c-13)로 **A/B 측정**해야
+  의미가 있음.
+- 보수성 과도 시 답변 완성도(ROUGE-L/BERTScore) 하락·과도 거부 위험 → 기본 OFF 로
+  기존 동작을 보존하고, 측정 후 켤지 결정. 롤백은 .env 토글 한 줄.
+
+### 4. 수정 파일
+
+- `app/query/openai_transport.py` — guard 상수 + transport 인자 + `_normalize_messages`
+- `app/config.py` — `generator_conservative_guard` 토글
+- `app/api/deps.py` — opt-in 주입 wiring
+- `.env.example` — 토글 안내
+- `tests/query/test_openai_transport.py` — suffix 주입/미주입 회귀 +2
+- `tests/api/test_deps.py` — 토글 True/False wiring 회귀 +2
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증
+
+- 샌드박스(Python 3.10): `ruff check` 5개 파일 통과. `openai_transport.py` 는 상단
+  app 의존이 없어 파일 독립 로드로 `_normalize_messages` 순수 로직 4종 검증 통과
+  (기본 무보강 / suffix append+vendored 보존 / 빈 suffix 무시 / system 부재 시 단독).
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 689 + 4 = **693 passed 예상**
+  (transport +2, deps +2).
+
+### 6. ★Agent 담당자 통보 + 사용자 Mac A/B★
+
+- **Agent 담당자 통보**: 본 변경은 vendored `answer_generation_agent` 무수정. 생성기
+  보수성을 RAG 어댑터(transport) 경계에서 system 프롬프트 보강으로 강화하는 opt-in
+  토글을 추가했음. vendored 프롬프트 자체를 보수화하려면 Agent 측 prompt_template
+  갱신이 정식 경로(본 어댑터 guard 는 그때까지의 운영 레버 + A/B 수단).
+- **A/B 측정 절차(Mac)**:
+  1. baseline(OFF): `.env` 에 `RAG_GENERATOR_CONSERVATIVE_GUARD` 미설정/false →
+     `python scripts/run_evaluation.py --use-real-adapters` → `not_supported_ratio
+     _answerable` 기록.
+  2. guard(ON): `.env` 에 `RAG_GENERATOR_CONSERVATIVE_GUARD=true` → 재평가 →
+     `not_supported_ratio_answerable` + ROUGE-L/BERTScore + Precision@3 비교.
+  3. 환각↓ & 완성도 큰 손실 없으면 ON 채택, 아니면 OFF 유지. 결과를 본 단락에 기록.
+  - 반복은 축소 eval-set 권장(비용). 진단만이면 단건 질의로 답변 변화 육안 확인 가능.

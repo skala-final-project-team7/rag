@@ -640,8 +640,19 @@ BE 담당자 명세 확정 후 진행.
     지연 우선 원복. bge 는 운영 GPU 환경 재검토. device 설정(17c-11)은 유지.
   - [x] **평가 비용 분석** — reranker=로컬(비용 0). full 50건 평가 ≈ $0.5~2/회(추정),
     $134 한도 대비 충분. 진단은 --debug-rerank/route(거의 무료), full 평가는 마일스톤만.
-  - [ ] NOT_SUPPORTED 39% — 생성기 prompt 보수성 튜닝(Agent 영역, 협의/이관).
-  - [ ] 평가셋 답없는 항목(EVAL-021 DiskPressure/046 야간비용) 분리(is_answerable).
+  - [x] **feature17c-13** — 환각 측정 공정화: evaluation_set.json `is_answerable`
+    (EVAL-021/046=false, 48건 true) + run_evaluation `_summarize_hallucination` 헬퍼로
+    answerable 분리(`not_supported_ratio_answerable` 신설, 전체값 유지) + 회귀 4건.
+    baseline 재집계 실측: 전체 39.18% → answerable 38.74%(**약 0.5pp만 감소**) →
+    환각의 본질은 답없는 항목이 아니라 answerable 항목의 생성기 보수성 부족임을 데이터로
+    확인. 코드 경로 무변경, Precision 헤드라인 80% 유지.
+  - [x] **feature17c-14** — 생성기 환각 보수성 guard (어댑터 seam, opt-in). 생성기
+    system 프롬프트가 vendoring 안에 하드코딩돼 주입 seam 이 없어, transport 어댑터
+    경계(`app/query/openai_transport.py` `_normalize_messages`)에 `CONSERVATIVE_SYSTEM
+    _GUARD` 를 덧붙이는 방식으로 강화(vendoring 무수정). `generator_conservative_guard`
+    토글 기본 OFF → `.env` 로 A/B(`not_supported_ratio_answerable` 비교 후 채택 결정).
+    회귀 +4(transport 2 + deps 2). 효과는 사용자 Mac A/B 측정 대기(미검증). Agent
+    담당자 통보 — vendored 프롬프트 보수화는 Agent 측 정식 경로.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선
