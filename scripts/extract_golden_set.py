@@ -80,10 +80,12 @@ def main() -> int:
     parser.add_argument(
         "--top1-threshold",
         type=float,
-        default=0.85,
+        default=0.80,
         help=(
-            "Cross-Encoder Top-1 점수 임계값 (기본 0.85). 0~1 또는 0~100 스케일 "
-            "모두 허용 — ≤ 1.0 이면 0~1, 그 외 0~100 으로 자동 인식."
+            "Cross-Encoder Top-1 점수 임계값 (기본 0.80). 0~1 또는 0~100 스케일 "
+            "모두 허용 — ≤ 1.0 이면 0~1, 그 외 0~100 으로 자동 인식. "
+            "feature17c-2: temperature scaling(T=4) 도입으로 score 분포가 펴져 "
+            "설계서 §6.3 의 0.85 를 T=4 기준 0.80(강관련 logit 5.5+ 통과)으로 재조정."
         ),
     )
     parser.add_argument(

@@ -75,6 +75,18 @@ class Settings(BaseSettings):
     # Hugging Face / sentence-transformers 의 실 모델명은 ``-v2`` 가 정식이다 (``-v2``
     # 가 없는 변형은 존재하지 않음). 설계서 차기 개정 시 ``-v2`` 반영 권장.
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+    # Cross-Encoder Sigmoid temperature scaling (feature17c, 2026-05-20).
+    # ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력해 sigmoid(logit) 가
+    # 1.0 으로 saturate → Source.score 가 모두 100 으로 변별력을 잃는다. score 단계에서
+    # ``sigmoid(logit / temperature)`` 로 분포를 펴 변별력을 회복한다.
+    #
+    # feature17c-2 (2026-05-20): 운영 logit 분포 수집(--debug-rerank) 결과 강관련
+    # passage 의 logit 상한이 ~8.5~8.8 로 확인되어 T=4.0 을 기본값으로 채택. T=4 에서
+    # 강관련 score 88~90 / 중관련 ~77 / 무관 ~51 로 변별이 회복된다. select_reranked
+    # (LOW 0.55 / NARROW 0.65), formatter(LOW_CONFIDENCE_SCORE 55), extract_golden_set
+    # (top1-threshold 0.80) 임계값을 T=4 기준으로 함께 재조정. 50건 재평가로 검증 후
+    # 미세조정한다. 다른 T 가 필요하면 .env(RAG_CROSS_ENCODER_TEMPERATURE)로 override.
+    cross_encoder_temperature: float = 4.0
 
     # --- 운영 어댑터 토글 (build_real_deps 후속, 2026-05-18) ---
     # True면 lifespan이 build_real_deps 분기로 E5 + BM25 + Qdrant from_settings +

@@ -142,11 +142,12 @@ def test_seven_candidates_select_top_five_by_score() -> None:
 
     class _LetterScoreReranker(CrossEncoderReranker):
         def score(self, query: str, passages: list[str]) -> list[float]:
-            # passages 순서대로 a→0.1, b→0.2, ..., g→0.7
-            return [(idx + 1) / 10 for idx, _ in enumerate(passages)]
+            # passages 순서대로 a→0.65, b→0.70, ..., g→0.95 (모두 NARROW 이상)
+            return [0.65 + idx * 0.05 for idx, _ in enumerate(passages)]
 
     result = cross_encoder_rerank(state, reranker=_LetterScoreReranker())
-    # 모든 점수가 NARROW_SCORE_THRESHOLD(0.30) 이상이므로 Top-5 유지
+    # 모든 점수가 NARROW_SCORE_THRESHOLD(0.65) 이상이므로 Top-5 유지
+    # (feature17c-2: temperature scaling 으로 임계 0.30→0.65 재조정)
     assert len(result.top_chunks) == 5
     # 점수 내림차순 g, f, e, d, c
     ordered_ids = [c.metadata.chunk_id for c in result.top_chunks]
@@ -179,8 +180,9 @@ def test_no_narrow_when_fifth_score_at_or_above_threshold() -> None:
         for idx, letter in enumerate("abcdef")
     ]
     state = _state(candidates=chunks)
-    # 5위 == NARROW_SCORE_THRESHOLD 정확히 — 축소 안 됨 (strict less than)
-    reranker = _OrderedScoreReranker(scores=[0.9, 0.8, 0.7, 0.6, NARROW_SCORE_THRESHOLD, 0.0])
+    # 5위 == NARROW_SCORE_THRESHOLD 정확히 — 축소 안 됨 (strict less than).
+    # 정렬 후 5위가 NARROW 가 되도록 1~4위는 NARROW 초과로 둔다.
+    reranker = _OrderedScoreReranker(scores=[0.9, 0.8, 0.75, 0.7, NARROW_SCORE_THRESHOLD, 0.0])
     result = cross_encoder_rerank(state, reranker=reranker)
     assert len(result.top_chunks) == 5
 
@@ -191,11 +193,11 @@ def test_no_narrow_when_fifth_score_at_or_above_threshold() -> None:
 def test_all_low_scores_yield_low_confidence_source_scores() -> None:
     chunks = [_chunk(chunk_id="a" * 40), _chunk(chunk_id="b" * 40, chunk_index=1)]
     state = _state(candidates=chunks)
-    # 모든 점수 LOW(0.20) 미만
+    # 모든 점수 LOW(0.55) 미만 (feature17c-2: 임계 0.20→0.55 재조정)
     reranker = _ConstantScoreReranker(score=0.10)
     result = cross_encoder_rerank(state, reranker=reranker)
-    # Source.score는 정수 0~100 — 모든 score가 임계(20=LOW*100) 미만
-    assert all(src.score < 20 for src in result.sources)
+    # Source.score는 정수 0~100 — 모든 score가 임계(55=LOW*100) 미만
+    assert all(src.score < 55 for src in result.sources)
     # 본 노드는 is_low_confidence를 별도로 두지 않는다 — 포맷터(feature11)가 score로 판정
 
 
@@ -275,6 +277,25 @@ def test_source_field_mapping_for_page_chunk() -> None:
     assert src.attachment_filename is None
     assert src.attachment_mime is None
     assert src.download_url is None
+
+
+def test_rerank_scores_map_populated() -> None:
+    """feature17c-3: 실제 Cross-Encoder 점수가 RagState.rerank_scores 에 저장된다.
+
+    generator 가 출처 카드 점수에 실제 rerank 점수를 반영할 수 있도록 chunk_id →
+    score map 을 채운다 (top_chunks(Chunk)는 점수를 싣지 못하므로).
+    """
+    chunk = _chunk(chunk_id="a" * 40, text="본문 텍스트")
+    state = _state(candidates=[chunk])
+    result = cross_encoder_rerank(state, reranker=_ConstantScoreReranker(score=0.75))
+    assert result.rerank_scores == {"a" * 40: 0.75}
+
+
+def test_rerank_scores_empty_when_no_candidates() -> None:
+    """검색 0건이면 rerank_scores 는 빈 dict (기본값) 으로 유지된다."""
+    state = _state(candidates=[])
+    result = cross_encoder_rerank(state, reranker=_ConstantScoreReranker(score=0.9))
+    assert result.rerank_scores == {}
 
 
 def test_source_field_mapping_for_attachment_chunk() -> None:
@@ -379,8 +400,15 @@ def test_score_is_rounded_to_integer_percent() -> None:
 
 
 def test_low_confidence_threshold_alignment() -> None:
-    """9-A LOW_CONFIDENCE_THRESHOLD(0.20)는 Source.score 20과 정합 — 포맷터 임계 일치."""
-    assert int(LOW_CONFIDENCE_THRESHOLD * 100) == 20
+    """9-A LOW_CONFIDENCE_THRESHOLD(0.55)는 Source.score 55와 정합 — 포맷터 임계 일치.
+
+    feature17c-2: temperature scaling(T=4) 도입으로 LOW 0.20→0.55 재조정. 포맷터
+    LOW_CONFIDENCE_SCORE(55)와 같은 기준(0~1 vs 0~100)으로 일치한다.
+    """
+    from app.query.formatter import LOW_CONFIDENCE_SCORE
+
+    assert int(LOW_CONFIDENCE_THRESHOLD * 100) == 55
+    assert int(LOW_CONFIDENCE_THRESHOLD * 100) == LOW_CONFIDENCE_SCORE
 
 
 # --- chunk_id 동등성 ---

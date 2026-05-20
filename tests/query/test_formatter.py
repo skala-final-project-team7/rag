@@ -52,8 +52,9 @@ def test_normal_response_enables_feedback() -> None:
 
 
 def test_low_confidence_disables_feedback() -> None:
-    # 최고 Source 점수가 20 미만이면 저신뢰 분기 — 답변은 유지하되 feedback_enabled=False
-    sources = [_source(15), _source(10)]
+    # 최고 Source 점수가 LOW_CONFIDENCE_SCORE(55) 미만이면 저신뢰 분기 — 답변은 유지하되
+    # feedback_enabled=False (feature17c-2: temperature scaling 으로 임계 20→55 재조정)
+    sources = [_source(50), _source(40)]
     response = format_response(
         "참고할 만한 답변",
         sources,
@@ -66,11 +67,11 @@ def test_low_confidence_disables_feedback() -> None:
     assert response.answer == "참고할 만한 답변"
 
 
-def test_low_confidence_boundary_score_20() -> None:
-    # 최고 점수가 정확히 20이면 저신뢰가 아니다 (20 미만만 저신뢰)
+def test_low_confidence_boundary_score_55() -> None:
+    # 최고 점수가 정확히 55이면 저신뢰가 아니다 (55 미만만 저신뢰)
     response = format_response(
         "답변",
-        [_source(20)],
+        [_source(55)],
         [_verification(VerificationStatus.PASS)],
         Intent.OPERATION_GUIDE,
         LlmModel.GPT_4O,

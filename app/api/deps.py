@@ -185,7 +185,10 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # dense_dimension은 어댑터가 모델 로드 후 보고한 값을 사용 (E5-large = 1024).
     store = QdrantPoolStore.from_settings(settings, dense_dimension=dense.dimension)
     store.bootstrap_collections()
-    reranker = CrossEncoderRerankerImpl(settings.cross_encoder_model)
+    reranker = CrossEncoderRerankerImpl(
+        settings.cross_encoder_model,
+        temperature=settings.cross_encoder_temperature,
+    )
     # chunk_lookup은 운영 모드에서 MongoDB `chunk_lookup` 컬렉션을 가리킨다 (db-schema §2.5).
     # 컬렉션이 비어 있어도 fetch가 None을 반환하므로 download_url=None으로 안전 fallback.
     chunk_lookup = MongoChunkTextLookup.from_settings(settings)

@@ -62,6 +62,7 @@ def _state(
     target_llm: LlmModel | None = None,
     history_decision: HistoryDecision | None = None,
     rewritten_queries: list[str] | None = None,
+    rerank_scores: dict[str, float] | None = None,
 ) -> RagState:
     return RagState(
         query=query,
@@ -72,6 +73,7 @@ def _state(
         top_chunks=top_chunks if top_chunks is not None else [_make_chunk()],
         target_llm=target_llm,
         history_decision=history_decision,
+        rerank_scores=rerank_scores if rerank_scores is not None else {},
     )
 
 
@@ -225,6 +227,45 @@ def test_sources_built_from_top_chunks() -> None:
     assert first.space_key == "CLOUD"
     # source_type 매핑 — 첫 청크는 PAGE.
     assert first.source_type is SourceType.PAGE
+
+
+def test_chunk_to_top_context_payload_uses_provided_rerank_score() -> None:
+    """feature17c-3: rerank_score 가 주어지면 그대로 전달 (실제 Cross-Encoder 점수)."""
+    from app.query.generator import _chunk_to_top_context_payload
+
+    chunk = _make_chunk(chunk_id="chunk-1")
+    payload = _chunk_to_top_context_payload(chunk, index=1, rerank_score=0.89)
+    assert payload["rerank_score"] == 0.89
+
+
+def test_chunk_to_top_context_payload_fallback_when_no_score() -> None:
+    """rerank_score 가 None 이면 순서 보존용 fallback(1 - 0.001*index) — 기존 동작."""
+    from app.query.generator import _chunk_to_top_context_payload
+
+    chunk = _make_chunk(chunk_id="chunk-1")
+    payload = _chunk_to_top_context_payload(chunk, index=3, rerank_score=None)
+    assert payload["rerank_score"] == 1.0 - 0.001 * 3
+
+
+def test_sources_reflect_real_rerank_scores() -> None:
+    """feature17c-3: rerank_scores 가 있으면 Source.score 에 실제 rerank 점수가 반영된다.
+
+    이전에는 generator 가 1-0.001*index 가짜값을 부여해 Top-1 이 항상 100 으로
+    saturate 됐다. rerank_node 가 채운 실제 점수(예: T=4 의 0.89)가 도달하면
+    Source.score = round(0.89*100) = 89.
+    """
+    chunks = [_make_chunk(chunk_id="chunk-1", page_title="운영 가이드")]
+    ctx_id_1 = f"ctx-001-{chunks[0].metadata.chunk_id[:8]}"
+    fake = FakeAnswerLLMProvider(
+        response={
+            "answer": "절차 안내.",
+            "sentences": [{"text": "절차 안내.", "citations": [ctx_id_1]}],
+            "unsupported_gaps": [],
+        }
+    )
+    state = _state(top_chunks=chunks, rerank_scores={"chunk-1": 0.89})
+    result = manage_generator(state, provider=fake)
+    assert result.sources[0].score == 89  # round(0.89 * 100) — 가짜 100 아님
 
 
 def test_attachment_source_metadata_preserved() -> None:

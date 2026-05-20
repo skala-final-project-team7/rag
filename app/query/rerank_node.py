@@ -107,6 +107,10 @@ def cross_encoder_rerank(
 
     state.top_chunks = top_chunks
     state.sources = sources
+    # feature17c-3: 실제 Cross-Encoder 점수를 chunk_id → score map 으로 보존한다.
+    # top_chunks(Chunk)는 점수를 싣지 못하므로, 답변 생성기(generator)가 출처 카드
+    # 점수에 실제 rerank 점수를 반영할 수 있도록 RagState 에 별도 저장한다.
+    state.rerank_scores = {chunk_id: score for chunk_id, score in rerank_result.top}
     return state
 
 
