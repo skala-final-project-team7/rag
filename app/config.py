@@ -95,6 +95,15 @@ class Settings(BaseSettings):
     # 있다. MPS 미지원 연산이 있으면 일부 fallback 이 발생할 수 있으니 문제 시 ``cpu``.
     cross_encoder_device: str | None = None
 
+    # 생성기 환각 보수성 guard (feature17c-14, opt-in). True 면 build_real_deps 가
+    # OpenAI transport 에 CONSERVATIVE_SYSTEM_GUARD(미근거 문장 억제 지침)를 주입해
+    # 합쳐진 system 메시지 끝에 덧붙인다. 생성기 시스템 프롬프트는 vendoring 안에
+    # 하드코딩돼 외부 주입 seam 이 없어 transport 어댑터 경계에서 보강한다(vendoring
+    # 무수정). False(기본)는 기존 동작 무변 — A/B 측정용으로 .env 로 토글한다
+    # (RAG_GENERATOR_CONSERVATIVE_GUARD=true). 효과는 not_supported_ratio_answerable
+    # (feature17c-13)로 측정. 과도 시 답변 완성도(ROUGE-L/BERTScore) 하락 가능.
+    generator_conservative_guard: bool = False
+
     # --- 운영 어댑터 토글 (build_real_deps 후속, 2026-05-18) ---
     # True면 lifespan이 build_real_deps 분기로 E5 + BM25 + Qdrant from_settings +
     # CrossEncoderRerankerImpl 부트스트랩. False(기본)는 build_poc_deps 분기로

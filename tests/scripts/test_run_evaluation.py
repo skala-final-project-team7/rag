@@ -234,3 +234,91 @@ def test_parse_pool_weights_rejects_malformed_item() -> None:
 
     with pytest.raises(ValueError, match="잘못된 pool-weights"):
         _parse_pool_weights("title=0.5,content:0.3,label:0.2")
+
+
+# ---------------------------------------------------------------------------
+# feature17c-13 — 환각 측정 공정화 (_summarize_hallucination)
+# ---------------------------------------------------------------------------
+
+
+def _ns(*statuses: str) -> list[dict[str, str]]:
+    """verification status 목록을 result 형태로 변환."""
+    return [{"sentence_id": i, "status": s} for i, s in enumerate(statuses)]
+
+
+def test_summarize_hallucination_separates_answerable() -> None:
+    """is_answerable=false 항목의 NOT_SUPPORTED 는 answerable 지표에서 제외된다."""
+    from scripts.run_evaluation import _summarize_hallucination
+
+    results = [
+        # answerable: 3문장 중 1 NOT_SUPPORTED
+        {
+            "is_answerable": True,
+            "n_sources": 3,
+            "verification": _ns("SUPPORTED", "NOT_SUPPORTED", "PASS"),
+        },
+        # answerable: 1문장 SUPPORTED
+        {"is_answerable": True, "n_sources": 2, "verification": _ns("SUPPORTED")},
+        # non-answerable: 1 NOT_SUPPORTED (올바른 거부) → answerable 집계 제외
+        {"is_answerable": False, "n_sources": 0, "verification": _ns("NOT_SUPPORTED")},
+    ]
+    out = _summarize_hallucination(results)
+
+    # 전체: 5문장 중 2 NOT_SUPPORTED
+    assert out["verification_total"] == 5
+    assert out["not_supported_count"] == 2
+    assert out["not_supported_ratio"] == pytest.approx(2 / 5)
+    # answerable 만: 4문장 중 1 NOT_SUPPORTED (non-answerable 1건 분리)
+    assert out["verification_total_answerable"] == 4
+    assert out["not_supported_count_answerable"] == 1
+    assert out["not_supported_ratio_answerable"] == pytest.approx(1 / 4)
+    assert out["answerable_n_items"] == 2
+    assert out["non_answerable_n_items"] == 1
+
+
+def test_summarize_hallucination_defaults_missing_flag_to_answerable() -> None:
+    """is_answerable 미지정 항목은 answerable(True)로 집계된다."""
+    from scripts.run_evaluation import _summarize_hallucination
+
+    results = [
+        {"n_sources": 1, "verification": _ns("NOT_SUPPORTED", "SUPPORTED")},
+    ]
+    out = _summarize_hallucination(results)
+
+    assert out["answerable_n_items"] == 1
+    assert out["non_answerable_n_items"] == 0
+    assert out["verification_total_answerable"] == 2
+    assert out["not_supported_count_answerable"] == 1
+    # 전체와 answerable 이 동일 (모두 answerable)
+    assert out["not_supported_ratio"] == out["not_supported_ratio_answerable"]
+
+
+def test_summarize_hallucination_counts_non_answerable_correct_refusal() -> None:
+    """non-answerable 항목 중 검색 후보 0건은 '올바른 거부'로 카운트된다."""
+    from scripts.run_evaluation import _summarize_hallucination
+
+    results = [
+        # non-answerable + n_sources=0 → 올바른 거부
+        {"is_answerable": False, "n_sources": 0, "verification": _ns("NOT_SUPPORTED")},
+        # non-answerable + n_sources=1 → 거부 실패(답변 시도) → 카운트 안 함
+        {"is_answerable": False, "n_sources": 1, "verification": _ns("NOT_SUPPORTED", "PASS")},
+        # answerable → 거부 카운트 무관
+        {"is_answerable": True, "n_sources": 2, "verification": _ns("SUPPORTED")},
+    ]
+    out = _summarize_hallucination(results)
+
+    assert out["non_answerable_n_items"] == 2
+    assert out["non_answerable_correct_refusal_n_items"] == 1
+
+
+def test_summarize_hallucination_handles_empty_results() -> None:
+    """결과가 없으면 비율은 None, 카운트는 0."""
+    from scripts.run_evaluation import _summarize_hallucination
+
+    out = _summarize_hallucination([])
+
+    assert out["not_supported_ratio"] is None
+    assert out["not_supported_ratio_answerable"] is None
+    assert out["verification_total"] == 0
+    assert out["answerable_n_items"] == 0
+    assert out["non_answerable_n_items"] == 0

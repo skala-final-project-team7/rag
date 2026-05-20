@@ -145,6 +145,48 @@ def test_transport_passes_model_and_temperature(
     assert client.captured_kwargs["temperature"] == 0.2
 
 
+# --- feature17c-14 환각 보수성 guard (system_prompt_suffix) ---
+
+
+def test_transport_appends_system_prompt_suffix_when_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """system_prompt_suffix 가 주어지면 합쳐진 system 메시지 끝에 덧붙는다."""
+    client = _FakeClient()
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(
+        api_key="sk-test",
+        system_prompt_suffix="[보수성 강화 지침] 미근거 문장 금지.",
+    )
+    transport(_payload())
+
+    assert client.captured_kwargs is not None
+    messages = client.captured_kwargs["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    system_content = messages[0]["content"]
+    # vendored system/developer 지침은 보존되고, suffix 가 마지막에 덧붙는다.
+    assert "system instructions" in system_content
+    assert "developer instructions" in system_content
+    assert system_content.rstrip().endswith("미근거 문장 금지.")
+
+
+def test_transport_omits_suffix_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """system_prompt_suffix 미지정(기본)이면 system 메시지는 기존 그대로(보강 없음)."""
+    client = _FakeClient()
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(api_key="sk-test")
+    transport(_payload())
+
+    assert client.captured_kwargs is not None
+    system_content = client.captured_kwargs["messages"][0]["content"]
+    # developer 합산 결과만 존재 — 보수성 guard 문구는 없다.
+    assert "보수성 강화 지침" not in system_content
+
+
 # --- 에러 흡수 ---
 
 

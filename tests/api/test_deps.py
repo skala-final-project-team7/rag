@@ -292,6 +292,33 @@ def test_build_real_deps_passes_model_names_from_settings(
     assert settings.cross_encoder_model in reranker_passed
 
 
+def test_build_real_deps_omits_conservative_guard_by_default(
+    patched_real_adapters: dict[str, Any],
+) -> None:
+    """feature17c-14 — 기본(generator_conservative_guard=False)은 transport 에
+    system_prompt_suffix 를 주입하지 않는다 (None=기존 동작)."""
+    from app.api.deps import build_real_deps
+
+    build_real_deps(_settings())
+
+    transport_kwargs = patched_real_adapters["generator_transport_init"]["kwargs"]
+    assert transport_kwargs.get("system_prompt_suffix") is None
+
+
+def test_build_real_deps_injects_conservative_guard_when_enabled(
+    patched_real_adapters: dict[str, Any],
+) -> None:
+    """feature17c-14 — generator_conservative_guard=True 면 CONSERVATIVE_SYSTEM_GUARD
+    가 transport 의 system_prompt_suffix 로 주입된다 (opt-in)."""
+    from app.api.deps import build_real_deps
+    from app.query.openai_transport import CONSERVATIVE_SYSTEM_GUARD
+
+    build_real_deps(Settings(_env_file=None, generator_conservative_guard=True))  # type: ignore[arg-type]
+
+    transport_kwargs = patched_real_adapters["generator_transport_init"]["kwargs"]
+    assert transport_kwargs.get("system_prompt_suffix") == CONSERVATIVE_SYSTEM_GUARD
+
+
 def test_build_real_deps_does_not_ingest_samples(
     patched_real_adapters: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

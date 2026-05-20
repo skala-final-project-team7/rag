@@ -25,6 +25,11 @@
     page-level 정밀 매칭한다 (chunk-level 은 여전히 불가). samples 데이터가
     없으면 약식 매칭으로 자동 fallback. summary.precision_at_k.match_method 로
     매칭 방식을 명시한다.
+  - 2026-05-20, feature17c-13 환각 측정 공정화 — Evaluation Set 의 ``is_answerable``
+    (코퍼스에 정답 근거 없는 항목 = false) 플래그를 반영해 환각(NOT_SUPPORTED) 집계를
+    ``_summarize_hallucination`` 순수 헬퍼로 분리. 전체 지표(``not_supported_ratio``)는
+    유지하고, false 항목을 제외한 ``not_supported_ratio_answerable`` 를 신설(공정 지표).
+    각 result 에 ``is_answerable`` 기록 + non-answerable 올바른 거부 진단 카운트 추가.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x
@@ -393,8 +398,6 @@ def _run_evaluation(
     intent_total = 0
     precision_at_k_hits = 0
     precision_at_k_total = 0
-    not_supported_count = 0
-    verification_total = 0
     latency_ms_list: list[int] = []
     top1_score_list: list[int] = []
     # feature17b — ROUGE-L / BERTScore 누적 (라이브러리 lazy import, summary 에 평균 출력).
@@ -449,12 +452,7 @@ def _run_evaluation(
             if response.intent.value == expected_intent:
                 intent_correct += 1
 
-        # 환각 비율.
-        for v in response.verification:
-            verification_total += 1
-            if v.status.value == "NOT_SUPPORTED":
-                not_supported_count += 1
-
+        # 환각 비율 집계는 루프 후 _summarize_hallucination 으로 산출(answerable 분리).
         latency_ms_list.append(elapsed_ms)
         if response.sources:
             top1_score_list.append(response.sources[0].score)
@@ -478,6 +476,7 @@ def _run_evaluation(
                     else None
                 ),
                 "expected_page_ids": list(expected_page_ids),
+                "is_answerable": item.get("is_answerable", True),
                 "actual_top_k_source_titles": [s.title for s in top_k_sources],
                 "n_sources": len(response.sources),
                 "top1_score": response.sources[0].score if response.sources else None,
@@ -514,11 +513,8 @@ def _run_evaluation(
             "denom": precision_at_k_total,
             "match_method": match_method,
         },
-        "not_supported_ratio": (
-            not_supported_count / verification_total if verification_total else None
-        ),
-        "verification_total": verification_total,
-        "not_supported_count": not_supported_count,
+        # feature17c-13 — 환각 집계(전체 + is_answerable 분리). 키 추가라 하위호환.
+        **_summarize_hallucination(results),
         "latency_ms_avg": (
             sum(latency_ms_list) / len(latency_ms_list) if latency_ms_list else None
         ),
@@ -622,6 +618,63 @@ def _precision_match(
             )
     # samples lookup 부재 또는 expected page_id 가 lookup 에 없음 → 약식.
     return len(top_k_sources) > 0
+
+
+def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """검증 결과(per-item)에서 환각(NOT_SUPPORTED) 집계를 산출한다 (feature17c-13).
+
+    ``is_answerable=false`` 항목은 코퍼스에 정답 근거가 없어 시스템이 거부(NOT_SUPPORTED)
+    하는 것이 올바른 동작이므로, 이를 환각 지표에서 분리한 ``*_answerable`` 값을 별도로
+    산출한다. 전체 지표(``not_supported_ratio``)는 투명성을 위해 함께 유지한다.
+
+    각 result 는 ``is_answerable``(미지정 시 True), ``n_sources``,
+    ``verification=[{"status": ...}, ...]`` 를 포함한다고 가정한다. 순수 함수라
+    앱 의존 없이 단위 테스트 가능.
+    """
+    verification_total = 0
+    not_supported_count = 0
+    verification_total_answerable = 0
+    not_supported_count_answerable = 0
+    answerable_n = 0
+    non_answerable_n = 0
+    non_answerable_correct_refusal_n = 0
+
+    for r in results:
+        is_answerable = r.get("is_answerable", True)
+        if is_answerable:
+            answerable_n += 1
+        else:
+            non_answerable_n += 1
+            # 검색 후보 0건 = 검색 단계에서 올바르게 거부(근거 없음 → 답변 시도 안 함).
+            if not r.get("n_sources"):
+                non_answerable_correct_refusal_n += 1
+        for v in r.get("verification", []):
+            verification_total += 1
+            is_ns = v.get("status") == "NOT_SUPPORTED"
+            if is_ns:
+                not_supported_count += 1
+            if is_answerable:
+                verification_total_answerable += 1
+                if is_ns:
+                    not_supported_count_answerable += 1
+
+    return {
+        "not_supported_ratio": (
+            not_supported_count / verification_total if verification_total else None
+        ),
+        "not_supported_count": not_supported_count,
+        "verification_total": verification_total,
+        "not_supported_ratio_answerable": (
+            not_supported_count_answerable / verification_total_answerable
+            if verification_total_answerable
+            else None
+        ),
+        "not_supported_count_answerable": not_supported_count_answerable,
+        "verification_total_answerable": verification_total_answerable,
+        "answerable_n_items": answerable_n,
+        "non_answerable_n_items": non_answerable_n,
+        "non_answerable_correct_refusal_n_items": non_answerable_correct_refusal_n,
+    }
 
 
 def _compute_rouge_l_f1_avg(predictions: list[str], references: list[str]) -> float:

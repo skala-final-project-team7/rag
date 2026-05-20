@@ -16,7 +16,8 @@
       "expected_chunk_ids 는 정답 청크의 SHA1(page_id+chunk_index+attachment_id) 식별자 — `scripts/backfill_chunk_ids.py` 가 운영 Qdrant scroll 로 자동 채움.",
       "expected_answer_excerpt 는 우수 답변의 핵심 문장 1~2개 — ROUGE-L / BERTScore 자동 평가 입력.",
       "is_attachment_focused=true 인 항목은 첨부 파일에서 정답이 나와야 하는 항목 (설계서 v0.2.2 신설).",
-      "label_source=human: 사람이 직접 라벨링 / label_source=claude_bootstrap: Claude 가 samples 페이지 기반 자동 라벨링. claude_bootstrap 항목은 사용자 검수 후 LLM-as-Judge 순환 문제 회피를 위해 신중히 사용 — bootstrap 회귀 평가 용도까지가 권장 범위, 최종 Golden Set 채택 시 사용자 피드백 추가 검증 필요."
+      "label_source=human: 사람이 직접 라벨링 / label_source=claude_bootstrap: Claude 가 samples 페이지 기반 자동 라벨링. claude_bootstrap 항목은 사용자 검수 후 LLM-as-Judge 순환 문제 회피를 위해 신중히 사용 — bootstrap 회귀 평가 용도까지가 권장 범위, 최종 Golden Set 채택 시 사용자 피드백 추가 검증 필요.",
+      "is_answerable=false 인 항목은 코퍼스에 정답 근거가 없어 시스템이 거부하는 것이 올바른 동작인 항목 (bootstrap 라벨의 expected_answer_excerpt/page 는 생성됐으나 정적 확인 결과 코퍼스에 미수록). run_evaluation.py 가 환각(NOT_SUPPORTED) 집계에서 분리한다 (feature17c-13). 미지정 시 기본 true."
     ]
   },
   "items": [
@@ -39,7 +40,8 @@
         "fdf17ec550fb59b907d5fa8c7c67e8483aad1ee5"
       ],
       "expected_answer_excerpt": "kubelet 로그 확인 → Security Group 인바운드 규칙 (443, 10250) 확인 → IAM Role EKSNodeRole 정책 점검 순서로 진단합니다.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-002",
@@ -57,7 +59,8 @@
         "f91e40539c0d31798cd5a6745c2e65fdfb6d7502"
       ],
       "expected_answer_excerpt": "ElastiCache Redis 메모리 사용량 100% 도달 → 세션 키 evict → maxmemory-policy 점검 + 인스턴스 스케일업.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-003",
@@ -75,7 +78,8 @@
         "ffcb26fd5d1b528fb7c1ee42dfedcb2e391bfa5c"
       ],
       "expected_answer_excerpt": "Lambda 동시 호출 급증으로 새 컨테이너 초기화 지연 → Provisioned Concurrency 적용 후 P95 회복.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-004",
@@ -93,7 +97,8 @@
         "cb3a5e86de98257635985d74a4fa629ab402c056"
       ],
       "expected_answer_excerpt": "ProvisionedThroughputExceededException 발생 → On-Demand 전환 또는 Auto Scaling 임계 조정.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-005",
@@ -108,7 +113,8 @@
         "a219030b3855a82c6453c06adfa570b6a4a39b47"
       ],
       "expected_answer_excerpt": "IAM Role 생성 → Helm chart 설치 → Provisioner CRD 정의 → 노드그룹 마이그레이션.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-006",
@@ -123,7 +129,8 @@
         "943fa09c774c129ffa80cbc8c303d7788d8743f2"
       ],
       "expected_answer_excerpt": "자동 스냅샷 + 수동 스냅샷 정책 + PITR (Point-in-Time Recovery) 활용.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-007",
@@ -138,7 +145,8 @@
         "8d7e341be749ae33639efa0d4900912da70f7dd4"
       ],
       "expected_answer_excerpt": "argocd app sync / argocd app rollback / argocd app diff 가 주요 운영 명령입니다.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-008",
@@ -154,7 +162,8 @@
         "ea6d3c2e3420638f9bae1f179303b5fdd3101146"
       ],
       "expected_answer_excerpt": "IAM 정책 변경은 PR 기반 검토 + 최소 권한 원칙 + 변경 이력 CloudTrail 로 기록.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-009",
@@ -169,7 +178,8 @@
         "b0adb216a1f33f73fd5482c155a794ea1aa1a8ee"
       ],
       "expected_answer_excerpt": "<환경>-<서비스>-<용도> 네이밍 + 버전 관리 활성화 + Public Access Block 강제.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-010",
@@ -184,7 +194,8 @@
         "6104ea84630b78062d0e59823662d3faddeaf227"
       ],
       "expected_answer_excerpt": "NAT Gateway 트래픽 분석 후 S3/DynamoDB VPC Endpoint 도입 (월 $500 절감), Dev 환경 야간/주말 자동 셧다운 ($800 절감), 미사용 EBS 볼륨 정리.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-011",
@@ -204,7 +215,8 @@
         "ccf2bb708b18aa853ae596e5716b7adcd6e8b19b"
       ],
       "expected_answer_excerpt": "데이터 파이프라인의 S3 버킷 접근 권한이 누락되어 P1 장애 발생. IAM Role 정책에 s3:GetObject / ListBucket 권한 추가 후 복구.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-012",
@@ -222,7 +234,8 @@
         "ff7be40cb217a149764a5be0c4e309d1f79c2cd0"
       ],
       "expected_answer_excerpt": "Connection pool exhausted 에러 발생 → max_connections 증대 + 애플리케이션 측 connection leak 패치.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-013",
@@ -240,7 +253,8 @@
         "df0d0145456a5545d061efe761cfe2a52687972c"
       ],
       "expected_answer_excerpt": "프론트엔드 배포 후 이전 JS/CSS 파일이 캐시에서 계속 서빙. CI/CD 의 CloudFront invalidation 호출 보강 + 강제 무효화 수행.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-014",
@@ -257,7 +271,8 @@
         "e3bcc2e687f0d66a6c869c5cf555e55a2b2a3711"
       ],
       "expected_answer_excerpt": "Terraform 으로 Route53 레코드 업데이트 시 기존 CNAME 캐시로 NXDOMAIN. TTL 단축 + 강제 propagation 대기.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-015",
@@ -274,7 +289,8 @@
         "861a280a7fb77bb665ad730dc168b2b603bf7b5a"
       ],
       "expected_answer_excerpt": "ECR 인증 토큰 만료 (12시간) 또는 노드 IAM Role 의 ECR 권한 부족 점검. kubectl describe pod 의 Events 에서 unauthorized 메시지 확인.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-016",
@@ -291,7 +307,8 @@
         "c9803d3792c8b61d54d013dc702b035c26784d01"
       ],
       "expected_answer_excerpt": "DynamoDB 의 잔존 Lock 확인 → 다른 사용자가 실행 중이 아닌 것을 확인한 뒤 terraform force-unlock <LOCK_ID> 실행.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-017",
@@ -307,7 +324,8 @@
         "6f08600f112e3b4b9e05fcf23d55267683518c61"
       ],
       "expected_answer_excerpt": "사내 네트워크 연결 확인 → FortiClient 7.0.x 이상 버전 업데이트 → 방화벽/백신이 UDP 4433 포트를 차단하는지 점검.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-018",
@@ -324,7 +342,8 @@
         "d2f1735c2a31ff6e75ef2ca51ce76494de9fc924"
       ],
       "expected_answer_excerpt": "package-lock.json 과 package.json 의 의존성 버전 불일치 → npm install --legacy-peer-deps 또는 lock 파일 재생성.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-019",
@@ -339,7 +358,8 @@
         "c6b0dc02a0365e1426591c7cafeafac80846fa24"
       ],
       "expected_answer_excerpt": "Pod memory limit 점검 → Right-Sizing 가이드 (P90 + 30% buffer) 적용 → kubelet eviction policy 확인.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": true
     },
     {
       "id": "EVAL-020",
@@ -360,7 +380,8 @@
         "fdf17ec550fb59b907d5fa8c7c67e8483aad1ee5"
       ],
       "expected_answer_excerpt": "journalctl -u kubelet -f 로 실시간 로그 확인 → 노드 SSH 접속 후 디스크/메모리 사용량 점검 → 필요 시 노드 강제 재부팅.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-021",
@@ -375,7 +396,8 @@
         "c6b0dc02a0365e1426591c7cafeafac80846fa24"
       ],
       "expected_answer_excerpt": "ephemeral-storage 사용량 확인 → 컨테이너 로그 로테이션 / 미사용 이미지 prune → 노드 EBS 볼륨 확장.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": false
     },
     {
       "id": "EVAL-022",
@@ -395,7 +417,8 @@
         "f91e40539c0d31798cd5a6745c2e65fdfb6d7502"
       ],
       "expected_answer_excerpt": "Replica 가 새 Primary 로 승격됐는지 ElastiCache 콘솔 + redis-cli INFO replication 으로 확인. 애플리케이션의 read/write endpoint 연결 재확인.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-023",
@@ -413,7 +436,8 @@
         "ffcb26fd5d1b528fb7c1ee42dfedcb2e391bfa5c"
       ],
       "expected_answer_excerpt": "Provisioned Concurrency 즉시 적용 + 메모리 할당 상향 → 컨테이너 초기화 시간 단축.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-024",
@@ -428,7 +452,8 @@
         "bd283d42b0d5bc5ec4621ae4d7ccd1b3dcf1555d"
       ],
       "expected_answer_excerpt": "node CPU/Memory usage, Pod restart count, kubelet API latency 가 핵심 메트릭으로 정의되어 있습니다.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": true
     },
     {
       "id": "EVAL-025",
@@ -443,7 +468,8 @@
         "bd283d42b0d5bc5ec4621ae4d7ccd1b3dcf1555d"
       ],
       "expected_answer_excerpt": "P1 임계: CPU > 90% 5분 연속, Memory > 85%, Pod restart > 3회/10분.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": true
     },
     {
       "id": "EVAL-026",
@@ -458,7 +484,8 @@
         "cd54cd824a7d038e461ee2102ba14da77201e0f7"
       ],
       "expected_answer_excerpt": "requests 는 평소 사용량의 P90 수준, limits 는 P99 + 30% buffer 로 설정해 OOMKill 과 CPU throttling 을 방지.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-027",
@@ -473,7 +500,8 @@
         "6dc0521f82451b131766c1e962da114dcbc02e83"
       ],
       "expected_answer_excerpt": "TGW 라우팅 테이블에 각 VPC attachment 를 등록 + 환경별 격리를 위해 별도 라우팅 테이블 분리.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-028",
@@ -488,7 +516,8 @@
         "cbdcfeeeb08b10c7f92077b1e6b601eafa9c00e7"
       ],
       "expected_answer_excerpt": "LogQL 사용 — {namespace=\"production\"} |= \"ERROR\" | json | line_format \"...\". 라벨 필터 + 텍스트 필터 + JSON 파싱 조합.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-029",
@@ -502,7 +531,8 @@
         "20d3df5a8907c1b05b008010572f20eadea9a0a4"
       ],
       "expected_answer_excerpt": "장기 고정 워크로드는 RI (1년/3년 약정), 변동 워크로드는 Compute Savings Plan 으로 유연성 확보.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-030",
@@ -517,7 +547,8 @@
         "ff52f532b3af6a74a6327ce5c3469ea735ce8bce"
       ],
       "expected_answer_excerpt": "S3 의 CloudTrail 로그를 Athena 로 쿼리 → IAM 권한 변경 / 비정상 시간대 API 호출 / Root 계정 사용 이벤트 필터.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-031",
@@ -532,7 +563,8 @@
         "e04924406a9cb7252425a0ef09c60421a399849e"
       ],
       "expected_answer_excerpt": "S3 → AWS Lambda 트리거 → GCS Transfer Service → BigQuery External Table / Native Table 적재.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-032",
@@ -547,7 +579,8 @@
         "5296e227a605b41f5629e538ee5fc522a16d8053"
       ],
       "expected_answer_excerpt": "Git Tag 명시 (ref=v2.1.0), Semantic Versioning, 변경 시 CHANGELOG.md 업데이트 필수.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-033",
@@ -562,7 +595,8 @@
         "b3fcb80e22ffdeed7e4963068cd5560bafaddab6"
       ],
       "expected_answer_excerpt": "체크아웃 → 의존성 캐싱 → 린트 → 단위 테스트 → Docker 빌드 (multi-stage) → Trivy 컨테이너 보안 스캔 → ECR 푸시.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-034",
@@ -576,7 +610,8 @@
         "e4a65ac7bf491cfa1bdf797670ea218afca5440e"
       ],
       "expected_answer_excerpt": "AWS SSO 계정 발급, VPN 설정, kubectl + EKS 접근 확인, ArgoCD/Datadog 권한 신청.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": true
     },
     {
       "id": "EVAL-035",
@@ -590,7 +625,8 @@
         "e4a65ac7bf491cfa1bdf797670ea218afca5440e"
       ],
       "expected_answer_excerpt": "Slack #infra-support 채널에 SSO + ArgoCD 권한 신청 메시지, Cloud Platform Admin 그룹 등록.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": true
     },
     {
       "id": "EVAL-036",
@@ -605,7 +641,8 @@
         "7bafd6e7f88f9fbca4ffbd5a063a34e83fe30832"
       ],
       "expected_answer_excerpt": "Namespace 별 Role + RoleBinding 으로 최소 권한 부여. 프로덕션은 읽기 전용 + 변경은 ArgoCD 경유 강제.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-037",
@@ -620,7 +657,8 @@
         "a7bb739d4fd0cdb562dc36b0aba5be0bc782b4b2"
       ],
       "expected_answer_excerpt": "Production 10.0.0.0/16, Staging 10.1.0.0/16, Dev 10.2.0.0/16. 최소 3개 AZ + 환경별 독립 VPC.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-038",
@@ -634,7 +672,8 @@
         "9990ebf9e47fb777936f8b0d904e291034f39ad1"
       ],
       "expected_answer_excerpt": "최소 권한 원칙 + 커스텀 Role 사전 승인 + Service Account 키 90일 로테이션 + Terraform 으로 변경 관리.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-039",
@@ -650,7 +689,8 @@
         "bb050b0bfc668c5f5413fb1616e5c580b4a6977f"
       ],
       "expected_answer_excerpt": "P1 (Critical): 응답 5분 이내, 해결 목표 1시간 이내, 즉시 팀 리드 + CTO 에스컬레이션.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-040",
@@ -665,7 +705,8 @@
         "f3d7fb30a8c5843c8c16666b662a8ff4eb4ead32"
       ],
       "expected_answer_excerpt": "Terraform CLI v1.7.x LTS + AWS Provider ~> 5.40. .terraform-version 파일로 프로젝트별 버전 고정, tfenv 로 자동 전환.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-041",
@@ -679,7 +720,8 @@
         "595b80151ae096c8aa8728033b7592e7f8485a1f"
       ],
       "expected_answer_excerpt": "리소스 이름은 snake_case, 태그 Name 은 kebab-case (예: skax-prod-web-server). 모듈은 상대 경로 또는 Git URL.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-042",
@@ -694,7 +736,8 @@
         "45abfcbe2674833fc89957295cc2dc1f230cd45a"
       ],
       "expected_answer_excerpt": "Root 계정 MFA 필수 + 일상 사용 금지 + Access Key 비활성화. IAM User MFA 필수 + 90일 Access Key 로테이션.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-043",
@@ -709,7 +752,8 @@
         "637b1d884ee0ad6a70c1ca89714af2b9278f6740"
       ],
       "expected_answer_excerpt": "AWS Secrets Manager (DB 비밀번호, 외부 API 키), Parameter Store (설정값). 코드/Git 에 절대 포함 금지, .env 는 .gitignore 추가.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-044",
@@ -724,7 +768,8 @@
         "6104ea84630b78062d0e59823662d3faddeaf227"
       ],
       "expected_answer_excerpt": "1월 평균 18노드, 2월 평균 20노드, 3월 평균 22노드 — 분기 평균 약 20노드 운영.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": true
     },
     {
       "id": "EVAL-045",
@@ -739,7 +784,8 @@
         "c72cf51d8e80dea1c729ed01d4694eef4f7829bb"
       ],
       "expected_answer_excerpt": "2026-02-12 (수) 작업, 대상: prod-main-eks + staging-eks. 작업자 최태성/이영훈. FlowSchema v1beta2 deprecation 사전 정리.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-046",
@@ -754,7 +800,8 @@
         "6104ea84630b78062d0e59823662d3faddeaf227"
       ],
       "expected_answer_excerpt": "야간 (00~07 KST) 평균 가동률 35% → Dev 환경 야간 셧다운 시 월 약 $800 절감 가능.",
-      "is_attachment_focused": true
+      "is_attachment_focused": true,
+      "is_answerable": false
     },
     {
       "id": "EVAL-047",
@@ -769,7 +816,8 @@
         "fcdeb555664997fef8fe697145d32d1aa53b16af"
       ],
       "expected_answer_excerpt": "AWS EKS: $0.10/hr (~$73/월). Azure AKS: 무료 (Standard Tier 는 $0.10/hr 별도).",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-048",
@@ -784,7 +832,8 @@
         "9a0cf561ddcd250323a4e9996588afdf3c5fe48b"
       ],
       "expected_answer_excerpt": "IAM User 2명 MFA 미설정 (1/20 조치 완료). AWS Config + Security Hub 기반 감사.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-049",
@@ -799,7 +848,8 @@
         "cdd87e153873cc2bd5c42da72f304f3e264caf54"
       ],
       "expected_answer_excerpt": "Confluence 기반 RAG 챗봇 PoC 7주 (이후 8주 확정). 핵심 기능: 자연어 질의응답, 인용 출처, 멀티턴 대화.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     },
     {
       "id": "EVAL-050",
@@ -813,7 +863,8 @@
         "7fe5c6bbc043839f6d89e4900fa510f68129a551"
       ],
       "expected_answer_excerpt": "Dense + Sparse를 단일 Point에 동시 저장하여 Hybrid Search를 단일 쿼리로 처리, Payload 필터링이 검색과 동시에 수행되어 ACL 적용에 추가 성능 비용 없음, 오픈소스 Apache 2.0 셀프호스팅으로 사내 데이터 외부 유출 위험 제거.",
-      "is_attachment_focused": false
+      "is_attachment_focused": false,
+      "is_answerable": true
     }
   ]
 }
