@@ -6004,3 +6004,45 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
      `not_supported_ratio_answerable` + ROUGE-L/BERTScore + Precision@3 비교.
   3. 환각↓ & 완성도 큰 손실 없으면 ON 채택, 아니면 OFF 유지. 결과를 본 단락에 기록.
   - 반복은 축소 eval-set 권장(비용). 진단만이면 단건 질의로 답변 변화 육안 확인 가능.
+
+### 7. A/B 실측 (full 50건, guard ON) — ★효과 없음 (노이즈 범위)★
+
+- 사용자 Mac full 50건 평가(`reports/evaluation_20260520_082545.json`, `--use-real-
+  adapters --rouge-l --bert-score`). OFF 기준은 baseline 063441 에 feature17c-13 집계
+  적용값(answerable 38.74%).
+
+| 지표 | OFF(063441) | **ON guard(082545)** | KPI |
+|------|-------------|----------------------|-----|
+| NOT_SUPPORTED answerable | 38.74% (74/191) | **37.44% (76/203)** | 15% ⚠ 여전 미달 |
+| NOT_SUPPORTED 전체 | 39.18% | 37.68% | — |
+| verif 문장 수(answerable) | 191 | **203 (증가)** | — |
+| Precision@3 | 80% | 82% (41/50) | 75% ✅ |
+| ROUGE-L | 0.201 | 0.196 (소폭↓) | — |
+| BERTScore | 0.669 | 0.670 | — |
+| P95 | 19.4초 | 21.6초 | — |
+
+- **결론: guard 는 환각을 의미 있게 줄이지 못함.** 38.74→37.44% (1.3pp)는 LLM 비결정성
+  ±2~3pp 범위 내. 게다가 미근거 문장 수는 74→76 으로 **오히려 증가**, ROUGE-L 소폭 하락.
+  → **guard 미채택, 기본 OFF 유지**(코드는 향후 GPU/Agent 경로용 무해 토글로 보존).
+- **★측정 한계(중요)★**: 리포트 summary 에 guard 상태가 기록되지 않아 이 실행에서
+  `RAG_GENERATOR_CONSERVATIVE_GUARD=true` 가 실제로 켜졌는지 사후 확인 불가. 1.3pp 노이즈
+  차이는 "guard ON 무효" / "guard 미적용(두 OFF 비교)" 둘 다와 정합. → feature17c-14 후속
+  으로 `run_evaluation` summary 에 `generator_conservative_guard` 기록 추가(추적성).
+  결론(미채택)은 어느 쪽이어도 동일(개선 신호 없음).
+
+### 8. 환각 KPI 진단 — 병목은 생성기 prompt 가 아니라 검증기(verifier)
+
+- 082545 항목별 분포 실측: NOT_SUPPORTED 가 **44/50 항목에 고르게 분산**(전부 미근거인
+  항목 0건, 미근거 0문장 6건). 의도별도 균일(장애 40.5% / 운영 32.8% / 정책 37.5% /
+  이력 38.7%). 검색 0건 항목(006/032/041/044)은 오히려 ns=0 으로 깔끔히 거부.
+- 이 균일 분산은 "생성기가 특정 항목에서 환각"이 아니라 **문장별 검증기(1단계 규칙
+  토큰 매칭 → 2단계 LLM)가 거의 모든 답변에서 ~1/3 문장을 NOT_SUPPORTED 로 표시**함을
+  시사. 생성기 prompt 보수화로 안 줄어든 이유와 정합.
+- `app/query/verifier.py` 1단계: 문장의 수치·구조적 식별자 토큰이 인용 청크 텍스트에
+  나타나는지 대조 → 미확인 토큰 있으면 의심 → 2단계 LLM 판정. 즉 환각 KPI 의 실제 레버는
+  (a) 1단계 토큰 grounding 정밀도(인용 청크 ≠ 토큰 출처, 형식 차이로 false positive),
+  (b) 2단계 LLM 평가자 보수성, (c) citation 정밀도(생성기가 맞는 청크를 인용하는지).
+- **다음 세션 권장(저비용 진단 우선)**: run_evaluation 에 문장 단위 진단 출력(문장 텍스트
+  + cited chunk + unverified_tokens + 2단계 판정 사유) 추가 → NOT_SUPPORTED 가 토큰이
+  실제로 인용 청크에 없어서인지(citation/recall), 검증기 과민(false positive)인지 분리.
+  생성기 추가 튜닝은 이 진단 후 결정(추측 구현 금지). 진단은 단건/소수 질의라 거의 무료.

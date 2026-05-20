@@ -535,6 +535,11 @@ def _run_evaluation(
         "answer_quality_n_items": len(predictions_for_metric),
         # feature17c-9 — Pool 가중치 그리드 서치 시 어떤 가중치로 측정했는지 기록(없으면 라우터 값).
         "pool_weights_override": pool_weights_override,
+        # feature17c-14 — 생성기 보수성 guard 토글 상태(A/B 추적성). 운영 어댑터 실행 시만
+        # 의미(PoC 는 fake provider 라 transport guard 미적용). None 이면 PoC.
+        "generator_conservative_guard": (
+            settings.generator_conservative_guard if use_real else None
+        ),
     }
 
     # --- 출력 ---
