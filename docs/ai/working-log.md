@@ -6111,3 +6111,71 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
     재검토(`_LABEL_MAP`, 우리 어댑터). UNSUPPORTED 우세면 진짜 미근거 → 생성/검색.
 - 진단 JSON 을 본 담당자가 읽고(저장소 파일 접근 가능) 분석 → 해당 fix 를 다음 세션에
   구현. 본 단락에 진단 결과·결정 추가 기록.
+
+---
+
+## 2026-05-21 — feature17c-16: ★환각 주원인 fix — citation 마커 off-by-one (verifier)★
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: feature17c-15 진단도구(`--debug-verify`)로 의도별 대표 4건(EVAL-012/045/
+  031/008)을 실측한 결과, 환각(NOT_SUPPORTED) 과대 측정의 **주원인이 verifier 의 문장
+  분리 off-by-one** 임을 확정 → `app/query/verifier.py` `_split_sentences` 수정.
+  우리 영역(Pipeline), vendoring 무관.
+
+### 1. 진단 실측 (debug_verify 4건)
+
+| 항목 | 의도 | 문장 | NOT_SUPPORTED | 비고 |
+|------|------|------|----------------|------|
+| EVAL-012 | 장애대응 | 6 | 5 | s1 cited=[] / s2~s5 cited=[1] |
+| EVAL-045 | 이력조회 | 6 | 3 | s1 cited=[] |
+| EVAL-031 | 운영가이드 | 10 | 3 | 번호목록 내용문장 cited=[] |
+| EVAL-008 | 정책절차 | 5 | 3 | s1 cited=[] |
+
+- 2단계 raw label: **UNSUPPORTED 13 / LOW_CONFIDENCE 1 / NOT_CHECKED 0** → 2단계 보수
+  매핑(_LABEL_MAP) 문제 아님. 미확인 토큰 위치: 대부분 `in_other_topk`(=인용 청크 밖).
+- ★원본 answer 확인(결정적)★: 생성기는 마커를 **종결 부호 뒤**에 붙인다 —
+  `"확인했습니다. [#1] 17시 35분에..."`. 그런데 `_split_sentences` 가
+  `(?<=[.!?])\s+` 로 분리해 **마침표와 [#1] 사이를 잘라**, [#1] 이 다음 문장 앞으로
+  떨어진다. 결과: **첫 문장은 항상 인용 유실(cited=[])→NOT_SUPPORTED**, 이후 문장은
+  직전 문장의 마커를 가짐(off-by-one). 번호목록("1.","2.")은 더 심하게 쪼개져 내용
+  문장이 인용을 잃음(EVAL-031).
+- 즉 다수 NOT_SUPPORTED 는 생성기 환각이 아니라 **검증기의 인용 정렬 측정 아티팩트**.
+  feature17c-14 guard(생성기 prompt)가 효과 없던 이유와 정합.
+
+### 2. ★기존 테스트가 이 버그를 못 잡은 이유★
+
+- 기존 `tests/query/test_verifier.py` 픽스처는 마커를 **마침표 앞**에 둔다 —
+  `"...32대입니다 [#1]."`. 이 포맷은 분리 시 마커가 안 떨어져 off-by-one 미발생 →
+  685 통과하면서 운영(마침표 뒤 포맷)만 깨졌다. 테스트 픽스처와 실제 생성기 출력
+  포맷 불일치가 회귀 사각지대였음.
+
+### 3. 변경 — `_split_sentences` citation 재부착
+
+- 분리 후 각 조각 맨 앞의 인용 마커(`_LEADING_CITATIONS = ^(?:\[#\d+\]\s*)+`)는 직전
+  문장 끝에서 떨어진 것이므로 **직전 문장에 재부착**. 트레일링 순수 마커 조각도 흡수.
+- 효과(샌드박스 독립 로드 시뮬레이션): `"S1. [#1] S2. [#1]"` → 각 문장 cited=[1]
+  (첫 문장 회복). 번호목록 내용문장도 cited 유지. **마침표 앞 마커 포맷은 무영향**
+  (기존 테스트 backward-compat 확인).
+
+### 4. 수정 파일
+
+- `app/query/verifier.py` — `_LEADING_CITATIONS` + `_split_sentences` 재부착
+- `tests/query/test_verifier.py` — 운영 포맷 재부착 회귀 +3 (단문/복문/번호목록)
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증
+
+- 샌드박스(3.10): `ruff` 통과 / `_split_sentences` 로직 독립 시뮬레이션 4종 확인
+  (운영 off-by-one 해소 / 번호목록 / 마침표앞 backward-compat / fallback 선두마커).
+  app pytest 는 Mac.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 697 + 3 = **700 passed 예상**.
+
+### 6. ★다음 단계 — 재평가로 환각 KPI 측정★
+
+- 본 fix 는 측정 아티팩트(인용 정렬)를 제거 → NOT_SUPPORTED 가 실제로 얼마나 줄지
+  full 50건 재평가로 확인:
+  `python scripts/run_evaluation.py --use-real-adapters --rouge-l --bert-score`
+  → `not_supported_ratio_answerable` (현 ~37.4%) 변화 기록. 첫 문장 유실분(항목당 ~1)
+  만으로도 큰 폭 감소 예상. Precision/ROUGE-L 는 영향 없어야 함(검색·생성 무변경).
+- 재평가 후 잔존 NOT_SUPPORTED 는 "진짜" 신호(인용 청크에 사실 부재) → 그때 citation
+  정밀도(생성기 인용 매핑, Agent 협의) vs recall 로 분리해 후속 결정.
