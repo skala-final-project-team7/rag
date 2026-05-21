@@ -390,6 +390,13 @@ def _run_debug_verify(query: str, *, use_real: bool) -> int:
     """
     from datetime import datetime
 
+    # feature17c-18 — 전체 top-k 근거 재평가용 target 빌더. 진단에서 인용 청크만이 아니라
+    # 검색된 전체 top-k 를 citations 로 줬을 때 2단계 라벨이 SUPPORTED 로 뒤집히는지 본다
+    # (뒤집히면 "근거는 검색됐으나 오인용"=citation 정밀도, 안 뒤집히면 진짜 미근거).
+    from answer_verification_agent.schemas import SentenceLabel
+    from answer_verification_agent.verification.suspicious_selector import (
+        SuspiciousSentenceTarget,
+    )
     from app.api.deps import build_poc_deps, build_real_deps
     from app.config import get_settings
     from app.pipeline.query_graph import build_query_graph
@@ -401,6 +408,7 @@ def _run_debug_verify(query: str, *, use_real: bool) -> int:
         verify_answer_rules,
     )
     from app.query.verifier_evaluator import (
+        _chunk_to_context_id,
         _chunks_to_normalized_contexts,
         _sentence_check_to_target,
     )
@@ -444,6 +452,18 @@ def _run_debug_verify(query: str, *, use_real: bool) -> int:
     rule_result = verify_answer_rules(answer, top_chunks)
     all_text = "\n".join(c.text for c in top_chunks)
     normalized_contexts = _chunks_to_normalized_contexts(top_chunks)
+    all_context_ids = [
+        _chunk_to_context_id(chunk, index=i) for i, chunk in enumerate(top_chunks, start=1)
+    ]
+
+    def _eval_label(target: Any) -> tuple[str | None, float | None, str | None]:
+        if not (use_real and deps.verifier_provider is not None):
+            return None, None, None
+        try:
+            ev = deps.verifier_provider.evaluate_sentence(target, normalized_contexts)
+            return getattr(ev.label, "value", str(ev.label)), ev.score, ev.reason
+        except Exception as exc:  # noqa: BLE001 — 진단 도구: 평가자 실패도 기록만.
+            return None, None, f"<evaluate_sentence error: {exc}>"
 
     records: list[dict[str, Any]] = []
     for check in rule_result.sentences:
@@ -459,18 +479,27 @@ def _run_debug_verify(query: str, *, use_real: bool) -> int:
                     ),
                 }
             )
-        raw_label: str | None = None
-        raw_score: float | None = None
-        raw_reason: str | None = None
-        if check.is_suspicious and use_real and deps.verifier_provider is not None:
-            target = _sentence_check_to_target(check, top_chunks=top_chunks)
-            try:
-                evaluation = deps.verifier_provider.evaluate_sentence(target, normalized_contexts)
-                raw_label = getattr(evaluation.label, "value", str(evaluation.label))
-                raw_score = evaluation.score
-                raw_reason = evaluation.reason
-            except Exception as exc:  # noqa: BLE001 — 진단 도구: 평가자 실패도 기록만.
-                raw_reason = f"<evaluate_sentence error: {exc}>"
+        raw_label = raw_score = raw_reason = None
+        fullctx_label = fullctx_score = fullctx_reason = None
+        if check.is_suspicious:
+            # (1) 인용 청크만 근거로 — 운영 동작과 동일.
+            raw_label, raw_score, raw_reason = _eval_label(
+                _sentence_check_to_target(check, top_chunks=top_chunks)
+            )
+            # (2) 전체 top-k 근거로 재평가 — 라벨이 SUPPORTED 로 뒤집히면 "근거는 검색됐으나
+            #     오인용"(citation 정밀도), 안 뒤집히면 진짜 미근거(생성/recall).
+            full_target = SuspiciousSentenceTarget(
+                sentence_id=f"s{check.sentence_id}",
+                text=check.sentence,
+                score=0.0,
+                preliminary_label=SentenceLabel.LOW_CONFIDENCE.value,
+                reasons=["low_token_overlap"],
+                citations=list(all_context_ids),
+                matched_context_ids=list(all_context_ids),
+                invalid_citations=[],
+                failed_rules=["token_overlap"],
+            )
+            fullctx_label, fullctx_score, fullctx_reason = _eval_label(full_target)
         final_v = verification_by_id.get(check.sentence_id)
         records.append(
             {
@@ -483,6 +512,9 @@ def _run_debug_verify(query: str, *, use_real: bool) -> int:
                 "stage2_raw_label": raw_label,
                 "stage2_score": raw_score,
                 "stage2_reason": raw_reason,
+                "stage2_fullctx_label": fullctx_label,
+                "stage2_fullctx_score": fullctx_score,
+                "stage2_fullctx_reason": fullctx_reason,
                 "final_status": final_v.status.value if final_v else "PASS",
             }
         )
@@ -511,10 +543,19 @@ def _summarize_debug_verify(records: list[dict[str, Any]]) -> dict[str, Any]:
     final_dist: dict[str, int] = {}
     raw_label_dist: dict[str, int] = {}
     token_loc_dist: dict[str, int] = {}
+    # feature17c-18 — NOT_SUPPORTED(인용 청크 기준) 문장이 전체 top-k 근거 재평가에서
+    # SUPPORTED 로 뒤집히는 수 = "근거는 검색됐으나 오인용"(citation 정밀도) 추정량.
+    flip_to_supported = 0
+    not_supported_still = 0
     for r in records:
         final_dist[r["final_status"]] = final_dist.get(r["final_status"], 0) + 1
         if r["final_status"] == "NOT_SUPPORTED" and r["stage2_raw_label"]:
             raw_label_dist[r["stage2_raw_label"]] = raw_label_dist.get(r["stage2_raw_label"], 0) + 1
+        if r["final_status"] == "NOT_SUPPORTED" and r.get("stage2_fullctx_label"):
+            if r["stage2_fullctx_label"] == "supported":
+                flip_to_supported += 1
+            else:
+                not_supported_still += 1
         for t in r["unverified_tokens"]:
             token_loc_dist[t["location"]] = token_loc_dist.get(t["location"], 0) + 1
     return {
@@ -522,6 +563,8 @@ def _summarize_debug_verify(records: list[dict[str, Any]]) -> dict[str, Any]:
         "final_status_dist": final_dist,
         "not_supported_raw_label_dist": raw_label_dist,
         "unverified_token_location_dist": token_loc_dist,
+        "not_supported_fullctx_flip_to_supported": flip_to_supported,
+        "not_supported_fullctx_still_unsupported": not_supported_still,
     }
 
 
@@ -538,8 +581,18 @@ def _print_debug_verify(records: list[dict[str, Any]]) -> None:
             print(f"    미확인토큰: {locs}")
         if r["stage2_raw_label"] is not None:
             print(
-                f"    2단계 raw: label={r['stage2_raw_label']} "
-                f"score={r['stage2_score']} reason={(r['stage2_reason'] or '')[:100]}"
+                f"    2단계 raw(인용청크): label={r['stage2_raw_label']} "
+                f"score={r['stage2_score']} reason={(r['stage2_reason'] or '')[:90]}"
+            )
+        if r.get("stage2_fullctx_label") is not None:
+            flip = (
+                " ★FLIP→SUPPORTED"
+                if r["final_status"] == "NOT_SUPPORTED" and r["stage2_fullctx_label"] == "supported"
+                else ""
+            )
+            print(
+                f"    2단계 전체top-k: label={r['stage2_fullctx_label']} "
+                f"score={r['stage2_fullctx_score']}{flip}"
             )
     summary = _summarize_debug_verify(records)
     print()
@@ -548,8 +601,13 @@ def _print_debug_verify(records: list[dict[str, Any]]) -> None:
     print(f"  NOT_SUPPORTED 의 2단계 raw label 분포: {summary['not_supported_raw_label_dist']}")
     print(f"  미확인 토큰 위치 분포: {summary['unverified_token_location_dist']}")
     print(
-        "  해석: in_other_topk=citation 정밀도 / absent=recall·생성 갭 / "
-        "in_cited=1단계 FP / LOW_CONFIDENCE·NOT_CHECKED=2단계 보수 매핑."
+        f"  NOT_SUPPORTED → 전체 top-k 재평가: "
+        f"SUPPORTED 로 뒤집힘 {summary['not_supported_fullctx_flip_to_supported']} / "
+        f"여전히 미근거 {summary['not_supported_fullctx_still_unsupported']}"
+    )
+    print(
+        "  해석: FLIP 다수=오인용(citation 정밀도, 우리 영역 fix 가능) / "
+        "여전히 미근거 다수=진짜 환각·recall. in_other_topk=인용밖 top-k존재 / absent=top-k부재."
     )
 
 
