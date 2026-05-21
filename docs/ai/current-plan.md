@@ -668,8 +668,18 @@ BE 담당자 명세 확정 후 진행.
     과대의 주원인이 verifier 문장분리 off-by-one 확정: 생성기가 마침표 뒤에 붙인 [#N]
     마커가 분리 시 다음 문장으로 떨어져 **첫 문장 인용 유실(cited=[])→NOT_SUPPORTED**.
     `_split_sentences` 가 조각 앞 마커를 직전 문장에 재부착하도록 수정(우리 영역,
-    vendoring 무관). 회귀 +3. 기존 테스트는 마침표앞 포맷이라 사각지대였음. **재평가로
-    not_supported_ratio_answerable 변화 측정 대기**(첫문장 유실분만으로도 큰폭 감소 예상).
+    vendoring 무관). 회귀 +3. 기존 테스트는 마침표앞 포맷이라 사각지대였음.
+    - [x] **재평가 실측(011314)**: 환각 answerable **38.7→31.1%(−7.6pp)**, 첫 문장 NS
+      39→21건. Precision@3 80% 불변. ROUGE-L/intent 변동은 verifier 무관 노이즈.
+      **단 31.1% 는 KPI(25%/15%) 여전 미달** → 추가 레버 필요.
+  - [x] **feature17c-17** — 차단(blocked) 답변 분리: formatter 가 NOT_SUPPORTED>0.5 로
+    차단한 답변(사용자 미노출)의 NS 가 환각 집계에 포함되던 것을 분리. `_summarize
+    _hallucination` 에 `not_supported_ratio_delivered`(answerable&not blocked) +
+    `blocked_n_items` 추가, result 에 is_blocked 기록. 회귀 +1. 011314 실측: **delivered
+    환각 20.1%(28/139)**, 차단 10건. 측정 공정화(코드경로 무변경).
+  - [ ] 잔존 레버 — (1) 차단율 21% 감소(생성품질·citation 정밀도, Agent 협의) (2)
+    delivered 잔존 20% 의 in_other_topk/absent 분해(`--debug-verify` 재진단) 후 결정.
+    환각 KPI 공식 숫자(answerable 31% vs delivered 20%)는 팀(설계서 §6.4) 결정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선
