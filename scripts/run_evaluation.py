@@ -107,6 +107,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--debug-leniency",
+        type=str,
+        default=None,
+        help=(
+            "feature17c-19 — full_context grounding 채택 전 leniency 검증. 질의의 검색 "
+            "top-k 에 대해 의도적으로 근거 없는(fabricated) 통제 문장을 전체 top-k 근거로 "
+            "2단계 평가 → UNSUPPORTED 유지하면 평가자가 무분별 통과(거짓음성) 아님(PASS). "
+            "운영 LLM 필요 → --use-real-adapters."
+        ),
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=3,
@@ -145,6 +156,9 @@ def main() -> int:
 
     if args.debug_verify:
         return _run_debug_verify(args.debug_verify, use_real=args.use_real_adapters)
+
+    if args.debug_leniency:
+        return _run_debug_leniency(args.debug_leniency, use_real=args.use_real_adapters)
 
     if not args.eval_set.exists():
         print(f"[err] eval-set not found: {args.eval_set}")
@@ -611,6 +625,142 @@ def _print_debug_verify(records: list[dict[str, Any]]) -> None:
         "  해석: FLIP 다수=오인용(citation 정밀도, 우리 영역 fix 가능) / "
         "여전히 미근거 다수=진짜 환각·recall. in_other_topk=인용밖 top-k존재 / absent=top-k부재."
     )
+
+
+# feature17c-19 — full_context grounding leniency 검증용 통제(fabricated) 문장.
+# 인프라 코퍼스와 토큰이 거의 겹치지 않는 명백한 허위 진술 → 전체 top-k 근거로도
+# SUPPORTED 가 나오면 평가자가 무분별 통과(거짓음성)임을 뜻한다.
+_LENIENCY_CONTROL_SENTENCES = [
+    "이 인프라의 공식 마스코트는 분홍색 코끼리이며 모든 서버는 토요일 자정에 춤을 춥니다. [#1]",
+    "본 시스템은 2099년 목성 궤도 데이터센터에서 시인 세 명이 운영합니다. [#1]",
+]
+
+
+def _leniency_verdict(control_results: list[dict[str, Any]]) -> str:
+    """통제(fabricated) 문장 라벨로 평가자 판별력을 판정한다 (순수, 테스트 가능).
+
+    - 라벨이 하나도 없으면(평가 미수행) ``INCONCLUSIVE``.
+    - 하나라도 ``supported`` 면 ``FAIL`` (무분별 통과 = full_context 채택 위험).
+    - 모두 supported 가 아니면 ``PASS`` (판별력 있음).
+    """
+    labels = [str(r.get("label") or "").lower() for r in control_results if r.get("label")]
+    if not labels:
+        return "INCONCLUSIVE"
+    if any(label == "supported" for label in labels):
+        return "FAIL"
+    return "PASS"
+
+
+def _run_debug_leniency(query: str, *, use_real: bool) -> int:
+    """full_context grounding 채택 전 leniency 검증 (feature17c-19).
+
+    질의의 검색 top-k 를 확보한 뒤, 의도적으로 근거 없는 통제 문장을 **전체 top-k**
+    근거로 2단계 평가한다. UNSUPPORTED 가 유지되면 평가자가 전체 근거를 줘도 거짓을
+    통과시키지 않음(PASS) → full_context 채택이 환각을 은폐하지 않음을 입증. 하나라도
+    SUPPORTED 면 FAIL(평가자 과민/무분별 → 채택 보류).
+    """
+    from datetime import datetime
+
+    from answer_verification_agent.schemas import SentenceLabel
+    from answer_verification_agent.verification.suspicious_selector import (
+        SuspiciousSentenceTarget,
+    )
+    from app.api.deps import build_poc_deps, build_real_deps
+    from app.config import get_settings
+    from app.pipeline.query_graph import build_query_graph
+    from app.query.acl import build_acl_filter
+    from app.query.verifier_evaluator import _chunk_to_context_id, _chunks_to_normalized_contexts
+    from app.schemas.rag_state import RagState
+
+    settings = get_settings()
+    deps = build_real_deps(settings) if use_real else build_poc_deps(settings)
+    graph = build_query_graph(deps)
+    eval_groups = [
+        "space:CLOUD",
+        "space:CCC",
+        "space:DEVOPS",
+        "space:SEC",
+        "space:ONBOARD",
+        "space:PROJ",
+        "space:DATADOG_KR",
+    ]
+    state = RagState(
+        query=query,
+        user_id="eval-user",
+        groups=eval_groups,
+        conversation_id="eval-conv-debug-leniency",
+        acl_filter=build_acl_filter("eval-user", eval_groups),
+    )
+    final = RagState.model_validate(graph.invoke(state))
+    top_chunks = final.top_chunks
+    if not top_chunks:
+        print(f"[debug-leniency] 검색 top-k 0건 — query={query!r}. 다른 질의로 시도.")
+        return 0
+    if not (use_real and deps.verifier_provider is not None):
+        print("[debug-leniency] 운영 평가자 없음 — --use-real-adapters 필요.")
+        return 1
+
+    normalized_contexts = _chunks_to_normalized_contexts(top_chunks)
+    all_context_ids = [
+        _chunk_to_context_id(chunk, index=i) for i, chunk in enumerate(top_chunks, start=1)
+    ]
+    print(f"[debug-leniency] query={query!r} | n_top_chunks={len(top_chunks)}")
+    print("[debug-leniency] 의도적 미근거(fabricated) 통제 문장을 전체 top-k 근거로 평가:")
+
+    control_results: list[dict[str, Any]] = []
+    for idx, sentence in enumerate(_LENIENCY_CONTROL_SENTENCES, start=1):
+        target = SuspiciousSentenceTarget(
+            sentence_id=f"ctrl{idx}",
+            text=sentence,
+            score=0.0,
+            preliminary_label=SentenceLabel.LOW_CONFIDENCE.value,
+            reasons=["low_token_overlap"],
+            citations=list(all_context_ids),
+            matched_context_ids=list(all_context_ids),
+            invalid_citations=[],
+            failed_rules=["token_overlap"],
+        )
+        try:
+            evaluation = deps.verifier_provider.evaluate_sentence(target, normalized_contexts)
+            label = getattr(evaluation.label, "value", str(evaluation.label))
+            rec = {
+                "sentence": sentence,
+                "label": label,
+                "score": evaluation.score,
+                "reason": evaluation.reason,
+            }
+        except Exception as exc:  # noqa: BLE001 — 진단: 평가자 실패도 기록.
+            rec = {"sentence": sentence, "label": None, "score": None, "reason": f"<error: {exc}>"}
+        control_results.append(rec)
+        print(
+            f"  [ctrl{idx}] label={rec['label']} score={rec['score']} "
+            f"reason={(rec['reason'] or '')[:90]}"
+        )
+
+    verdict = _leniency_verdict(control_results)
+    print()
+    print(f"[debug-leniency] 판정: {verdict}")
+    print(
+        "  PASS=평가자가 전체 근거를 줘도 거짓을 통과시키지 않음(full_context 채택 안전) / "
+        "FAIL=무분별 통과(채택 보류) / INCONCLUSIVE=평가 미수행."
+    )
+    output_path = Path("reports") / f"debug_leniency_{datetime.utcnow():%Y%m%d_%H%M%S}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(
+            {
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "query": query,
+                "n_top_chunks": len(top_chunks),
+                "verdict": verdict,
+                "controls": control_results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    print(f"[debug-leniency] report = {output_path}")
+    return 0
 
 
 def _run_evaluation(

@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     # (feature17c-13)로 측정. 과도 시 답변 완성도(ROUGE-L/BERTScore) 하락 가능.
     generator_conservative_guard: bool = False
 
+    # 검증 2단계 전체 top-k grounding 토글 (feature17c-19, opt-in). True 면 의심 문장을
+    # 인용 청크가 아니라 검색된 전체 top-k 근거로 2단계 평가한다. 진단(feature17c-18)에서
+    # delivered NOT_SUPPORTED 12/12 가 전체 top-k 재평가 시 SUPPORTED 로 뒤집힘(=사실은
+    # 검색 근거에 있으나 생성기가 단일 청크만 인용한 citation 정밀도 문제, true 환각 아님)을
+    # 확인 → 환각/차단을 "어느 retrieved 근거로도 미지원"으로만 판정하도록 교정. citation
+    # 정밀도는 별도 관심사. 검증·차단(공개) 동작 변경이라 기본 OFF, .env 로 A/B
+    # (RAG_VERIFIER_FULL_CONTEXT_GROUNDING=true) 후 leniency 검증(--debug-leniency)하고 채택.
+    verifier_full_context_grounding: bool = False
+
     # --- 운영 어댑터 토글 (build_real_deps 후속, 2026-05-18) ---
     # True면 lifespan이 build_real_deps 분기로 E5 + BM25 + Qdrant from_settings +
     # CrossEncoderRerankerImpl 부트스트랩. False(기본)는 build_poc_deps 분기로

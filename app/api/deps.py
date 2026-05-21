@@ -254,6 +254,7 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
         routing_config=routing_config,
         verifier_provider=verifier_provider,
         verifier_config=verifier_config,
+        verifier_full_context=settings.verifier_full_context_grounding,
         generator_provider=generator_provider,
         generator_config=generator_config,
     )

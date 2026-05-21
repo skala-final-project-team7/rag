@@ -456,3 +456,31 @@ def test_summarize_debug_verify_fullctx_flip() -> None:
 
     assert out["not_supported_fullctx_flip_to_supported"] == 1
     assert out["not_supported_fullctx_still_unsupported"] == 1
+
+
+# ---------------------------------------------------------------------------
+# feature17c-19 — full_context grounding leniency 검증 판정
+# ---------------------------------------------------------------------------
+
+
+def test_leniency_verdict_pass_when_all_controls_unsupported() -> None:
+    """통제 문장이 모두 unsupported 면 평가자 판별력 있음 = PASS."""
+    from scripts.run_evaluation import _leniency_verdict
+
+    results = [{"label": "UNSUPPORTED"}, {"label": "unsupported"}]
+    assert _leniency_verdict(results) == "PASS"
+
+
+def test_leniency_verdict_fail_when_any_control_supported() -> None:
+    """통제(거짓) 문장이 하나라도 supported 면 무분별 통과 = FAIL."""
+    from scripts.run_evaluation import _leniency_verdict
+
+    results = [{"label": "UNSUPPORTED"}, {"label": "SUPPORTED"}]
+    assert _leniency_verdict(results) == "FAIL"
+
+
+def test_leniency_verdict_inconclusive_when_no_labels() -> None:
+    """라벨이 없으면(평가 미수행) INCONCLUSIVE."""
+    from scripts.run_evaluation import _leniency_verdict
+
+    assert _leniency_verdict([{"label": None}, {}]) == "INCONCLUSIVE"

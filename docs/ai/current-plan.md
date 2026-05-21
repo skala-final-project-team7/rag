@@ -684,9 +684,12 @@ BE 담당자 명세 확정 후 진행.
     재평가에서 SUPPORTED 로 flip** → 잔존 환각은 100% citation 정밀도(사실은 top-k 안
     존재, 생성기가 #1 만 인용). true 환각 ≈ 0. 도구 flip 비교 대소문자 버그도 fix(24 passed).
     청크 사이즈/오버랩은 병목 아님(recall 정상 입증).
-  - [ ] **다음 change-set(단독 세션)**: 환각/차단 판정을 전체 top-k grounding 기반으로
-    (opt-in 토글 + leniency 검증 후 채택). citation 정밀도는 별도 지표. 검증/차단 흐름
-    변경이라 영향 설명·신중 진행. 대안: 생성기 다중 인용(Agent 협의). KPI 공식숫자 팀 결정.
+  - [x] **feature17c-19** — 검증 2단계 전체 top-k grounding 토글 구현(opt-in, 기본 OFF):
+    config `verifier_full_context_grounding` + `manage_verifier_evaluator(full_context=)`
+    (target citations=전체 top-k) + graph/deps 와이어링 + `.env.example`. leniency 검증
+    `--debug-leniency`(fabricated 통제 문장 전체 top-k 평가 → PASS/FAIL) + `_leniency
+    _verdict`. 회귀 +5. **Mac: leniency PASS 확인 → A/B(delivered/blocked 감소) → 채택 결정.**
+  - [ ] (채택 시) citation 정밀도 별도 지표 추적 + KPI 공식숫자(answerable/delivered) 팀 확정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선

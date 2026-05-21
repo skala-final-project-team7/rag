@@ -6359,3 +6359,63 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   CLAUDE.md 절대규칙(흐름 변경 시 영향 설명) 준수해 **opt-in 토글 + leniency 검증
   (의도적 미근거 문장이 full-ctx 에서도 UNSUPPORTED 유지하는지)** 후 기본 채택 결정.
   대안: 생성기 다중·정확 인용(Agent 영역 협의).
+
+---
+
+## 2026-05-21 — feature17c-19: 검증 2단계 전체 top-k grounding 토글 (opt-in) + leniency 검증
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 17c-18 확정(잔존 NS 12/12 가 전체 top-k 재평가 시 SUPPORTED = citation
+  정밀도 아티팩트)에 따라, 검증 2단계를 **전체 top-k 근거**로 평가하는 opt-in 토글을
+  구현. 검증·차단(공개) 동작 변경이라 **기본 OFF + leniency 검증 도구**를 함께 제공.
+
+### 1. 변경 — full_context 토글 (opt-in, 기본 OFF)
+
+- `app/config.py`: `verifier_full_context_grounding: bool = False`.
+- `app/query/verifier_evaluator.py`: `manage_verifier_evaluator(..., full_context=False)`
+  — True 면 의심 문장 target 의 `citations`/`matched_context_ids` 를 **전체 top-k
+  context_id** 로 오버라이드(`_sentence_check_to_target(context_ids_override=...)`).
+  agent prompt builder 가 전체 검색 근거로 평가 → "어느 retrieved 근거로도 미지원"만
+  NOT_SUPPORTED. 기본 False = 기존 per-cited-chunk 동작 보존.
+- `app/pipeline/query_graph.py`: `QueryGraphDeps.verifier_full_context: bool = False` +
+  verify partial 에 `full_context=deps.verifier_full_context` 전달(manage_verifier
+  _evaluator 기본값일 때만, router/generator 패턴 정합).
+- `app/api/deps.py`: `verifier_full_context=settings.verifier_full_context_grounding`.
+- `.env.example`: `# RAG_VERIFIER_FULL_CONTEXT_GROUNDING=false` + A/B·leniency 안내.
+
+### 2. 변경 — leniency 검증 `--debug-leniency "질의"`
+
+- full_context 채택 전 거짓음성(평가자 무분별 통과) 위험 검증. 질의 top-k 에 대해
+  **의도적 미근거(fabricated) 통제 문장**(인프라 토큰과 안 겹치는 허위 진술 2종)을
+  전체 top-k 근거로 2단계 평가 → 모두 UNSUPPORTED 유지면 `PASS`(판별력 있음, 채택
+  안전), 하나라도 SUPPORTED 면 `FAIL`(채택 보류). `_leniency_verdict` 순수 헬퍼 +
+  reports/debug_leniency_<ts>.json 저장. 거의 무료(통제 2문장 평가).
+
+### 3. 수정 파일
+
+- `app/config.py` / `app/query/verifier_evaluator.py` / `app/pipeline/query_graph.py` /
+  `app/api/deps.py` / `.env.example`
+- `scripts/run_evaluation.py` — `--debug-leniency` + `_run_debug_leniency` + `_leniency_verdict`
+- `tests/query/test_verifier_evaluator.py` — full_context target citations 회귀 +2
+  (False=인용청크만 / True=전체 top-k)
+- `tests/scripts/test_run_evaluation.py` — `_leniency_verdict` 회귀 +3
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 4. 검증
+
+- 샌드박스(3.10): `ruff`/`py_compile` 통과 / `pytest tests/scripts/test_run_evaluation.py`
+  **27 passed**. verifier_evaluator·graph·deps 회귀는 app import 라 Mac.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 702 + 5 = **707 passed 예상**(verifier_eval +2,
+  run_eval leniency +3).
+
+### 5. ★Mac — leniency 검증 → A/B → 채택 결정★
+
+1. **leniency(거짓음성 없음 확인)**: 의도별 몇 건으로
+   `python scripts/run_evaluation.py --debug-leniency "IAM 정책 변경 절차는?" --use-real-adapters`
+   → 판정 `PASS`(통제 문장 UNSUPPORTED) 확인. FAIL 이면 채택 보류(평가자 과민).
+2. **A/B**: `.env` `RAG_VERIFIER_FULL_CONTEXT_GROUNDING=true` 후
+   `python scripts/run_evaluation.py --use-real-adapters --rouge-l --bert-score` →
+   `not_supported_ratio_delivered`(현 20%) / `blocked_n_items`(현 10) 감소폭 +
+   Precision@3·ROUGE-L 영향 확인. OFF 와 비교.
+3. leniency PASS & 환각/차단 큰 폭 감소 & 완성도 손실 적으면 기본 ON 채택, 본 단락 기록.
+- citation 정밀도(인용 청크 일치율)는 full_context 채택 시 별도 추적 권장(후속).
