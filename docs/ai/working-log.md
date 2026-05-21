@@ -6323,3 +6323,39 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   - **still_unsupported 우세** → 진짜 미근거(생성 embellishment / recall) → 생성기
     근거 충실도(Agent) 또는 검색·청크.
 - flip 결과를 본 단락에 기록 후 fix 구현.
+
+### 6. ★실측 flip 결과 (delivered 4건 재진단, 013454~013719) — 100% 오인용★
+
+- **NOT_SUPPORTED 12문장 전부(12/12) 가 전체 top-k 재평가에서 SUPPORTED(score 1.0)로
+  뒤집힘.** still_unsupported = 0. (EVAL-011/033/008/045 각 3/3 flip.)
+  → 잔존 delivered 환각은 **진짜 환각도 recall 부재도 아니라 100% citation 정밀도**:
+  사실은 검색된 top-k 안에 있으나 생성기가 전부 #1 만 인용해 per-cited-chunk 검증 실패.
+- ★도구 버그 fix★: `_summarize_debug_verify`/`_print_debug_verify` 의 flip 비교가
+  소문자 `"supported"` 였으나 agent SentenceLabel.value 는 대문자 `"SUPPORTED"` →
+  flip 이 0 으로 오집계되던 것 수정(`.lower()` 비교). 단위테스트도 대문자로 갱신
+  (24 passed). 저장된 JSON 재집계로 12/12 flip 확인.
+
+### 7. 청크 사이즈/오버랩 점검 (사용자 질문)
+
+- 현 설정(`app/ingestion/chunker/base.py`): 섹션 기반 청킹 + 2차 재분할 `MAX_TOKENS=800`
+  / `OVERLAP_TOKENS=100` / `MIN_TOKENS=200`(하한 병합). 합리적 범위.
+- **flip 결과가 recall 정상을 입증**: 잔존 NS 문장의 근거가 전부 top-k 안에 있음 →
+  검색·청킹이 정답을 못 찾는 문제가 아님(사용자 직관 "검색 잘됨" 확인). 청크 사이즈는
+  현 병목이 아니다.
+- 단 간접 연결: 한 페이지가 섹션별로 쪼개져(≤800 토큰) 답변이 여러 청크에 걸쳐 종합되는데
+  생성기가 #1 만 인용 → per-chunk 인용이 다중 청크 사실을 못 담음. 청크를 키우면(페이지/
+  대단락 단위) 인용 청크가 더 많은 사실을 포함해 false NS 가 줄 수 있으나, 임베딩·rerank
+  정밀도 저하 + 프롬프트 토큰·지연 증가 트레이드오프 → **청크 사이즈로 풀 문제 아님**.
+  근본은 citation 정밀도(생성기 다중 인용) 또는 검증 grounding 범위.
+
+### 8. ★결론 + 권장 fix (데이터 확정)★
+
+- 환각 KPI 의 실체: answerable 31% / **delivered 20%** 중 잔존분은 **사실상 전부 citation
+  정밀도 아티팩트**(true 환각 ≈ 0). 즉 "검색 근거엔 있으나 인용/검증 단위 불일치"가
+  환각으로 과대 측정 + 그로 인해 정상 답변 차단(blocked 21%).
+- **권장 (다음 change-set, 단독 세션)**: 환각/차단 판정을 **전체 검색 근거(top-k) 기반
+  grounding** 으로 — 즉 "어느 retrieved 청크로도 뒷받침 안 됨"만 환각으로. citation
+  정밀도(인용 청크 일치율)는 별도 지표로 추적. 검증/차단 흐름(공개 동작) 변경이라
+  CLAUDE.md 절대규칙(흐름 변경 시 영향 설명) 준수해 **opt-in 토글 + leniency 검증
+  (의도적 미근거 문장이 full-ctx 에서도 UNSUPPORTED 유지하는지)** 후 기본 채택 결정.
+  대안: 생성기 다중·정확 인용(Agent 영역 협의).

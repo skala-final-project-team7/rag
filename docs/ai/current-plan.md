@@ -680,9 +680,13 @@ BE 담당자 명세 확정 후 진행.
   - [x] **feature17c-18** — 잔존 NS 원인 분해: post-fix delivered 4건 재진단(토큰
     in_other_topk 15 vs absent 1) + `--debug-verify` 에 전체 top-k 2단계 재평가 추가
     (flip→SUPPORTED = 오인용/citation정밀도 vs still = 진짜미근거). 회귀 +1(24 passed).
-  - [ ] 잔존 레버 — Mac 재진단 flip 결과로 확정: flip 우세 → citation 정밀도 fix
-    (2단계 전체 top-k opt-in, 우리 영역 / 생성기 인용 매핑 Agent) / still 우세 → 생성
-    충실도·recall. 차단율 21%·KPI 공식숫자(answerable 31% vs delivered 20%)는 팀 결정.
+  - [x] **flip 실측 확정(013454~013719)**: delivered NS **12/12 문장 전부 전체 top-k
+    재평가에서 SUPPORTED 로 flip** → 잔존 환각은 100% citation 정밀도(사실은 top-k 안
+    존재, 생성기가 #1 만 인용). true 환각 ≈ 0. 도구 flip 비교 대소문자 버그도 fix(24 passed).
+    청크 사이즈/오버랩은 병목 아님(recall 정상 입증).
+  - [ ] **다음 change-set(단독 세션)**: 환각/차단 판정을 전체 top-k grounding 기반으로
+    (opt-in 토글 + leniency 검증 후 채택). citation 정밀도는 별도 지표. 검증/차단 흐름
+    변경이라 영향 설명·신중 진행. 대안: 생성기 다중 인용(Agent 협의). KPI 공식숫자 팀 결정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선
