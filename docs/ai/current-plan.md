@@ -706,10 +706,19 @@ BE 담당자 명세 확정 후 진행.
     `answer_generation_agent/.../prompt_template.py` system prompt 에 다중 인용·미근거
     문장 억제 지침 + 출력 schema 예시 단일→다중 context_id 변경(단일 인용 anchoring 제거).
     회귀 테스트 +1. 검증기·어댑터·코드로직 무변경(사양 정합).
-  - [ ] **목표 15% 달성 검증(재평가 대기)** — 17c-22 적용 후 `--use-real-adapters` full
-    50건 재평가로 per-cited-chunk delivered(현 20.1%)/answerable(현 31.1%) ≤ 15% 확인.
-    `--debug-verify` 로 문장별 다중 인용 emit 확인(거의 무료). 미달 시 문구 조정/FC schema.
-    KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
+  - [x] **feature17c-22 재평가(074259, full_context OFF)** — instruction 지침 단독 효과
+    0 확인: answerable 31.3%/delivered 21.7%/blocked 13(baseline 노이즈 범위), 다중 인용
+    emit 0건. 프롬프트 텍스트만으로 GPT-4o 단일 인용 못 바꿈(실측). ※1차(034944)는 .env
+    full_context ON 잔존으로 측정 무효(answerable 1.2%는 17c-19 ON 재현).
+  - [x] **feature17c-23** — few-shot 예시 보강 후 재평가(075919): 다중 인용 emit 또 0건,
+    answerable 34.9% 악화, delivered 12.6%는 차단 13→17 증가 착시(17c-17 함정), P@3·ROUGE-L
+    퇴행 → **순효과 음, 실패**.
+  - [x] **feature17c-24** — 프롬프트 3종 개입 실패 확정(다중 인용 0건) → 17c-22/23 vendored
+    프롬프트 변경 + 회귀 테스트 **전부 롤백**(원본 복구, 새 revert 커밋). 요청서 §5.3을
+    **Function Calling tools schema(citations minItems:1) 주 권장으로 승격, Agent 이관**.
+  - [ ] **목표 15% 달성 = FC tools schema (Agent 영역, 이관 완료)** — 생성 단계에서 citations
+    배열 구조적 강제. 적용 후 우리 측 per-cited-chunk 재평가. 우리 영역 추가 레버 없음
+    (프롬프트 텍스트 한계 실증). KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선

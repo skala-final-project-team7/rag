@@ -6620,3 +6620,169 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   로 문장별 cited_chunks 다중화 확인(거의 무료). LLM 비결정성이라 1~2회 반복 권장.
 - 효과는 검증기 무변경 상태에서 per-cited-chunk 기준으로 나와야 사양 정합(full_context
   토글과 무관). 미달 시 프롬프트 문구 추가 조정 또는 FC schema minItems:1(요청서 §5.3).
+
+### 7. ★재평가 1차(034944) — 측정 무효: .env full_context ON + 프롬프트 효과 0★
+
+- **결정적 문제**: 사용자 `.env` 에 `RAG_VERIFIER_FULL_CONTEXT_GROUNDING=true` 가 켜진
+  채(17c-19 A/B 잔존) 실행됨. 코드 기본값은 False(사양 정합)이나 .env 가 덮어씀. → 검증이
+  전체 top-k grounding 으로 동작, **측정이 17c-19 A/B ON 재현**(사양 부정합, 17c-20 미채택
+  경로). 따라서 본 리포트는 프롬프트 수정(17c-22)의 사양-정합 효과를 측정하지 못함.
+- 리포트 034944: not_supported_ratio_answerable 1.23%(2/163) / delivered 0.0%(0/161) /
+  blocked 2 / P@3 82% / ROUGE-L 0.249 / BERT 0.678 / intent 94% / P95 18.8s.
+  → 17c-19 ON(answerable 2.07%/delivered 0.70%) 와 동류. **사양-정합 숫자 아님.**
+- **debug-verify 034002 (IAM, 결정적 증거)**: 6문장 final={SUPPORTED 4, PASS 2}, NS 0.
+  그러나 s1 `cited=[]`(인용 없음)인데 final=SUPPORTED, s2/s4/s6 `stage2_cited=UNSUPPORTED`
+  인데 final=`stage2_fullctx`(SUPPORTED). = final 이 per-cited 아닌 full-ctx 라벨과 일치
+  → full_context ON 확정. FR-010 예외③(미인용→자동 UNSUPPORTED)도 우회됨.
+- **프롬프트 효과(다중 인용) = 0건**: 6문장 인용 마커 전부 `[#1]` 단일(s1 무인용),
+  `[#1][#2]` 병기 0. 즉 17c-22 프롬프트 수정이 이번 실행에서 GPT-4o 의 단일 인용 행동을
+  바꾸지 못함. per-cited-chunk 기준 stage2_cited 는 여전히 다수 UNSUPPORTED.
+
+### 8. ★다음 단계 — full_context OFF 후 재측정 (사양-정합)★
+
+- Mac: `.env` `RAG_VERIFIER_FULL_CONTEXT_GROUNDING=false` 로 변경 후 동일 2개 명령 재실행.
+  그래야 per-cited-chunk(사양-정합) 환각과 17c-22 프롬프트 효과를 분리 측정 가능.
+- 솔직한 전망: 단건 debug-verify 에서 다중 인용 0건 → 프롬프트 수정만으로 15% 도달은
+  불확실. LLM 비결정성 1~2회 반복 후, 미흡 시 (a) 프롬프트 few-shot 예시 강화 또는
+  (b) FC schema `citations` minItems:1 강제(요청서 §5.3)로 단일 인용 anchoring 제거.
+- 운영 KPI 보고 시 full_context ON 숫자를 사양-정합 환각으로 쓰지 말 것(17c-20 결론).
+
+### 9. ★재평가 2차(074259, full_context OFF) — 프롬프트 수정 효과 0 (음성 결과)★
+
+- `.env` full_context OFF 후 재실행 → 사양-정합 per-cited-chunk 측정 확보(debug-verify
+  073151 에서 s2/s5 final=NOT_SUPPORTED + ★FLIP→SUPPORTED 로 per-cited 정상 동작 확인).
+- **결과 (저장 JSON 074259 직접 검증):**
+
+| 지표 | baseline 011314 | 수정후 074259 | 목표 |
+|------|-----------------|---------------|------|
+| 환각 answerable | 31.1% | 31.3%(52/166) | 15% |
+| 환각 delivered | 20.1% | 21.7%(31/143) | 15% |
+| blocked | 10 | 13 | — |
+| P@3 | 80% | 78%(39/50) | 75%✅ |
+| ROUGE-L | 0.172 | 0.167 | — |
+
+- **17c-22 프롬프트 수정은 환각을 개선하지 못함.** 전부 run-to-run 노이즈 범위, delivered·
+  blocked 는 오히려 소폭 악화(노이즈). **debug-verify 073151: IAM 5문장 전부 `[#1]` 단일
+  인용, 다중 인용 0건.** NS 2문장은 여전히 full-ctx flip(오인용 유지).
+- **결론: 프롬프트 텍스트 지침(+스키마 예시 다중화)만으로는 GPT-4o 의 단일 인용 습관을
+  바꾸지 못함**(실측 확정). 사양-정합 15% 목표 미달, 현 상태 = baseline 과 동일
+  (delivered 21.7% 는 최소 25% 통과 / 목표 15% 미달).
+
+### 10. ★다음 레버 (프롬프트 지침 부족 확정 후)★
+
+- (a) **few-shot 예시**: 프롬프트에 다중 청크 종합→`[#1][#2]` 병기한 모범 답변 예시 1~2개
+  삽입(instruction 보다 강한 신호). 동일 prompt_template.py 영역.
+- (b) **Function Calling tools schema** 강제(요청서 §5.3, 설계서 (D)): citations 를
+  minItems:1 배열로 OpenAI tools= 에 강제. agent provider 호출 경로 변경 → Agent 영역.
+- (c) 17c-22 프롬프트 변경 유지/롤백 결정: 무해·FR-009 정합이나 단독 효과 0 →
+  few-shot(a) 과 함께 갈지, 롤백할지 사용자/팀 결정.
+- 비용: 각 시도마다 full 50건 ≈ $0.5~2 + 단건 debug-verify(거의 무료) 선검증 권장.
+
+---
+
+## 2026-05-21 — feature17c-23: FR-009 few-shot 보강 (instruction 단독 효과 0 후속)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 17c-22 재평가(074259)에서 instruction 지침만으로 다중 인용 emit 0건 확인 →
+  `prompt_template.py` `_structured_output_instruction` 에 few-shot 예시 추가. 동일
+  vendoring 예외 범위(Agent 담당자 1회 승인). 코드 로직·검증기·어댑터 무변경.
+
+### 1. 변경
+
+- few-shot 예시: 2개 context(배포 staging / 2인 승인)를 종합한 모범 출력 — s1→[ctx-001],
+  s2→[ctx-002], **종합 문장 s3→[ctx-001, ctx-002] 병기**. + "나쁜 출력(모두 한 곳만 인용 /
+  근거 없는 도입·요약 문장)" 대비. "내용이 아니라 인용 방식만 참고" 명시(답변 편향 방지).
+- 회귀 테스트 `test_prompt_carries_multi_citation_guidance` 에 few-shot assert +2
+  (`"ctx-001", "ctx-002"` / "나쁜 출력").
+
+### 2. 검증
+
+- 샌드박스(3.10): `py_compile` 통과. ruff/pytest Mac.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 708 passed 유지 예상(test_generator 동일 1건,
+  assert 만 보강).
+
+### 3. ★다음 단계 — 재평가 (사양-정합, full_context OFF 유지)★
+
+- `.env` `RAG_VERIFIER_FULL_CONTEXT_GROUNDING=false` 확인 후:
+  - 단건: `python scripts/run_evaluation.py --debug-verify "IAM 정책 변경 절차는 어떻게 진행되어야 하나요?" --use-real-adapters`
+    → 문장별 `cited_chunks` 가 [1] 단일에서 다중([1,2] 등)으로 바뀌는지 확인(거의 무료).
+  - full: `python scripts/run_evaluation.py --use-real-adapters --rouge-l --bert-score`
+    → delivered(현 21.7%)/answerable(현 31.3%)/blocked(현 13) 변화. LLM 비결정성 1~2회.
+- few-shot 도 효과 없으면 다음은 FC tools schema minItems:1(설계서 D, Agent 영역, 요청서 §5.3).
+
+### 4. ★재평가 실측(075919, full_context OFF) — few-shot 실패 + delivered 착시★
+
+- **3회 비교 (전부 per-cited-chunk, 저장 JSON 직접 검증):**
+
+| 실행 | answerable | delivered | blocked | verif_total_delivered |
+|------|-----------|-----------|---------|----------------------|
+| baseline 011314 | 31.1% | 20.1% | 10 | 139 |
+| 17c-22 instruction 074259 | 31.3% | 21.7% | 13 | 143 |
+| 17c-23 few-shot 075919 | **34.9%**(45/129) | 12.6%(11/87) | **17** | **87** |
+
+- **다중 인용 emit = 또 0건**(debug-verify 075015: IAM 4문장 전부 `[#1]`). few-shot 도
+  GPT-4o 단일 인용 습관 못 바꿈.
+- **delivered 12.6% 는 착시(17c-17 경고 함정)**: 차단 13→17 증가로 NS 답변이 delivered
+  풀에서 빠짐(검증문장 143→87). 비율만 낮아진 것이며 생성 개선 아님. **answerable 는
+  31.3→34.9% 악화**(생성 품질 본질 지표), P@3 78→72%·ROUGE-L 0.167→0.157 퇴행.
+- **순효과 음(-)**: few-shot 이 환각 미개선 + 거부 남발 + 품질 저하.
+
+### 5. ★확정 결론 — 프롬프트 공간 한계, 남은 레버 = Function Calling★
+
+- instruction(17c-22) + 스키마 다중화 + few-shot(17c-23) **3종 모두 단일 인용 못 바꿈**
+  (debug-verify 3회 다중 인용 0건). **프롬프트 텍스트로는 해결 불가** 실측 확정.
+- 남은 실질 레버 = **FC tools schema 로 citations 배열 구조적 강제**(설계서 (D),
+  OpenAI tools= 미설정 상태 → agent provider 호출 경로 변경 = **Agent 담당자 영역**).
+  요청서 §5.3 에 이미 명시. 우리 프롬프트 개입 종료.
+- **권장: 17c-22/17c-23 vendored 프롬프트 변경 롤백**(단독·복합 효과 0~음). 회귀 테스트도
+  함께 제거. 사양-정합 baseline(answerable ~31%/delivered ~20%) 로 복귀 후, FC schema 는
+  Agent 담당자에게 이관(요청서 갱신). 롤백 여부는 사용자 결정.
+
+---
+
+## 2026-05-21 — feature17c-24: 프롬프트 개입 롤백 + FC 이관 (사용자 결정)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 17c-22/23 실측 실패(다중 인용 0건, few-shot 순효과 음)에 따라 사용자 결정으로
+  vendored 프롬프트 변경을 **전부 롤백**, FC tools schema 는 요청서로 Agent 이관.
+
+### 1. 롤백 (원상복구)
+
+- `answer_generation_agent/generation/prompt_template.py`: `_build_system_prompt` 3줄
+  지침 제거, `_structured_output_instruction` 스키마 예시 단일 `["context_id"]` 복구 +
+  few-shot 블록 제거, changelog 헤더 17c-22/23 항목 제거 → **원본(pristine) 복구**.
+- `tests/query/test_generator.py`: `test_prompt_carries_multi_citation_guidance` 회귀
+  테스트 제거(원본 복구).
+- ※ git: 17c-22 는 commit 1b4b734 로 이미 이력에 있음 → 본 롤백은 **새 revert 커밋**
+  (이력 재작성 아님). few-shot(17c-23)·회귀테스트는 미커밋이라 add→remove net zero.
+
+### 2. 요청서 갱신
+
+- `docs/ai/agent-request-citation-precision.md` §5: 5.1·5.2 실측 실패 박스 추가,
+  **§5.3 Function Calling tools schema(citations minItems:1 + tool_choice 강제)를 주(主)
+  권장으로 승격**. 후처리 인용 보정은 오인용 은폐 위험으로 비권장 명시. Agent 영역 이관.
+
+### 3. 사양-정합 환각 현황 (롤백 후 = baseline 복귀)
+
+- per-cited-chunk: answerable ~31% / delivered ~20% (011314 baseline). **최소 25% 통과 /
+  목표 15% 미달.** 잔존분은 100% citation 정밀도 아티팩트(생성기 단일 인용)로 확정됐고,
+  해결은 생성 단계 구조적 강제(FC) = Agent 영역. 우리 영역(검증기/어댑터/측정 공정화)은
+  사양대로 완료 상태.
+
+### 4. 수정 파일
+
+- `answer_generation_agent/generation/prompt_template.py`(롤백) /
+  `tests/query/test_generator.py`(롤백) / `docs/ai/agent-request-citation-precision.md` /
+  `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증
+
+- 샌드박스(3.10): `py_compile` 통과. prompt_template.py 잔존 흔적 0(grep), git diff 로
+  17c-22 정확 역적용 확인. ruff/pytest 는 Mac.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → **707 passed 복귀 예상**(17c-22 시 추가했던
+  generator +1 회귀 테스트 제거 → 708→707). 즉 707 = 17c-19 시점과 동일.
+
+### 6. 후속
+
+- FC tools schema 는 Agent 담당자 영역 → 요청서 전달. 적용 후 우리 측 per-cited-chunk
+  재평가로 15% 재확인. 우리 영역에서 추가 환각 레버 없음(프롬프트 한계 실증 완료).

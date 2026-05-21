@@ -8,11 +8,6 @@ from __future__ import annotations
 작성일 : 2026-05-18
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature3 prompt template builder 구현
-  - 2026-05-21, FR-009 출처 정밀도 개선 (feature17c-22, Agent 담당자 1회 예외 승인),
-    다중 청크 종합 문장의 단일 인용([#1]) 결함 수정. system prompt 에 "여러 context
-    근거 시 모든 context_id 인용 + 미근거(도입·요약·연결) 문장 억제" 지침 추가,
-    출력 schema 예시를 단일 → 다중 context_id 배열로 변경해 단일 인용 anchoring 제거.
-    진단·근거: docs/ai/agent-request-citation-precision.md / working-log feature17c-21~22.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x 권장
@@ -187,10 +182,6 @@ def _build_system_prompt() -> str:
             "context가 존재하면 근거 있는 범위에서 최대한 답변한다.",
             "모든 핵심 문장은 sentence-level citation을 포함해야 한다.",
             "citation은 반드시 제공된 context_id만 참조한다.",
-            "한 문장이 여러 context에 근거하면, 근거가 된 모든 context_id를 인용한다 (예: [#1][#3]).",
-            "어떤 context로도 뒷받침되지 않는 문장(일반적 도입·요약·연결 문장 포함)은 생성하지 않거나, "
-            "unsupported_gaps(제한 사항)로만 분리한다.",
-            "인용은 그 문장이 실제로 근거한 context_id만 가리킨다. 무관한 context를 채워 넣지 않는다.",
         ]
     )
 
@@ -211,12 +202,11 @@ def _structured_output_instruction() -> str:
         "{\n"
         '  "answer": "string",\n'
         '  "sentences": [\n'
-        '    {"sentence_id": "s1", "text": "string", "citations": ["ctx-001", "ctx-003"]}\n'
+        '    {"sentence_id": "s1", "text": "string", "citations": ["context_id"]}\n'
         "  ],\n"
         '  "unsupported_gaps": ["context로 확인할 수 없는 제한 사항"]\n'
         "}\n"
-        "sentences의 citations는 Top context의 context_id만 사용한다.\n"
-        "한 문장이 여러 context에 근거하면 citations에 근거가 된 모든 context_id를 배열로 넣는다."
+        "sentences의 citations는 Top context의 context_id만 사용한다."
     )
 
 
