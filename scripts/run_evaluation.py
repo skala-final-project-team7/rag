@@ -465,9 +465,7 @@ def _run_debug_verify(query: str, *, use_real: bool) -> int:
         if check.is_suspicious and use_real and deps.verifier_provider is not None:
             target = _sentence_check_to_target(check, top_chunks=top_chunks)
             try:
-                evaluation = deps.verifier_provider.evaluate_sentence(
-                    target, normalized_contexts
-                )
+                evaluation = deps.verifier_provider.evaluate_sentence(target, normalized_contexts)
                 raw_label = getattr(evaluation.label, "value", str(evaluation.label))
                 raw_score = evaluation.score
                 raw_reason = evaluation.reason
@@ -516,9 +514,7 @@ def _summarize_debug_verify(records: list[dict[str, Any]]) -> dict[str, Any]:
     for r in records:
         final_dist[r["final_status"]] = final_dist.get(r["final_status"], 0) + 1
         if r["final_status"] == "NOT_SUPPORTED" and r["stage2_raw_label"]:
-            raw_label_dist[r["stage2_raw_label"]] = (
-                raw_label_dist.get(r["stage2_raw_label"], 0) + 1
-            )
+            raw_label_dist[r["stage2_raw_label"]] = raw_label_dist.get(r["stage2_raw_label"], 0) + 1
         for t in r["unverified_tokens"]:
             token_loc_dist[t["location"]] = token_loc_dist.get(t["location"], 0) + 1
     return {
@@ -572,6 +568,7 @@ def _run_evaluation(
     from app.config import get_settings
     from app.pipeline.query_graph import build_query_graph, run_query
     from app.query.acl import build_acl_filter
+    from app.query.formatter import BLOCKED_ANSWER_MESSAGE
     from app.query.router import manage_router
     from app.schemas.rag_state import RagState
 
@@ -695,6 +692,9 @@ def _run_evaluation(
                 ),
                 "expected_page_ids": list(expected_page_ids),
                 "is_answerable": item.get("is_answerable", True),
+                # feature17c-17 — formatter 가 NOT_SUPPORTED>0.5 로 답변을 차단(BLOCKED_
+                # ANSWER_MESSAGE 대체)했는지. 차단 시 환각이 사용자에게 전달되지 않음.
+                "is_blocked": (response.answer or "") == BLOCKED_ANSWER_MESSAGE,
                 "actual_top_k_source_titles": [s.title for s in top_k_sources],
                 "n_sources": len(response.sources),
                 "top1_score": response.sources[0].score if response.sources else None,
@@ -850,27 +850,40 @@ def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
     하는 것이 올바른 동작이므로, 이를 환각 지표에서 분리한 ``*_answerable`` 값을 별도로
     산출한다. 전체 지표(``not_supported_ratio``)는 투명성을 위해 함께 유지한다.
 
-    각 result 는 ``is_answerable``(미지정 시 True), ``n_sources``,
-    ``verification=[{"status": ...}, ...]`` 를 포함한다고 가정한다. 순수 함수라
-    앱 의존 없이 단위 테스트 가능.
+    feature17c-17 — ``is_blocked=true`` 항목(formatter 가 NOT_SUPPORTED 비율 > 0.5 로
+    답변을 차단하고 BLOCKED_ANSWER_MESSAGE 로 대체 = 환각이 사용자에게 전달되지 않음)을
+    추가 분리한 ``*_delivered``(= answerable AND not blocked) 값을 산출한다. 이것이
+    사용자 노출 환각(user-facing)에 가장 가깝다. 단 차단도 비용(거부 UX)이므로
+    ``blocked_n_items`` 로 차단율을 함께 노출해 "거부 남발로 환각 은폐"를 감시한다.
+
+    각 result 는 ``is_answerable``(미지정 시 True), ``is_blocked``(미지정 시 False),
+    ``n_sources``, ``verification=[{"status": ...}, ...]`` 를 포함한다고 가정한다. 순수
+    함수라 앱 의존 없이 단위 테스트 가능.
     """
     verification_total = 0
     not_supported_count = 0
     verification_total_answerable = 0
     not_supported_count_answerable = 0
+    verification_total_delivered = 0
+    not_supported_count_delivered = 0
     answerable_n = 0
     non_answerable_n = 0
     non_answerable_correct_refusal_n = 0
+    blocked_n = 0
 
     for r in results:
         is_answerable = r.get("is_answerable", True)
+        is_blocked = bool(r.get("is_blocked", False))
         if is_answerable:
             answerable_n += 1
+            if is_blocked:
+                blocked_n += 1
         else:
             non_answerable_n += 1
             # 검색 후보 0건 = 검색 단계에서 올바르게 거부(근거 없음 → 답변 시도 안 함).
             if not r.get("n_sources"):
                 non_answerable_correct_refusal_n += 1
+        delivered = is_answerable and not is_blocked
         for v in r.get("verification", []):
             verification_total += 1
             is_ns = v.get("status") == "NOT_SUPPORTED"
@@ -880,6 +893,10 @@ def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
                 verification_total_answerable += 1
                 if is_ns:
                     not_supported_count_answerable += 1
+            if delivered:
+                verification_total_delivered += 1
+                if is_ns:
+                    not_supported_count_delivered += 1
 
     return {
         "not_supported_ratio": (
@@ -894,9 +911,18 @@ def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "not_supported_count_answerable": not_supported_count_answerable,
         "verification_total_answerable": verification_total_answerable,
+        # feature17c-17 — 사용자 노출 환각(answerable AND not blocked).
+        "not_supported_ratio_delivered": (
+            not_supported_count_delivered / verification_total_delivered
+            if verification_total_delivered
+            else None
+        ),
+        "not_supported_count_delivered": not_supported_count_delivered,
+        "verification_total_delivered": verification_total_delivered,
         "answerable_n_items": answerable_n,
         "non_answerable_n_items": non_answerable_n,
         "non_answerable_correct_refusal_n_items": non_answerable_correct_refusal_n,
+        "blocked_n_items": blocked_n,
     }
 
 

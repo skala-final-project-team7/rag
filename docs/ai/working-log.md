@@ -6179,3 +6179,94 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   만으로도 큰 폭 감소 예상. Precision/ROUGE-L 는 영향 없어야 함(검색·생성 무변경).
 - 재평가 후 잔존 NOT_SUPPORTED 는 "진짜" 신호(인용 청크에 사실 부재) → 그때 citation
   정밀도(생성기 인용 매핑, Agent 협의) vs recall 로 분리해 후속 결정.
+
+### 7. ★재평가 실측 (011314) — 환각 38.7→31.1% (−7.6pp)★
+
+| 실행 | NS_answerable | P@3 | ROUGE-L | BERT | intent |
+|------|---------------|-----|---------|------|--------|
+| OFF baseline 063441 | 38.7% (74/191) | 80% | 0.201 | 0.669 | 94% |
+| guard ON 082545 | 37.4% (76/203) | 82% | 0.196 | 0.670 | 94% |
+| **verifier-fix 011314** | **31.1% (51/164)** | 80% | 0.172 | 0.664 | 92% |
+
+- **환각(answerable) 38.7→31.1% (−7.6pp)** — 노이즈(±2~3pp) 초과 실질 개선. citation
+  off-by-one fix 가 주효. **첫 문장 NOT_SUPPORTED 항목 39→21건**(18건 회복) — fix 가
+  첫 문장 인용 유실을 직접 해소함을 실증.
+- Precision@3 80% 불변(검색·생성 무변경, 예상대로). ROUGE-L 0.172/intent 92% 변동은
+  verifier 와 무관(답변 텍스트·라우팅 미변경) — LLM 비결정성 범위.
+- **단, 31.1% 는 KPI(최소 25%/목표 15%) 여전 미달.** 추가 레버 필요.
+
+### 8. 잔존 NOT_SUPPORTED 분석 + 다음 레버 (추측 금지, 진단 선행)
+
+- 잔존 21건 첫 문장 NS = 재부착으로도 안 붙은 경우 = **생성기가 첫(요약/도입) 문장에
+  애초에 [#N] 마커를 안 단 것**으로 추정(재부착할 마커가 없음). 인용 없는 사실 문장은
+  1단계가 전 토큰 미확인→의심→2단계 "no cited contexts"→NOT_SUPPORTED.
+- 검토 방향(다음 세션, --debug-verify 로 EVAL-012/008 재진단 후 결정):
+  1. **citation 없는 문장의 grounding 범위**: 인용이 전혀 없는 문장은 1단계가 cited 대신
+     **전체 top_chunks** 로 토큰 대조 → 검색 근거엔 있으나 인용만 빠진 경우를 환각에서
+     분리(우리 영역, verifier.py). 단 "모든 문장 인용" 설계 원칙과의 정합은 별도 판단.
+  2. **citation 정밀도**: 생성기가 사실이 있는 청크가 아닌 #1 만 인용 → Agent 영역 협의.
+  3. 진짜 recall 부재(코퍼스에 사실 없음) → 검색/청크 단위.
+- 어느 것이 우세한지 --debug-verify 재진단(거의 무료)으로 확정 후 fix. 본 단락에 추가.
+
+---
+
+## 2026-05-21 — feature17c-17: 차단(blocked) 답변 분리 — 사용자 노출 환각 지표
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 011314 잔존 NOT_SUPPORTED 분석 중, **잔존의 절반이 차단(refusal)된 답변**
+  임을 발견. formatter(§4.8)는 NOT_SUPPORTED 비율 > 0.5 면 답변을 차단하고
+  `BLOCKED_ANSWER_MESSAGE` 로 대체한다 — **환각이 사용자에게 전달되지 않음(안전 동작)**.
+  그런데 차단된 원본 답변의 NOT_SUPPORTED 문장이 환각 집계에 그대로 포함돼 과대 측정.
+  is_answerable(17c-13)과 동일한 공정성 문제. run_evaluation 집계에 delivered 분리 추가.
+
+### 1. 발견 (011314 데이터, 코드 변경 전)
+
+| 구분 | 항목 | NOT_SUPPORTED |
+|------|------|----------------|
+| 차단(refusal) 답변 | 10 | 23/25 |
+| **전달(delivered) 답변** | 38 | **28/139 = 20.1%** |
+| 전체 answerable | 48 | 51/164 = 31.1% |
+
+- 차단 10건(EVAL-012/014/019/023/024/035/037/039/042/048)은 시스템이 근거 부족을
+  감지해 거부 → 사용자는 "보류합니다" 만 봄. 그 23개 NOT_SUPPORTED 는 **사용자 노출
+  환각이 아님**. 분리 시 **delivered 환각 = 20.1%** (KPI 최소 25% 아래, 목표 15% 근접).
+
+### 2. 변경 — run_evaluation 집계에 delivered/blocked 분리
+
+- `_summarize_hallucination`: `not_supported_ratio_delivered`(= answerable AND not
+  blocked, 사용자 노출 환각) + `not_supported_count/verification_total_delivered` +
+  `blocked_n_items` 추가. 기존 `*_answerable`·전체 지표 유지(투명성).
+- `_run_evaluation`: 각 result 에 `is_blocked`(response.answer == formatter.
+  `BLOCKED_ANSWER_MESSAGE`) 기록. 집계가 이를 사용.
+- **차단도 비용(거부 UX)** 이므로 `blocked_n_items`(차단율)를 함께 노출 — "거부 남발로
+  환각 은폐" 감시. delivered 만 보고 KPI 충족 주장 금지(차단율 병기 필수).
+
+### 3. ★해석 (정직)★
+
+- **사용자 노출 환각 ≈ 20.1%** 가 KPI(#3, 사용자 도달 환각)에 가장 가까운 측정. verifier
+  citation fix(17c-16) + 본 분리로 38.7% → (answerable)31.1% → (delivered)20.1%.
+- 단 **차단율 10/48 = 21%** 는 별개 품질 비용(답변 거부 UX). delivered 환각이 낮은 것은
+  부분적으로 "애매하면 차단" 덕분 → 차단율을 낮추면서 delivered 환각을 유지/개선하는 것이
+  진짜 목표. 어느 KPI 숫자를 공식으로 쓸지는 팀(설계서 §6.4 정의)이 결정.
+- 본 변경은 측정 공정화(집계 로직)이며 코드 경로·생성·검증 동작은 무변경.
+
+### 4. 수정 파일
+
+- `scripts/run_evaluation.py` — `_summarize_hallucination` delivered/blocked + `_run
+  _evaluation` is_blocked 기록 + BLOCKED_ANSWER_MESSAGE import
+- `tests/scripts/test_run_evaluation.py` — delivered/blocked 분리 회귀 +1
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증
+
+- 샌드박스(3.10): `ruff` 통과 / `pytest tests/scripts/test_run_evaluation.py`
+  **23 passed**. 011314 재집계로 delivered 20.1% / blocked 10건 실측 확인.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 700 + 1 = **701 passed 예상**. 다음 평가부터
+  summary 에 delivered/blocked 자동 출력(추가 비용 0).
+
+### 6. 종합 — 환각 KPI 진척 (17c-13 ~ 17c-17)
+
+- 측정 공정화(answerable/delivered) + 실 버그 fix(citation off-by-one) 로 환각을
+  정직하게 38.7% → delivered 20.1% 까지 끌어내림. 잔여 레버: (1) 차단율 21% 감소
+  (생성 품질/citation 정밀도, Agent 협의) (2) delivered 잔존 20% 의 in_other_topk/
+  absent 분해(다음 세션 --debug-verify). 생성기 prompt guard(17c-14)는 무효로 미채택.

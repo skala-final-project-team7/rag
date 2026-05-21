@@ -293,6 +293,39 @@ def test_summarize_hallucination_defaults_missing_flag_to_answerable() -> None:
     assert out["not_supported_ratio"] == out["not_supported_ratio_answerable"]
 
 
+def test_summarize_hallucination_separates_blocked_from_delivered() -> None:
+    """is_blocked 항목은 사용자 노출(delivered) 환각 지표에서 분리되고 blocked_n_items 로 집계."""
+    from scripts.run_evaluation import _summarize_hallucination
+
+    results = [
+        # delivered(answerable & not blocked): 2문장 중 1 NOT_SUPPORTED
+        {
+            "is_answerable": True,
+            "is_blocked": False,
+            "n_sources": 3,
+            "verification": _ns("NOT_SUPPORTED", "SUPPORTED"),
+        },
+        # blocked(answerable but blocked): NOT_SUPPORTED 2문장 — delivered 에서 제외.
+        {
+            "is_answerable": True,
+            "is_blocked": True,
+            "n_sources": 2,
+            "verification": _ns("NOT_SUPPORTED", "NOT_SUPPORTED"),
+        },
+    ]
+    out = _summarize_hallucination(results)
+
+    # answerable: 4문장 중 3 NOT_SUPPORTED (차단 포함)
+    assert out["verification_total_answerable"] == 4
+    assert out["not_supported_count_answerable"] == 3
+    # delivered: 차단 제외 → 2문장 중 1 NOT_SUPPORTED
+    assert out["verification_total_delivered"] == 2
+    assert out["not_supported_count_delivered"] == 1
+    assert out["not_supported_ratio_delivered"] == pytest.approx(1 / 2)
+    assert out["blocked_n_items"] == 1
+    assert out["answerable_n_items"] == 2
+
+
 def test_summarize_hallucination_counts_non_answerable_correct_refusal() -> None:
     """non-answerable 항목 중 검색 후보 0건은 '올바른 거부'로 카운트된다."""
     from scripts.run_evaluation import _summarize_hallucination
@@ -333,9 +366,7 @@ def test_classify_token_location_in_cited() -> None:
     """인용 청크에 존재하면 in_cited (1단계 false positive 후보)."""
     from scripts.run_evaluation import _classify_token_location
 
-    assert (
-        _classify_token_location(grounded_in_cited=True, grounded_in_any=True) == "in_cited"
-    )
+    assert _classify_token_location(grounded_in_cited=True, grounded_in_any=True) == "in_cited"
 
 
 def test_classify_token_location_in_other_topk() -> None:
@@ -343,8 +374,7 @@ def test_classify_token_location_in_other_topk() -> None:
     from scripts.run_evaluation import _classify_token_location
 
     assert (
-        _classify_token_location(grounded_in_cited=False, grounded_in_any=True)
-        == "in_other_topk"
+        _classify_token_location(grounded_in_cited=False, grounded_in_any=True) == "in_other_topk"
     )
 
 
@@ -352,9 +382,7 @@ def test_classify_token_location_absent() -> None:
     """어느 Top-K 에도 없으면 absent (recall·생성 갭)."""
     from scripts.run_evaluation import _classify_token_location
 
-    assert (
-        _classify_token_location(grounded_in_cited=False, grounded_in_any=False) == "absent"
-    )
+    assert _classify_token_location(grounded_in_cited=False, grounded_in_any=False) == "absent"
 
 
 def _verify_rec(
@@ -370,8 +398,9 @@ def _verify_rec(
         "sentence": f"sentence {sid}",
         "cited_chunks": [1],
         "checkable_tokens": [],
-        "unverified_tokens": [{"token": f"t{i}", "location": loc} for i, loc in
-                              enumerate(locations or [])],
+        "unverified_tokens": [
+            {"token": f"t{i}", "location": loc} for i, loc in enumerate(locations or [])
+        ],
         "suspicious": suspicious,
         "stage2_raw_label": raw_label,
         "stage2_score": None,
@@ -386,10 +415,13 @@ def test_summarize_debug_verify_distributions() -> None:
 
     records = [
         _verify_rec(sid=1, final="PASS", suspicious=False),
-        _verify_rec(sid=2, final="NOT_SUPPORTED", raw_label="low_confidence",
-                    locations=["absent", "in_other_topk"]),
-        _verify_rec(sid=3, final="NOT_SUPPORTED", raw_label="unsupported",
-                    locations=["absent"]),
+        _verify_rec(
+            sid=2,
+            final="NOT_SUPPORTED",
+            raw_label="low_confidence",
+            locations=["absent", "in_other_topk"],
+        ),
+        _verify_rec(sid=3, final="NOT_SUPPORTED", raw_label="unsupported", locations=["absent"]),
         _verify_rec(sid=4, final="SUPPORTED", raw_label="supported", locations=[]),
     ]
     out = _summarize_debug_verify(records)
