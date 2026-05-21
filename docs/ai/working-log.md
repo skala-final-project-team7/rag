@@ -6270,3 +6270,56 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   정직하게 38.7% → delivered 20.1% 까지 끌어내림. 잔여 레버: (1) 차단율 21% 감소
   (생성 품질/citation 정밀도, Agent 협의) (2) delivered 잔존 20% 의 in_other_topk/
   absent 분해(다음 세션 --debug-verify). 생성기 prompt guard(17c-14)는 무효로 미채택.
+
+---
+
+## 2026-05-21 — feature17c-18: 잔존 NS 원인 분해 — 인용 청크 vs 전체 top-k 재평가
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: post-fix(17c-16) delivered 항목 4건 재진단으로 잔존 NOT_SUPPORTED 원인을
+  좁힌 뒤, 결정적 분해를 위해 `--debug-verify` 에 **전체 top-k 근거 2단계 재평가**를
+  추가. 측정 도구만 확장(프로덕션·검증 동작 무변경).
+
+### 1. post-fix 재진단 (delivered 4건: EVAL-011/033/008/045)
+
+- 미확인 토큰 위치: **in_other_topk 15 vs absent 1** — 토큰이 거의 전부 검색된 top-k 에
+  존재(인용 청크 #1 밖). 2단계 reason 일관: "cited context does not provide info about X".
+- 즉 생성기가 여러 청크에서 종합한 답변을 **전부 #1 만 인용** → per-cited-chunk 검증이
+  실패. 단 in_other_topk 는 흔한 토큰(IAM/CI/EKS)엔 노이즈 → 토큰 위치만으로 "오인용 vs
+  진짜 미근거" 확정 불가. → **문장을 전체 top-k 근거로 재평가해 라벨이 뒤집히는지** 필요.
+
+### 2. 변경 — --debug-verify 전체 top-k 재평가
+
+- 의심 문장마다 2단계를 두 번: (1) 인용 청크만(운영 동일) (2) **전체 top-k context_ids**
+  를 citations 로 준 재평가. NOT_SUPPORTED 가 (2)에서 SUPPORTED 로 뒤집히면 "근거는
+  검색됐으나 오인용"(citation 정밀도, 우리 영역 fix 가능), 안 뒤집히면 진짜 미근거
+  (생성/recall). summary 에 `not_supported_fullctx_flip_to_supported` /
+  `..._still_unsupported` + 문장별 출력.
+- 비용: 단일 질의의 의심 문장 2단계 2회 — 거의 무료. 운영 LLM 필요(--use-real-adapters).
+
+### 3. 수정 파일
+
+- `scripts/run_evaluation.py` — `_run_debug_verify` 전체 top-k 재평가 + `_summarize
+  _debug_verify` flip 집계 + `_print_debug_verify` 출력
+- `tests/scripts/test_run_evaluation.py` — flip 집계 회귀 +1 (24 passed)
+- `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 4. 검증
+
+- 샌드박스(3.10): `ruff`/`py_compile` 통과 / `pytest tests/scripts/test_run_evaluation.py`
+  **24 passed**. `_run_debug_verify` 본체는 app import 라 Mac 실행.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 701 + 1 = **702 passed 예상**.
+
+### 5. ★다음 단계 — Mac 재진단 후 fix 확정★
+
+- delivered NS 4건 재실행(거의 무료):
+  - `python scripts/run_evaluation.py --debug-verify "S3 버킷에 접근할 때 권한 오류가 발생했던 사고 사례는 어떻게 해결했나요?" --use-real-adapters`
+  - 033/008/045 동일. 출력의 `★FLIP→SUPPORTED` 와 집계의 flip/still 카운트 확인.
+- 결정 트리(데이터 기반):
+  - **flip 우세**(전체 top-k 에선 SUPPORTED) → 근거는 검색됐으나 생성기가 단일 청크만
+    인용한 citation 정밀도 문제. fix 후보: (a) 2단계 평가를 전체 top-k 근거로(우리
+    어댑터 verifier_evaluator, 단 citation 정밀도 지표 별도 추적·블로킹 영향 검토 후
+    opt-in) (b) 생성기 인용 매핑 개선(Agent 협의).
+  - **still_unsupported 우세** → 진짜 미근거(생성 embellishment / recall) → 생성기
+    근거 충실도(Agent) 또는 검색·청크.
+- flip 결과를 본 단락에 기록 후 fix 구현.

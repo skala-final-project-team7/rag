@@ -431,3 +431,24 @@ def test_summarize_debug_verify_distributions() -> None:
     # NOT_SUPPORTED 만 raw label 집계
     assert out["not_supported_raw_label_dist"] == {"low_confidence": 1, "unsupported": 1}
     assert out["unverified_token_location_dist"] == {"absent": 2, "in_other_topk": 1}
+
+
+def test_summarize_debug_verify_fullctx_flip() -> None:
+    """NOT_SUPPORTED 문장이 전체 top-k 재평가에서 supported 로 뒤집히는 수를 집계한다."""
+    from scripts.run_evaluation import _summarize_debug_verify
+
+    records = [
+        # 인용청크 NOT_SUPPORTED → 전체 top-k 에서 supported (오인용=citation 정밀도)
+        {**_verify_rec(sid=1, final="NOT_SUPPORTED", raw_label="unsupported"),
+         "stage2_fullctx_label": "supported"},
+        # 인용청크 NOT_SUPPORTED → 전체 top-k 도 unsupported (진짜 미근거)
+        {**_verify_rec(sid=2, final="NOT_SUPPORTED", raw_label="unsupported"),
+         "stage2_fullctx_label": "unsupported"},
+        # PASS 문장은 fullctx 집계 대상 아님
+        {**_verify_rec(sid=3, final="PASS", suspicious=False),
+         "stage2_fullctx_label": None},
+    ]
+    out = _summarize_debug_verify(records)
+
+    assert out["not_supported_fullctx_flip_to_supported"] == 1
+    assert out["not_supported_fullctx_still_unsupported"] == 1
