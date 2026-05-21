@@ -6504,3 +6504,119 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
 - Agent 담당자에게 "문장별 정확 인용(다중 청크 시 [1][2] 병기) + 미인용 문장 억제"
   개선 요청 — FR-009 정합. 개선 후 per-cited-chunk 환각 재측정으로 15% 목표 재평가.
 - full_context 토글/`--debug-leniency`/`--debug-verify` 는 진단·실험 자산으로 보존.
+
+---
+
+## 2026-05-21 — feature17c-21: ★citation collapse 위치 확정 + Agent 요청서 작성★
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 코드 변경 없음(진단 + 문서). 17c-20 후속으로 "단일 청크 collapse 가 어디서
+  일어나는가"를 vendored agent 코드까지 정독해 위치를 확정하고, FR-009 정합 개선을 위한
+  Agent 담당자 요청서를 작성. 비용 0(저장된 진단 JSON 재집계만, full 평가 미실행 — 사용자
+  결정 "무료 진단만").
+
+### 1. ★collapse 위치 확정 — LLM 출력, 어댑터·매핑 무죄★
+
+- `answer_generation_agent/generation/citation_mapping.py` `map_citations` 정독:
+  LLM raw `candidate.citations` 를 `_valid_citations`(중복만 제거)로 **그대로 보존**.
+  단일 collapse 아님. 0개일 때만 컨텍스트 1개면 `_fallback_citations` 가 단일 인용 부여
+  (보통 다수 컨텍스트라 [] = missing_citation).
+- 우리 어댑터 `app/query/generator.py` `_compose_answer_with_citations`: 문장별 citations 를
+  `[#N1][#N2]` 로 충실히 렌더링. collapse 버그 없음(재확인).
+- → **단일 `[#1]` 인용의 원인은 LLM 출력 자체** = 프롬프트가 단일 인용 유도.
+  `answer_generation_agent/generation/prompt_template.py`:
+  - `_build_system_prompt`(L175~186): "모든 핵심 문장 sentence-level citation" 요구하나
+    **다중 청크 종합 시 모두 인용** 지침·**미인용 문장 억제** 지침 부재.
+  - `_structured_output_instruction`(L198~210): 출력 스키마 예시 `"citations": ["context_id"]`
+    — 배열에 **context_id 1개**만 → LLM 을 단일 인용에 anchoring.
+
+### 2. 진단 근거 재집계 (무료)
+
+- baseline `evaluation_20260521_011314`: answerable 31.1%(51/164) / delivered 20.1%
+  (28/139, 17c-17 재집계) / blocked 10. 목표 15% 미달 확정.
+- post-fix delivered 4건(S3/CI·CD/IAM/EKS) `--debug-verify` 저장본 재집계: 미확인 토큰
+  거의 전부 `in_other_topk`, **전체 top-k 재평가 시 12/12 SUPPORTED flip**(대소문자 무시
+  재집계 = 17c-18 §6 일치). 잔존 환각 = 100% citation 정밀도 아티팩트.
+- 대표 사례(IAM 정책 변경): 4단계 절차(다중 청크 종합)인데 **4문장 전부 `[#1]` 만 인용** →
+  문장 1·4(Role/Policy·ARN·CloudWatch·30분 토큰이 #1 밖 다른 top-k 에 존재)가
+  NOT_SUPPORTED. 정확 인용했으면 환각 아님.
+
+### 3. 산출물 — Agent 요청서
+
+- `docs/ai/agent-request-citation-precision.md` 신규: (a) collapse 위치·책임 경계 표,
+  (b) 진단 근거(KPI 현황/12·12 flip/IAM 사례), (c) 프롬프트 근본 원인(라인 명시),
+  (d) 구체 수정안(system prompt 다중인용·억제 지침 + 스키마 예시 다중화 + 선택 FC schema
+  minItems:1), (e) 개선 후 우리 측 검증 방법(단건 debug-verify + full 50건 재평가, 합격
+  기준 delivered ≤15%·비퇴행). 검증기(FR-010) 약화 금지 명시.
+
+### 4. 수정 파일
+
+- `docs/ai/agent-request-citation-precision.md`(신규) / `docs/ai/working-log.md` /
+  `docs/ai/current-plan.md`. 코드·vendoring 무변경.
+
+### 5. 검증
+
+- 코드 변경 없음 → ruff/pytest 대상 없음. 문서 사실 검증: 프롬프트 라인(175~186/198~210)
+  실제 일치, KPI 수치(31.1%/20.1%/blocked 10) working-log 17c-16/17 일치, 12/12 flip
+  대소문자 무시 재집계로 재확인. `./scripts/verify.sh` 회귀 영향 없음(707 passed 유지 예상).
+
+### 6. 후속
+
+- 사용자 → Agent 담당자에게 요청서 전달. 프롬프트 개선 적용 후 우리 측 per-cited-chunk
+  재평가(full 50건)로 15% 목표 달성 여부 확인. KPI 공식 숫자(전체/answerable/delivered)
+  팀 확정 대기.
+
+---
+
+## 2026-05-21 — feature17c-22: ★FR-009 프롬프트 직접 수정 (Agent 담당자 1회 예외 승인)★
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 17c-21 요청서대로 vendored `answer_generation_agent/generation/prompt_template.py`
+  의 생성기 프롬프트를 직접 수정. **vendoring 무수정 원칙의 1회 예외** — Agent 담당자가
+  명시 승인 + 사용자 지시. CLAUDE.md "타 팀원 영역 수정 시 이유·영향 먼저 설명" 준수.
+
+### 1. 변경 (요청서 §5.1·§5.2 정합)
+
+- `_build_system_prompt`: 기존 인용 요구 지침 뒤에 3줄 추가 —
+  (a) "한 문장이 여러 context에 근거하면 모든 context_id 인용 (예: [#1][#3])",
+  (b) "어떤 context로도 미지원 문장(도입·요약·연결 포함)은 생성하지 않거나 unsupported_gaps
+  로만 분리", (c) "인용은 실제 근거 context_id만, 무관 context 채우지 않음".
+- `_structured_output_instruction`: 출력 schema 예시 `"citations": ["context_id"]`(단일)
+  → `["ctx-001", "ctx-003"]`(다중)로 변경 + "여러 context 근거 시 모든 context_id 배열"
+  지침 추가. **단일 인용 anchoring 제거**가 핵심.
+- 파일 changelog 헤더에 예외 승인·근거 문서 경로 기록.
+
+### 2. 무변경 (책임 경계 유지)
+
+- `_TASK_INSTRUCTIONS`(의도별 마커 timeline/step_by_step…), 코드 로직, 출력 스키마 구조,
+  우리 어댑터(`app/query/generator.py`), 검증기(FR-010)는 **무변경**. 즉 효과는 "검증기를
+  느슨하게"가 아니라 "생성기가 정확히 인용"에서 나와야 함(설계 의도).
+
+### 3. 회귀 테스트 추가 (17c-16 "테스트 사각지대" 교훈)
+
+- `tests/query/test_generator.py::test_prompt_carries_multi_citation_guidance` — 생성기
+  프롬프트에 다중 인용 지침("여러 context")·억제 지침·다중 context_id 예시가 도달하는지
+  검증. vendoring 재동기화 시 본 지침이 조용히 사라지는 회귀를 고정.
+
+### 4. 수정 파일
+
+- `answer_generation_agent/generation/prompt_template.py`(예외 수정) /
+  `tests/query/test_generator.py`(+1) / `docs/ai/working-log.md` / `docs/ai/current-plan.md`
+
+### 5. 검증
+
+- 샌드박스(3.10): `py_compile` 통과. ruff/pytest 는 app·agent import(StrEnum 3.11) +
+  ruff 아키텍처 비호환으로 Mac 실행.
+- 사용자 Mac(3.11): `./scripts/verify.sh` → 707 + 1 = **708 passed 예상**(generator +1).
+  기존 `test_intent_maps_to_task_prompt_type` 는 `_TASK_INSTRUCTIONS` 마커 부분매칭이라
+  본 수정과 무관(영향 없음).
+
+### 6. ★다음 단계 — per-cited-chunk 재평가로 15% 목표 확인★
+
+- `python scripts/run_evaluation.py --use-real-adapters --rouge-l --bert-score` →
+  `not_supported_ratio_answerable`(현 31.1%) / `not_supported_ratio_delivered`(현 20.1%)
+  / `blocked_n_items`(현 10) 변화 측정. 다중 인용이 실제로 emit 되는지는
+  `--debug-verify "IAM 정책 변경 절차는 어떻게 진행되어야 하나요?" --use-real-adapters`
+  로 문장별 cited_chunks 다중화 확인(거의 무료). LLM 비결정성이라 1~2회 반복 권장.
+- 효과는 검증기 무변경 상태에서 per-cited-chunk 기준으로 나와야 사양 정합(full_context
+  토글과 무관). 미달 시 프롬프트 문구 추가 조정 또는 FC schema minItems:1(요청서 §5.3).

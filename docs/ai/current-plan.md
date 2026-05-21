@@ -698,9 +698,18 @@ BE 담당자 명세 확정 후 진행.
     청크) 페어 검증 + 미인용→자동 UNSUPPORTED". → **full_context 는 사양 부정합(오인용
     은폐) → 기본 OFF 유지, 내부 진단용으로만**. 사양-정합 환각 = per-cited-chunk:
     delivered ~20%/answerable ~31% (최소25% 통과, 목표15% 미달).
-  - [ ] **목표 15% 달성 = 생성기 문장별 출처 정밀도(FR-009, Agent 협의)** — 다중 청크
-    종합 문장 [1][2] 병기 + 미인용 문장 억제. 우리 검증기는 사양대로 유지(약화 금지).
-    개선 후 per-cited-chunk 재측정. KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
+  - [x] **feature17c-21** — citation collapse 위치 확정(map_citations·어댑터 무죄,
+    원인=LLM 출력=프롬프트 단일인용 유도) + Agent 요청서 작성
+    `docs/ai/agent-request-citation-precision.md`. 진단 근거: 12/12 flip, IAM 4단계
+    전부 [#1] 사례. 코드 변경 없음(무료 진단만). prompt_template.py 수정안 라인 명시.
+  - [x] **feature17c-22** — FR-009 프롬프트 직접 수정(Agent 담당자 1회 예외 승인):
+    `answer_generation_agent/.../prompt_template.py` system prompt 에 다중 인용·미근거
+    문장 억제 지침 + 출력 schema 예시 단일→다중 context_id 변경(단일 인용 anchoring 제거).
+    회귀 테스트 +1. 검증기·어댑터·코드로직 무변경(사양 정합).
+  - [ ] **목표 15% 달성 검증(재평가 대기)** — 17c-22 적용 후 `--use-real-adapters` full
+    50건 재평가로 per-cited-chunk delivered(현 20.1%)/answerable(현 31.1%) ≤ 15% 확인.
+    `--debug-verify` 로 문장별 다중 인용 emit 확인(거의 무료). 미달 시 문구 조정/FC schema.
+    KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선
