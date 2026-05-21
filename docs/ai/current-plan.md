@@ -688,8 +688,13 @@ BE 담당자 명세 확정 후 진행.
     config `verifier_full_context_grounding` + `manage_verifier_evaluator(full_context=)`
     (target citations=전체 top-k) + graph/deps 와이어링 + `.env.example`. leniency 검증
     `--debug-leniency`(fabricated 통제 문장 전체 top-k 평가 → PASS/FAIL) + `_leniency
-    _verdict`. 회귀 +5. **Mac: leniency PASS 확인 → A/B(delivered/blocked 감소) → 채택 결정.**
-  - [ ] (채택 시) citation 정밀도 별도 지표 추적 + KPI 공식숫자(answerable/delivered) 팀 확정.
+    _verdict`. 회귀 +5.
+    - [x] **leniency PASS + A/B 실측(022251)**: 통제 문장 UNSUPPORTED 유지(PASS). full_context
+      ON → 환각 answerable 31→**2.07%** / delivered 20→**0.70%**(KPI 15% 대폭 충족), 차단
+      10→2, ROUGE-L 0.17→0.24↑. Precision 76%(비결정성). 트레이드오프: 미세 wrong-chunk
+      거짓음성 잠재 + citation 정밀도 신호 상실 → 별도 추적/생성기 인용(Agent).
+  - [ ] **기본 ON 전환 결정**(공개 검증/차단 동작 변경 → 팀/설계서 §6.4 KPI 정의 합의).
+    현재 opt-in 유지, .env 로 운영 활성화 가능. citation 정밀도 별도 지표는 후속.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선
