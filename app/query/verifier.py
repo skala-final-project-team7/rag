@@ -35,6 +35,9 @@ from app.schemas.response import Verification
 _SENTENCE_BOUNDARY = re.compile(r"\n+|(?<=[.!?])\s+")
 # 인용 마커 [#n] — n은 1-based 인용 청크 번호.
 _CITATION = re.compile(r"\[#([0-9]+)\]")
+# 문장 맨 앞에 위치한 인용 마커 묶음 — 생성기가 직전 문장 끝(종결 부호 뒤)에 붙인
+# 마커가 문장 분리 경계로 떨어져 나온 것이므로 직전 문장에 재부착한다 (feature17c-16).
+_LEADING_CITATIONS = re.compile(r"^(?:\[#[0-9]+\]\s*)+")
 # 검증 토큰 — 수치(2자 이상): 정수·소수·시각·버전 등.
 _NUMBER = re.compile(r"[0-9][0-9,.:]+[0-9]|[0-9]{2,}")
 # 검증 토큰 — 구조적 식별자: 구분자(-_./)를 포함하거나 대문자 약어(2자 이상).
@@ -101,8 +104,31 @@ class RuleVerificationResult:
 
 
 def _split_sentences(answer: str) -> list[str]:
-    """답변을 문장 단위로 분리한다 (PoC 휴리스틱). 빈 문장은 제외한다."""
-    return [part.strip() for part in _SENTENCE_BOUNDARY.split(answer) if part.strip()]
+    """답변을 문장 단위로 분리한다 (PoC 휴리스틱). 빈 문장은 제외한다.
+
+    생성기는 인용 마커를 문장 끝(종결 부호 뒤)에 붙인다 — ``"문장1. [#1] 문장2. [#2]"``
+    (``app/query/generator.py`` ``_compose_answer_with_citations`` 가 ``"{문장} {마커}"``
+    로 조립). 그런데 종결 부호+공백 경계로 단순 분리하면 마커가 다음 문장 앞으로 떨어져,
+    **첫 문장이 인용을 잃고 이후 문장이 직전 문장의 마커를 갖는 off-by-one** 이 생긴다
+    (feature17c-16: 환각 NOT_SUPPORTED 과대 측정의 주원인 — 진단으로 확인). 따라서 분리
+    후 조각 맨 앞의 인용 마커는 직전 문장 끝의 마커가 경계로 떨어진 것이므로 직전 문장에
+    재부착한다. 마커가 종결 부호 앞("문장 [#1].")에 오는 경우엔 애초에 떨어지지 않아
+    영향이 없다(기존 동작 보존).
+    """
+    raw = [part.strip() for part in _SENTENCE_BOUNDARY.split(answer) if part.strip()]
+    if not raw:
+        return []
+    sentences: list[str] = [raw[0]]
+    for piece in raw[1:]:
+        match = _LEADING_CITATIONS.match(piece)
+        if match:
+            # 떨어져 나온 직전 문장의 인용 마커를 직전 문장 끝에 재부착.
+            markers = match.group(0).strip()
+            sentences[-1] = f"{sentences[-1]} {markers}"
+            piece = piece[match.end() :].strip()
+        if piece:
+            sentences.append(piece)
+    return sentences
 
 
 def _extract_citations(sentence: str) -> list[int]:

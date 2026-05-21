@@ -664,6 +664,12 @@ BE 담당자 명세 확정 후 진행.
     위치분류(in_cited=1단계FP / in_other_topk=citation정밀도 / absent=recall·생성갭)
     출력 + reports JSON. 순수 헬퍼 회귀 +4. 거의 무료(단건). **사용자 Mac 진단 실행 →
     결과 기반 fix 결정**(verifier.py 토큰정규화 / _LABEL_MAP 매핑 / citation / recall).
+  - [x] **feature17c-16 (★환각 주원인 fix★)** — debug-verify 4건 진단으로 NOT_SUPPORTED
+    과대의 주원인이 verifier 문장분리 off-by-one 확정: 생성기가 마침표 뒤에 붙인 [#N]
+    마커가 분리 시 다음 문장으로 떨어져 **첫 문장 인용 유실(cited=[])→NOT_SUPPORTED**.
+    `_split_sentences` 가 조각 앞 마커를 직전 문장에 재부착하도록 수정(우리 영역,
+    vendoring 무관). 회귀 +3. 기존 테스트는 마침표앞 포맷이라 사각지대였음. **재평가로
+    not_supported_ratio_answerable 변화 측정 대기**(첫문장 유실분만으로도 큰폭 감소 예상).
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
   - [ ] 정책절차 Precision 50% 개선

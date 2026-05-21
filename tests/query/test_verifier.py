@@ -114,6 +114,46 @@ def test_period_space_splits_sentences() -> None:
     assert result.sentences[1].is_suspicious is True
 
 
+# ---------------------------------------------------------------------------
+# feature17c-16 — 운영 포맷(종결 부호 뒤 인용 마커) citation 재부착
+# 생성기는 "문장1. [#1] 문장2. [#2]" 처럼 마침표 뒤에 마커를 붙인다. 종결 부호+공백
+# 경계로 단순 분리하면 마커가 다음 문장 앞으로 떨어져 첫 문장이 인용을 잃는 off-by-one
+# 이 발생(환각 NOT_SUPPORTED 과대 측정 주원인). 재부착으로 각 문장이 자기 마커를 갖는다.
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_marker_after_period_reattached_to_owning_sentence() -> None:
+    """'문장1. [#1] 문장2. [#2]' — 각 문장이 자기 인용을 갖고, 첫 문장이 유실되지 않는다."""
+    answer = "prod-main-eks는 32대입니다. [#1] 메모리는 80%입니다. [#2]"
+    chunks = [_chunk("prod-main-eks 32대"), _chunk("메모리 80%")]
+    result = verify_answer_rules(answer, chunks)
+    assert len(result.sentences) == 2
+    # 첫 문장이 인용을 회복(off-by-one 이전엔 cited=[] 로 의심).
+    assert result.sentences[0].cited_chunks == [1]
+    assert result.sentences[0].is_suspicious is False
+    assert result.sentences[1].cited_chunks == [2]
+    assert result.sentences[1].is_suspicious is False
+
+
+def test_single_sentence_trailing_marker_after_period() -> None:
+    """'문장. [#1]' — 마침표 뒤 마커도 그 문장에 귀속(트레일링 마커 흡수)."""
+    answer = "노드는 32대 운영됩니다. [#1]"
+    result = verify_answer_rules(answer, [_chunk("평균 32대 노드를 운영한다")])
+    assert len(result.sentences) == 1
+    assert result.sentences[0].cited_chunks == [1]
+    assert result.sentences[0].is_suspicious is False
+
+
+def test_numbered_list_item_keeps_citation() -> None:
+    """번호 목록 '1. ... . [#1] 2. ...' — 내용 문장이 인용을 유지한다."""
+    answer = "1. 노드는 32대입니다. [#1] 2. 메모리는 80%입니다. [#1]"
+    result = verify_answer_rules(answer, [_chunk("노드 32대 메모리 80%")])
+    # "1." / "2." 는 토큰 없는 PASS, 내용 문장 2개는 [#1] 인용.
+    content = [s for s in result.sentences if s.unverified_tokens or s.cited_chunks]
+    assert all(s.cited_chunks == [1] for s in content)
+    assert all(not s.is_suspicious for s in content)
+
+
 def test_empty_answer_returns_empty_result() -> None:
     result = verify_answer_rules("", [_chunk("아무 내용")])
     assert result.sentences == []
