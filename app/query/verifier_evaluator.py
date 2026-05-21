@@ -80,6 +80,7 @@ def manage_verifier_evaluator(
     suspicious_sentences: list[SentenceCheck],
     provider: AnswerEvaluatorProvider | None = None,
     config: AnswerVerificationConfig | None = None,
+    full_context: bool = False,
 ) -> list[Verification]:
     """답변 검증 2단계 LLM 평가자 [Agent] — 의심 문장을 의미적 일치로 판정한다.
 
@@ -105,6 +106,12 @@ def manage_verifier_evaluator(
             쓴다 (PoC·테스트). 운영은 OpenAIEvaluatorProvider 를 주입한다.
         config: 답변 검증 실행 설정. None 이면 기본값 (evaluator_model=
             "configurable", temperature=0.0, timeout_seconds=30).
+        full_context: feature17c-19 (opt-in, 기본 False). True 면 의심 문장의 평가 근거를
+            인용 청크가 아니라 **검색된 전체 top-k** 로 한다(target.citations/matched
+            _context_ids 를 전체 context_id 로 채움). 환각/차단을 "어느 retrieved 근거로도
+            미지원"으로만 판정 — 진단(17c-18)에서 잔존 NOT_SUPPORTED 가 사실은 검색 근거에
+            있으나 단일 청크만 인용된 citation 정밀도 문제임을 확인한 데 따른 교정. 기본
+            False 는 기존 per-cited-chunk 동작 보존.
 
     Returns:
         ``suspicious_sentences`` 와 같은 길이·sentence_id 정합의 Verification 목록.
@@ -122,10 +129,18 @@ def manage_verifier_evaluator(
     selected_config.validate()
 
     normalized_contexts = _chunks_to_normalized_contexts(top_chunks)
+    # feature17c-19 — full_context 면 전체 top-k context_id 를 평가 근거로 오버라이드.
+    full_context_ids = (
+        [_chunk_to_context_id(chunk, index=i) for i, chunk in enumerate(top_chunks, start=1)]
+        if full_context
+        else None
+    )
 
     verifications: list[Verification] = []
     for check in suspicious_sentences:
-        target = _sentence_check_to_target(check, top_chunks=top_chunks)
+        target = _sentence_check_to_target(
+            check, top_chunks=top_chunks, context_ids_override=full_context_ids
+        )
         try:
             evaluation = selected_provider.evaluate_sentence(target, normalized_contexts)
         except EvaluatorProviderError:
@@ -186,17 +201,25 @@ def _sentence_check_to_target(
     check: SentenceCheck,
     *,
     top_chunks: list[Chunk],
+    context_ids_override: list[str] | None = None,
 ) -> SuspiciousSentenceTarget:
     """본 저장소 SentenceCheck 를 agent SuspiciousSentenceTarget 으로 변환한다.
 
     1-based ``cited_chunks`` 의 정수 번호를 ``context_id`` 문자열로 환원한다
     (``top_chunks`` 의 동일 1-based 순서 정합).
+
+    feature17c-19 — ``context_ids_override`` 가 주어지면(full_context 모드) 인용 청크
+    대신 그 목록(전체 top-k context_id)을 citations/matched_context_ids 로 사용해
+    2단계 평가 근거를 전체 검색 근거로 확장한다.
     """
-    citations = [
-        _chunk_to_context_id(top_chunks[number - 1], index=number)
-        for number in check.cited_chunks
-        if 1 <= number <= len(top_chunks)
-    ]
+    if context_ids_override is not None:
+        citations = list(context_ids_override)
+    else:
+        citations = [
+            _chunk_to_context_id(top_chunks[number - 1], index=number)
+            for number in check.cited_chunks
+            if 1 <= number <= len(top_chunks)
+        ]
     failed_rules = ["token_overlap"] if check.unverified_tokens else []
     reasons = ["low_token_overlap"] if check.unverified_tokens else []
     return SuspiciousSentenceTarget(

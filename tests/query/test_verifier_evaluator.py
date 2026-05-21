@@ -302,3 +302,57 @@ def test_custom_config_is_validated() -> None:
             suspicious_sentences=[_check()],
             config=invalid_config,
         )
+
+
+# --- feature17c-19 full_context grounding 토글 ---
+
+
+class _RecordingProvider:
+    """evaluate_sentence 가 받은 target 을 기록하는 stub provider (full_context 회귀)."""
+
+    def __init__(self, label: str = "SUPPORTED") -> None:
+        self.label = label
+        self.targets: list[object] = []
+
+    def evaluate_sentence(self, target, normalized_contexts):  # noqa: ANN001 — protocol shape
+        from answer_verification_agent.evaluator.providers import SentenceEvaluation
+        from answer_verification_agent.schemas import SentenceLabel
+
+        self.targets.append(target)
+        return SentenceEvaluation(
+            sentence_id=target.sentence_id,
+            label=SentenceLabel(self.label),
+            score=0.9,
+            reason="recorded",
+        )
+
+
+def test_full_context_false_uses_only_cited_chunks() -> None:
+    """기본(full_context=False)은 인용 청크 context_id 만 target.citations 로 쓴다."""
+    chunks = [_make_chunk(chunk_id="c1"), _make_chunk(chunk_id="c2"), _make_chunk(chunk_id="c3")]
+    provider = _RecordingProvider()
+    manage_verifier_evaluator(
+        answer="...",
+        top_chunks=chunks,
+        suspicious_sentences=[_check(cited_chunks=[1])],
+        provider=provider,
+    )
+    target = provider.targets[0]
+    assert target.citations == [_context_id(chunks[0], index=1)]
+
+
+def test_full_context_true_uses_all_topk_context_ids() -> None:
+    """full_context=True 면 인용과 무관하게 전체 top-k context_id 를 평가 근거로 쓴다."""
+    chunks = [_make_chunk(chunk_id="c1"), _make_chunk(chunk_id="c2"), _make_chunk(chunk_id="c3")]
+    provider = _RecordingProvider()
+    manage_verifier_evaluator(
+        answer="...",
+        top_chunks=chunks,
+        suspicious_sentences=[_check(cited_chunks=[1])],
+        provider=provider,
+        full_context=True,
+    )
+    target = provider.targets[0]
+    expected = [_context_id(c, index=i) for i, c in enumerate(chunks, start=1)]
+    assert target.citations == expected
+    assert target.matched_context_ids == expected

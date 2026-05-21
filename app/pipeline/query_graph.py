@@ -154,6 +154,10 @@ class QueryGraphDeps:
     # 자체 urllib HTTP transport (default) 가 있어 운영 모드는 즉시 wiring 가능.
     verifier_provider: VerifierProvider | None = None
     verifier_config: VerifierConfig | None = None
+    # feature17c-19 (opt-in, 기본 False) — True 면 검증 2단계가 의심 문장을 인용 청크가
+    # 아니라 검색된 전체 top-k 근거로 평가한다(환각/차단을 "어느 retrieved 근거로도 미지원"
+    # 으로만 판정). manage_verifier_evaluator 기본값일 때만 partial 로 전달된다.
+    verifier_full_context: bool = False
 
     # --- Agent 노드 ---
     # router_node 는 manage_router (query-routing-agent 어댑터) 가 기본값.
@@ -238,6 +242,7 @@ def build_query_graph(deps: QueryGraphDeps) -> Any:
             manage_verifier_evaluator,
             provider=deps.verifier_provider,
             config=deps.verifier_config,
+            full_context=deps.verifier_full_context,
         )
     else:
         verifier_callable = deps.verify_llm_evaluator
