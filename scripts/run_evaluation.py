@@ -552,7 +552,8 @@ def _summarize_debug_verify(records: list[dict[str, Any]]) -> dict[str, Any]:
         if r["final_status"] == "NOT_SUPPORTED" and r["stage2_raw_label"]:
             raw_label_dist[r["stage2_raw_label"]] = raw_label_dist.get(r["stage2_raw_label"], 0) + 1
         if r["final_status"] == "NOT_SUPPORTED" and r.get("stage2_fullctx_label"):
-            if r["stage2_fullctx_label"] == "supported":
+            # 라벨 값 대소문자(agent enum 은 "SUPPORTED")에 무관하게 비교.
+            if str(r["stage2_fullctx_label"]).lower() == "supported":
                 flip_to_supported += 1
             else:
                 not_supported_still += 1
@@ -587,7 +588,8 @@ def _print_debug_verify(records: list[dict[str, Any]]) -> None:
         if r.get("stage2_fullctx_label") is not None:
             flip = (
                 " ★FLIP→SUPPORTED"
-                if r["final_status"] == "NOT_SUPPORTED" and r["stage2_fullctx_label"] == "supported"
+                if r["final_status"] == "NOT_SUPPORTED"
+                and str(r["stage2_fullctx_label"]).lower() == "supported"
                 else ""
             )
             print(

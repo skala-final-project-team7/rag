@@ -437,16 +437,20 @@ def test_summarize_debug_verify_fullctx_flip() -> None:
     """NOT_SUPPORTED 문장이 전체 top-k 재평가에서 supported 로 뒤집히는 수를 집계한다."""
     from scripts.run_evaluation import _summarize_debug_verify
 
+    # agent SentenceLabel.value 는 대문자("SUPPORTED")이므로 대소문자 무관 비교 회귀.
     records = [
-        # 인용청크 NOT_SUPPORTED → 전체 top-k 에서 supported (오인용=citation 정밀도)
-        {**_verify_rec(sid=1, final="NOT_SUPPORTED", raw_label="unsupported"),
-         "stage2_fullctx_label": "supported"},
-        # 인용청크 NOT_SUPPORTED → 전체 top-k 도 unsupported (진짜 미근거)
-        {**_verify_rec(sid=2, final="NOT_SUPPORTED", raw_label="unsupported"),
-         "stage2_fullctx_label": "unsupported"},
+        # 인용청크 NOT_SUPPORTED → 전체 top-k 에서 SUPPORTED (오인용=citation 정밀도)
+        {
+            **_verify_rec(sid=1, final="NOT_SUPPORTED", raw_label="UNSUPPORTED"),
+            "stage2_fullctx_label": "SUPPORTED",
+        },
+        # 인용청크 NOT_SUPPORTED → 전체 top-k 도 UNSUPPORTED (진짜 미근거)
+        {
+            **_verify_rec(sid=2, final="NOT_SUPPORTED", raw_label="UNSUPPORTED"),
+            "stage2_fullctx_label": "UNSUPPORTED",
+        },
         # PASS 문장은 fullctx 집계 대상 아님
-        {**_verify_rec(sid=3, final="PASS", suspicious=False),
-         "stage2_fullctx_label": None},
+        {**_verify_rec(sid=3, final="PASS", suspicious=False), "stage2_fullctx_label": None},
     ]
     out = _summarize_debug_verify(records)
 
