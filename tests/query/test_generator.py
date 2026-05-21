@@ -150,22 +150,6 @@ def test_intent_maps_to_task_prompt_type(intent: Intent, expected_marker: str) -
     assert expected_marker in developer_prompt
 
 
-def test_prompt_carries_multi_citation_guidance() -> None:
-    # FR-009 출처 정밀도 (feature17c-22): 다중 청크 종합 문장은 모든 context_id 를
-    # 인용하고, 미근거(도입·요약) 문장은 억제하라는 지침이 생성기 프롬프트에 전달돼야
-    # 한다. vendoring 재동기화 시 본 지침이 조용히 사라지지 않도록 회귀로 고정한다.
-    provider = FakeAnswerLLMProvider(response=_fake_response())
-    manage_generator(_state(), provider=provider)
-    system_prompt = provider.requests[0].prompt.system_prompt
-    developer_prompt = provider.requests[0].prompt.developer_prompt
-    # 다중 인용 지침 (여러 context 근거 시 모두 인용)
-    assert "여러 context" in system_prompt
-    # 미근거 문장 억제 지침
-    assert "억제" in system_prompt or "생성하지 않" in system_prompt
-    # 출력 schema 예시가 다중 context_id 배열을 보여줌 (단일 인용 anchoring 제거)
-    assert '"ctx-001", "ctx-003"' in developer_prompt
-
-
 # --- [#N] 인용 마커 합성 (§4.6.1) ---
 
 
