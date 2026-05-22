@@ -729,8 +729,15 @@ BE 담당자 명세 확정 후 진행.
     한계: strict 가 minItems 미지원이라 빈 배열 valid → 효과는 A/B 재평가로 확인. 측정
     방식 점검: 현 환각 지표는 per-cited(=citation precision)라 표준 faithfulness와 다름 →
     측정 이원화(전체 컨텍스트 faithfulness + citation precision) 별도 권고.
-  - [ ] **목표 15% 달성 = FC schema A/B 재평가** — Mac에서 토글 ON 재평가로 per-cited-chunk
-    환각 before/after 확인. 미흡 시 문장별 tool 호출 / 생성-후 재귀속 차선. 측정 이원화 별도
+  - [x] **FC schema A/B 재평가(011848 vs 012952)** — FC ON 시 환각 answerable 32.1→32.8%·
+    delivered 18.7→22.6%, verification_total 162→244, ROUGE-L 0.172→0.146 → **미채택**.
+    생성기 측 인용 교정(프롬프트 3종 + 구조 강제) 전부 실패 실증. 토글 기본 OFF 유지.
+  - [x] **feature17c-26 측정 이원화** — 현 "환각률"이 표준 faithfulness 아니라 citation
+    precision 임을 확정(인용 강제할수록 환각↑). run_query_with_state + run_evaluation 이원화:
+    per-cited(citation precision) 유지 + `unfaithful_*`(전체 top-k=표준 faithfulness) +
+    flip 분해(citation_imprecision/true_hallucination) 신설. 회귀 통과.
+  - [ ] **Mac 재평가 + KPI 정의 합의** — 신규 지표 실측(unfaithful_ratio_delivered=표준 환각
+    vs not_supported_ratio_delivered=citation precision) 후 팀과 헤드라인 KPI 합의.
     (프롬프트 텍스트 한계 실증). KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)

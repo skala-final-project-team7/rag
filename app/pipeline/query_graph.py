@@ -363,6 +363,28 @@ def run_query(
     Returns:
         UI 렌더링용 QueryResponse (api-spec.md 정합).
     """
+    response, _ = run_query_with_state(state, graph=graph, formatter=formatter)
+    return response
+
+
+def run_query_with_state(
+    state: RagState,
+    *,
+    graph: Any,
+    formatter: Callable[..., QueryResponse] = format_response,
+) -> tuple[QueryResponse, RagState]:
+    """``run_query`` 와 동일하되 최종 RagState 도 함께 반환한다.
+
+    ``run_query`` 는 UI 응답(QueryResponse)만 돌려주므로 ``top_chunks`` / 원본 ``answer`` /
+    파이프라인 ``verification`` 같은 내부 상태에 접근할 수 없다. 평가·진단 도구가 동일
+    답변을 다른 grounding(전체 top-k 등)으로 재검증하려면 ``top_chunks`` 가 필요하므로,
+    최종 RagState 를 노출하는 변형을 제공한다(feature17c-26 측정 이원화). 프로덕션 경로는
+    ``run_query`` 를 그대로 쓰며 동작 변화가 없다.
+
+    Returns:
+        (QueryResponse, 최종 RagState) 튜플. RagState 는 ``top_chunks`` / ``answer`` /
+        ``verification`` 등 그래프 실행 결과를 모두 담는다.
+    """
     started = time.perf_counter_ns()
     result_dict = graph.invoke(state)
     elapsed_ms = (time.perf_counter_ns() - started) // 1_000_000
@@ -373,7 +395,7 @@ def run_query(
     used_llm = final.used_llm or LlmModel.GPT_4O_MINI
     answer = final.answer or ""
 
-    return formatter(
+    response = formatter(
         answer=answer,
         sources=final.sources,
         verification=final.verification,
@@ -381,3 +403,4 @@ def run_query(
         used_llm=used_llm,
         latency_ms=int(elapsed_ms),
     )
+    return response, final

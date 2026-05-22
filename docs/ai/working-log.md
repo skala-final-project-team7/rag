@@ -6916,3 +6916,53 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
     환각(not_supported_ratio_answerable/delivered) before/after + Precision@3·ROUGE-L 비퇴행 확인.
   - 효과 미흡(strict minItems 한계) 시 차선: 문장별 tool 호출 구조 / 생성-후 모델 기반
     재귀속(검증기 신호 미사용으로 순환 회피) 검토. 측정 이원화(faithfulness/citation) 별도 작업.
+
+---
+
+## 2026-05-22 — feature17c-25 A/B 실측 + feature17c-26 측정 이원화
+
+### A/B 실측 — FC 스키마 미채택 (사용자 Mac, 재적재 후)
+
+- 재적재: PageObject 92 → Chunk 425(본문 374 + 첨부 51, PDF/CSV 포함). docker compose qdrant+mongo.
+- baseline OFF `reports/evaluation_20260522_011848.json` / FC ON `reports/evaluation_20260522_012952.json` 직접 확인:
+
+  | 지표 | OFF | ON(FC) |
+  |---|---|---|
+  | Precision@3 | 80% (40/50) | 80% (40/50) |
+  | 의도정확도 | 94% | 94% |
+  | 환각 answerable(per-cited) | 32.1% (51/159) | 32.8% (79/241) |
+  | 환각 delivered(per-cited) | 18.7% (23/123) | 22.6% (44/195) |
+  | verification_total | 162 | 244 |
+  | ROUGE-L | 0.172 | 0.146 |
+
+- **판정: FC 스키마 미채택.** Structured Outputs 가 답변을 더 잘게 쪼개(162→244) 인용 단위만
+  늘렸을 뿐 단일 인용 습관 불변(예측대로 strict minItems 미지원) → NS↑·ROUGE-L↓. 프롬프트
+  3종(17c-22/23) + 구조 강제까지 생성기 측 인용 교정은 전부 실패로 실증. 토글 기본 OFF 유지.
+
+### feature17c-26 — 환각 측정 이원화 (사용자 측정방식 변경 권한 위임)
+
+- 진단 재확인: 현 "환각률"(per-cited)은 표준 RAG faithfulness(RAGAS/TruLens=전체 검색
+  컨텍스트 기준)가 아니라 **citation precision**(인용한 청크 기준)을 잰다. 12/12 flip 실측 +
+  이번 A/B(인용 강제할수록 환각↑)가 이를 재증명. 표준 faithfulness 는 ~2%(022251 full_context).
+- 변경: 평가에서 **두 지표를 함께** 산출하도록 이원화. 프로덕션 파이프라인(run_query)은 무변경.
+  - `app/pipeline/query_graph.py` — `run_query_with_state` 추가((response, 최종 RagState) 반환).
+    run_query 는 이를 위임(하위호환). 평가가 top_chunks/answer 에 접근해 재검증하기 위함.
+  - `scripts/run_evaluation.py` —
+    - `_compute_faithfulness_verification`: 같은 답변·top_chunks 를 1단계 규칙(결정론, 동일
+      suspicious set)으로 나눈 뒤 의심 문장만 2단계 `full_context=True` 로 재판정(suspicious-only
+      → 추가 LLM 소수). PASS 문장은 인용 청크에 이미 근거 → SUPPORTED.
+    - per-item 에 `verification`(cited_chunks 기록) + `verification_faithfulness` 저장.
+    - `_summarize_hallucination` 확장: 기존 per-cited 키 전부 유지(citation precision) +
+      `unfaithful_*`(표준 faithfulness, answerable/delivered) + per-cited NS 의 flip 분해
+      `citation_imprecision_count_*`(오인용) / `true_hallucination_count_*`(진짜 환각) 신설.
+      verification_faithfulness 없으면 None(하위호환).
+- 수정 파일: `app/pipeline/query_graph.py` / `scripts/run_evaluation.py` /
+  `tests/pipeline/test_query_graph.py`(run_query_with_state 회귀) /
+  `tests/scripts/test_run_evaluation.py`(이원화·flip·하위호환·헬퍼 회귀 3건)
+- 검증: 샌드박스에서 순수 함수 회귀 통과(이원화 집계·flip 분해·하위호환·헬퍼) + 기존
+  summarizer 7건 무회귀. py_compile 통과. 전체 pytest 는 Mac.
+- 남은 TODO:
+  - Mac 재평가(`run_evaluation --use-real-adapters --rouge-l --bert-score`)로 신규 지표 실측:
+    `unfaithful_ratio_delivered`(=표준 환각, ≈한 자릿수 예상) vs `not_supported_ratio_delivered`
+    (=citation precision ~19%) + `true_hallucination_count_delivered` 확인.
+  - 팀과 KPI 정의 합의: 헤드라인 = faithfulness, citation precision 은 보조 품질 지표로 분리.

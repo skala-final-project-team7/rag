@@ -20,6 +20,7 @@ from app.pipeline.query_graph import (
     build_query_graph,
     build_query_graph_for_streaming,
     run_query,
+    run_query_with_state,
 )
 from app.pipeline.stubs import generator_stub, verify_llm_evaluator_stub
 from app.query.acl import ACLViolationError, build_acl_filter
@@ -242,6 +243,33 @@ def test_run_query_normal_flow_populates_sources_and_verification(
     assert response.latency_ms >= 0
     # 답변 차단 메시지가 아니어야 한다 (정상 흐름).
     assert response.answer != BLOCKED_ANSWER_MESSAGE
+
+
+def test_run_query_with_state_exposes_final_state(
+    dense: FakeDenseEmbedder,
+    sparse: FakeSparseEmbedder,
+    populated_store: QdrantPoolStore,
+) -> None:
+    """run_query_with_state 는 (response, 최종 RagState) 를 돌려주고, state 는 top_chunks/
+    answer 등 내부 상태를 노출한다 — 평가의 faithfulness 재검증에 필요(feature17c-26)."""
+    graph = build_query_graph(
+        _deps(
+            dense,
+            sparse,
+            populated_store,
+            generator_node=generator_stub,
+            verify_llm_evaluator=verify_llm_evaluator_stub,
+        )
+    )
+    response, final = run_query_with_state(_initial_state(query="alpha"), graph=graph)
+    # response 는 run_query 와 동일한 QueryResponse.
+    assert response.answer and response.latency_ms >= 0
+    # 최종 state 는 top_chunks(검색·재순위 결과)와 원본 answer 를 노출한다.
+    assert isinstance(final, RagState)
+    assert len(final.top_chunks) >= 1
+    assert final.answer
+    # run_query 와 동일 답변(델리게이션) — 회귀.
+    assert run_query(_initial_state(query="alpha"), graph=graph).answer == response.answer
 
 
 def test_run_query_uses_router_stub_intent_and_target_llm(
