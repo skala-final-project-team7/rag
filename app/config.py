@@ -104,6 +104,16 @@ class Settings(BaseSettings):
     # (feature17c-13)로 측정. 과도 시 답변 완성도(ROUGE-L/BERTScore) 하락 가능.
     generator_conservative_guard: bool = False
 
+    # 생성기 문장별 인용 구조 강제 (feature17c-25, opt-in). True 면 build_real_deps 가
+    # OpenAI transport 에 Structured Outputs(json_schema, strict) 스키마
+    # (GROUNDED_CITATION_RESPONSE_FORMAT)를 주입해 sentences[].citations 를 문장마다 필수
+    # 배열로 강제하고 다중 인용을 description 으로 유도한다(vendoring 무수정, transport 경계).
+    # 환각 KPI 잔여 원인 = 다중 청크 종합 문장의 단일 인용(citation 정밀도) 교정 목적. 프롬프트
+    # 텍스트 개입(17c-22/23)이 효과 0 으로 실패해 구조적 강제로 전환. False(기본)는 기존
+    # json_object 동작 무변 — A/B: RAG_GENERATOR_FORCE_CITATION_SCHEMA=true 로 토글 후
+    # per-cited-chunk 환각(not_supported_ratio_answerable/delivered) 재평가로 효과 확인.
+    generator_force_citation_schema: bool = False
+
     # 검증 2단계 전체 top-k grounding 토글 (feature17c-19, opt-in). True 면 의심 문장을
     # 인용 청크가 아니라 검색된 전체 top-k 근거로 2단계 평가한다. 진단(feature17c-18)에서
     # delivered NOT_SUPPORTED 12/12 가 전체 top-k 재평가 시 SUPPORTED 로 뒤집힘(=사실은

@@ -14,7 +14,11 @@ from typing import Any
 
 import pytest
 
-from app.query.openai_transport import build_openai_chat_transport
+from app.query.openai_transport import (
+    GROUNDED_CITATION_RESPONSE_FORMAT,
+    build_openai_chat_transport,
+    select_generator_response_format,
+)
 
 # --- Fake OpenAI SDK ---
 
@@ -291,3 +295,54 @@ def test_transport_custom_response_format_overrides_default(
     transport(_payload())
     assert client.captured_kwargs is not None
     assert client.captured_kwargs["response_format"] == {"type": "text"}
+
+
+# --- feature17c-25 문장별 인용 구조 강제 (Structured Outputs) ---
+
+
+def test_grounded_citation_schema_matches_parser_keys() -> None:
+    """스키마가 parse_llm_response 키(answer/sentences[].{text,citations}/unsupported_gaps)와
+    정합하고 strict 구조 규칙(additionalProperties:false, 전 키 required)을 지킨다."""
+    schema = GROUNDED_CITATION_RESPONSE_FORMAT["json_schema"]
+    assert schema["strict"] is True
+    root = schema["schema"]
+    assert root["additionalProperties"] is False
+    assert set(root["required"]) == {"answer", "sentences", "unsupported_gaps"}
+    assert set(root["properties"]) == {"answer", "sentences", "unsupported_gaps"}
+    sentence = root["properties"]["sentences"]["items"]
+    # 문장 객체는 text + citations 를 모두 required 로 가지며 citations 는 문자열 배열
+    assert sentence["additionalProperties"] is False
+    assert set(sentence["required"]) == {"text", "citations"}
+    citations = sentence["properties"]["citations"]
+    assert citations["type"] == "array"
+    assert citations["items"] == {"type": "string"}
+
+
+def test_select_generator_response_format_toggle() -> None:
+    # 토글 ON → Structured Outputs 스키마, OFF → None(기존 json_object 폴백)
+    assert select_generator_response_format(True) is GROUNDED_CITATION_RESPONSE_FORMAT
+    assert select_generator_response_format(False) is None
+
+
+def test_transport_forwards_citation_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """citation 스키마를 주입하면 OpenAI create 호출에 그대로 전달된다."""
+    client = _FakeClient(
+        response_content=json.dumps(
+            {
+                "answer": "IAM 변경 절차.",
+                "sentences": [{"text": "Jira 티켓 생성.", "citations": ["ctx-001", "ctx-003"]}],
+                "unsupported_gaps": [],
+            }
+        )
+    )
+    _install_fake_openai(monkeypatch, client)
+
+    transport = build_openai_chat_transport(
+        api_key="sk-test",
+        response_format=GROUNDED_CITATION_RESPONSE_FORMAT,
+    )
+    result = transport(_payload())
+    assert client.captured_kwargs is not None
+    assert client.captured_kwargs["response_format"] is GROUNDED_CITATION_RESPONSE_FORMAT
+    # 다중 인용 응답이 그대로 파싱된다(파서는 transport 밖이지만 dict 통과 확인).
+    assert result["sentences"][0]["citations"] == ["ctx-001", "ctx-003"]

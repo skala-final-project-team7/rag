@@ -6786,3 +6786,133 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
 
 - FC tools schema 는 Agent 담당자 영역 → 요청서 전달. 적용 후 우리 측 per-cited-chunk
   재평가로 15% 재확인. 우리 영역에서 추가 환각 레버 없음(프롬프트 한계 실증 완료).
+
+---
+
+## 2026-05-22 — feature4-B (csv): CSV 첨부 분할기
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 첨부 청커에 CSV 유형 분할기 추가. feature4-B 중 CSV 절반 완료(PDF는 잔여).
+  - `_read_csv_rows` — 인코딩 자동감지(utf-8-sig → cp949 → utf-8 → latin-1 순 fallback,
+    표준 라이브러리 `csv`만 사용·무거운 의존성 없음). Excel BOM 제거, 완전 빈 행 제외,
+    셀 값은 좌우 공백만 정리해 문자열로 보존(수치 변환 안 함 → ID·선행 0 손실 방지).
+  - `_chunk_csv` — CSV를 단일 시트로 보고 파일명 stem을 시트명으로 사용. xlsx 행 직렬화
+    자산(`_resolve_header`/`_group_sheet_rows`/`_serialize_*`)을 그대로 재사용 →
+    행 그룹 분할·oversize 축소·컬럼명 반복 부착·빈 셀 생략 동작을 공유한다.
+  - `_looks_like_header` 보강 — CSV는 모든 셀이 문자열이라 raw 타입 판정만으로는 수치
+    행을 데이터로 구분 못 함. `_NUMERIC_RE`로 수치 문자열도 비헤더로 판정. xlsx는 헤더가
+    통상 설명 텍스트라 무회귀(검증 완료).
+  - `split_attachment`/`chunk_attachment`에 CSV 분기 연결. CSV는 xlsx처럼 행 그룹 분할이
+    크기 처리를 겸하므로 2차 크기 규칙(`apply_size_rules`)은 적용하지 않음.
+  - `_EXTRACTED_FORMAT_BY_TYPE`에 CSV→SHEET_SERIALIZED 추가(enums 정의와 정합).
+  - `scripts/ingest_samples.py`는 무수정 — ValueError skip 로직이 있어 CSV 지원 시
+    첨부 청킹에 자동 포함된다(코드 변경 불필요).
+- 수정 파일:
+  - `app/ingestion/chunker/attachment.py`
+  - `tests/ingestion/chunker/test_attachment.py` (CSV 테스트 10건 추가, 거부 테스트 PDF 단독으로 정정)
+- 실행 명령: 샌드박스(3.10)에서 `py_compile` 통과 + CSV 순수 로직 단독 스모크 6건 통과 +
+  header heuristic 무회귀 검증. ⚠ `StrEnum`이 3.11 전용이라 샌드박스에서 전체 pytest 불가 →
+  `./scripts/format.sh`/`lint.sh`/`test.sh`는 사용자 Mac(3.11)에서 최종 실행 필요.
+- 테스트 결과(예상): 기존 707 + CSV 10건 = **717 passed 예상**. Mac 확인 대기.
+- 남은 TODO:
+  - 사용자 Mac에서 `./scripts/verify.sh` 실행해 717 통과 확정 후 커밋·푸시.
+  - feature4-B 잔여 = PDF 분할기(pymupdf + PDF 픽스처 확보 후 별도 세션).
+  - samples/attachments에 CSV 픽스처는 없음(테스트는 tmp_path 생성). 실데이터 CSV 확보 시
+    통합 청킹 검증 추가 가능.
+
+---
+
+## 2026-05-22 — feature4-B (pdf): PDF 첨부 분할기 → feature4 완료
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: 첨부 청커에 PDF 유형 분할기 추가. feature4(pdf/docx/xlsx/csv) 전부 완료.
+  - `_pdf_line_records`/`_is_pdf_heading`/`_extract_pdf_sections` — PyMuPDF(fitz)로 라인별
+    폰트 크기·굵기·길이를 추출하고, 본문 폰트(글자 수 가중 최빈 크기) 대비 큰 폰트(≥1.15배)
+    또는 볼드 짧은 행(≤80자·≤12단어, ≥1.05배)을 헤딩으로 검출. section_header는
+    `p.<페이지>: <제목>` (chunking-strategy.md §5). docx의 preamble→첫 섹션 부착 패턴 동일.
+  - `_extract_pdf_plain_text` — fitz가 텍스트를 전혀 못 뽑는 PDF(이미지/복잡 레이아웃)에
+    한해 pdfplumber 평문 폴백(지연 import). 헤딩 미검출 시는 단일 draft로 두고
+    chunk_attachment의 2차 크기 규칙이 800토큰 슬라이딩 윈도우로 재분할(`apply_size_rules`).
+  - 암호화 PDF(`document.needs_pass`)는 `ATTACH_ENCRYPTED` ValueError로 거부 →
+    ingest_samples가 안전 skip(chunking-strategy.md §8 에러 코드 정합).
+  - `_EXTRACTED_FORMAT_BY_TYPE`에 PDF→RAW_TEXT 추가, `split_attachment`/`chunk_attachment`에
+    PDF 분기 연결(docx와 동일하게 `apply_size_rules` 적용 — 섹션 비원자성).
+- 수정 파일:
+  - `app/ingestion/chunker/attachment.py`
+  - `tests/ingestion/chunker/test_attachment.py` (PDF 테스트 6건 추가, fitz로 tmp_path PDF 생성)
+- 실행 명령: 샌드박스에 pymupdf 1.27 + pdfplumber 설치 후 **실제 모듈을 import해 PDF 6건
+  end-to-end 통과 검증**(StrEnum/UTC shim + 무관 storage 의존성 stub로 3.10 우회). py_compile 통과.
+  ⚠ 전체 pytest(StrEnum 3.11)는 사용자 Mac에서 `./scripts/verify.sh`로 최종 실행 필요.
+- 테스트 결과(검증): PDF 6건 실측 통과(infer / 폰트 섹션 분할·p.N 헤더 / 헤딩 미검출 fallback /
+  암호화 거부 / chunk_attachment 인덱싱·메타데이터·ACL 상속 / 타입 추정). 짧은 섹션은
+  merge_undersized로 병합되어 chunk_attachment 결과가 1청크가 될 수 있음(설계대로).
+  예상 누적: CSV 직후 717 + PDF 6건 = **723 passed 예상**. Mac 확인 대기.
+- 남은 TODO:
+  - 사용자 Mac에서 `./scripts/verify.sh` 통과 확정 후 커밋·푸시.
+  - samples/attachments에 PDF 픽스처는 없음(테스트는 fitz 생성). 실데이터 PDF 확보 시
+    스캔/이미지 PDF의 pdfplumber 폴백·폰트 휴리스틱 정확도 추가 검증 권장.
+  - feature4 전부 완료 → 첨부 4종(pdf/docx/xlsx/csv) 청킹 지원 완성.
+
+---
+
+## 2026-05-22 — feature4 통합 테스트 보강: PDF/CSV 어댑터 경유 커버리지
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 변경 사항: PDF/CSV 첨부가 `JsonFixtureSourceAdapter` 전체 경로(fetch_pages →
+  _map_attachments → chunk_attachment → 메타데이터)를 통과하는 통합 테스트 1건 추가.
+  - 기존 PDF/CSV 테스트는 tmp_path 파일을 직접 chunk_attachment에 넣는 단위 성격이라,
+    어댑터의 page→attachment 매핑·ACL space 합성·extracted_format 추론 경유가 미검증이었음.
+  - canonical `samples/`는 docx2+xlsx2 4건 계약을 다른 테스트(`test_exactly_four_attachments`,
+    `test_json_fixture`, `test_ingest_samples` 등)가 단언하므로 **무수정**. 대신 tmp_path에
+    미니 confluence 픽스처(페이지 1건 + 실제 PDF/CSV 파일)를 만들고 어댑터의 `fixture_files`
+    인자로 그 단일 파일만 로드해 검증 → 기존 테스트 무영향(blast radius 0).
+  - 검증 항목: 첨부 2건 매핑, chunk_index 연속, section_header 비공백, source_type=attachment,
+    attachment_id/page_id 일치, 어댑터 합성 ACL(`space:CLOUD`) 상속, token_count>0,
+    extracted_format(pdf=raw_text / csv=sheet_serialized).
+- 수정 파일: `tests/ingestion/chunker/test_attachment.py` (통합 테스트 1건 + `import json`)
+- 실행 명령: 샌드박스에서 **실제 모듈(JsonFixtureSourceAdapter 포함) end-to-end 통과 검증**.
+  py_compile 통과. 전체 pytest는 사용자 Mac에서 `./scripts/verify.sh` 최종 실행.
+- 테스트 결과(검증): 통합 1건 실측 통과(PDF→p.1: Overview/raw_text, CSV→[시트] 행 1~2/
+  sheet_serialized, ACL 상속). 누적 예상: 722 + 1 = **723 passed 예상**. Mac 확인 대기.
+- 남은 TODO: 사용자 Mac verify 통과 후 커밋·푸시. 본 담당자 영역 순수 코드 백로그는
+  사실상 소진(잔여는 BE 협의·Agent 이관·평가 실행·성과 문서화).
+
+---
+
+## 2026-05-22 — feature17c-25: 생성기 문장별 인용 구조 강제 (Structured Outputs, Agent 권한 위임)
+
+- 브랜치: `feat/#1/rag-pipeline-skeleton`
+- 배경: 환각 KPI(15%) 미달의 유일 잔여 원인이 "다중 청크 종합 문장의 단일 인용"(citation
+  정밀도)임이 확정됨(요청서 §3, 12/12 flip). 프롬프트 텍스트 개입(17c-22/23)은 효과 0 으로
+  실증 실패. **Agent 담당자가 환각 개선 권한을 본 담당자에게 위임** → 구조적 강제로 전환.
+- 측정 방식 점검(사용자 요청): 현 환각 지표는 표준 RAG faithfulness(RAGAS/TruLens=전체 검색
+  컨텍스트 기준)와 달리 **per-cited-chunk(인용 청크 기준)** 라 사실상 citation precision 을
+  측정한다. 12/12 flip 이 입증하듯 전체 top-k 기준 진짜 환각은 ≈0%. 또 1단계 규칙이 수치·식별자
+  토큰만 검사해 **순수 서술형 날조는 자동 PASS(과소계상)**, LOW_CONFIDENCE→NOT_SUPPORTED
+  흡수(과대계상) 등 양방향 편향 존재. 권고: faithfulness(전체 컨텍스트)와 citation precision 을
+  **별도 2개 지표로** 보고. (이번 커밋은 생성기 측 구조 강제만, 측정 이원화는 별도.)
+- 변경 사항: vendored 프롬프트 대신 **transport 경계**(우리 영역, vendoring 무수정)에서 OpenAI
+  Structured Outputs(json_schema, strict)를 주입.
+  - `app/query/openai_transport.py` — `GROUNDED_CITATION_RESPONSE_FORMAT`(answer/
+    sentences[].{text,citations}/unsupported_gaps, strict=True, citations 문장마다 필수 배열 +
+    다중 인용·미근거 분리 description) + `select_generator_response_format(flag)` 헬퍼.
+    parse_llm_response 키와 정합 확인.
+  - `app/config.py` — `generator_force_citation_schema: bool = False`(opt-in).
+  - `app/api/deps.py` — 플래그 ON 시 `build_openai_chat_transport(response_format=스키마)`.
+    OFF(기본)는 기존 json_object 동작 무변.
+  - `.env.example` — `RAG_GENERATOR_FORCE_CITATION_SCHEMA=false`.
+  - **한계 명기**: OpenAI strict json_schema 는 `minItems` 미지원 → "≥1 인용"을 구조적으로
+    강제하진 못함(빈 배열 형식상 valid; 검증기가 미인용 문장을 의심 처리, 사양 정합). 구조
+    보장 + description 으로 다중 인용 유도하며 효과는 재평가로 확인.
+- 수정 파일: `app/query/openai_transport.py` / `app/config.py` / `app/api/deps.py` /
+  `.env.example` / `tests/query/test_openai_transport.py` / 본 로그 / current-plan /
+  `docs/ai/agent-request-citation-precision.md`
+- 실행 명령: 샌드박스에서 **실제 모듈 end-to-end 검증** — 스키마↔parser 키 정합·strict 규칙,
+  parse_llm_response 다중인용 round-trip, select 토글, transport 가 fake OpenAI 에 스키마 전달 +
+  다중인용 응답 파싱(4/4 통과). py_compile 통과. 전체 pytest 는 Mac.
+- 테스트 결과(예상): 기존 723 + transport 회귀 3건 = **726 passed 예상**. Mac 확인 대기.
+- 남은 TODO:
+  - Mac에서 `RAG_GENERATOR_FORCE_CITATION_SCHEMA=true` 로 A/B 재평가 → per-cited-chunk
+    환각(not_supported_ratio_answerable/delivered) before/after + Precision@3·ROUGE-L 비퇴행 확인.
+  - 효과 미흡(strict minItems 한계) 시 차선: 문장별 tool 호출 구조 / 생성-후 모델 기반
+    재귀속(검증기 신호 미사용으로 순환 회피) 검토. 측정 이원화(faithfulness/citation) 별도 작업.

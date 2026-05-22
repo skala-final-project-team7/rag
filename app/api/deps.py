@@ -176,6 +176,7 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     from app.query.openai_transport import (
         CONSERVATIVE_SYSTEM_GUARD,
         build_openai_chat_transport,
+        select_generator_response_format,
     )
     from app.query.reranker.cross_encoder import CrossEncoderRerankerImpl
     from app.query.routing_transport import build_openai_routing_transport
@@ -236,10 +237,16 @@ def build_real_deps(settings: Settings | None = None) -> QueryGraphDeps:
     # feature17c-14 — 환각 보수성 guard (opt-in). settings.generator_conservative_guard
     # True 일 때만 CONSERVATIVE_SYSTEM_GUARD 를 transport 에 주입(기본 None=기존 동작).
     generator_guard = CONSERVATIVE_SYSTEM_GUARD if settings.generator_conservative_guard else None
+    # feature17c-25 — 문장별 인용 구조 강제 (opt-in). settings.generator_force_citation_schema
+    # True 일 때만 Structured Outputs 스키마를 주입(기본 None=기존 json_object 동작).
+    generator_response_format = select_generator_response_format(
+        settings.generator_force_citation_schema
+    )
     generator_provider = OpenAIAnswerLLMProvider(
         api_key=openai_api_key,
         transport=build_openai_chat_transport(
             api_key=openai_api_key,
+            response_format=generator_response_format,
             system_prompt_suffix=generator_guard,
         ),
     )
