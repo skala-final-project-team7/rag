@@ -326,6 +326,114 @@ def test_summarize_hallucination_separates_blocked_from_delivered() -> None:
     assert out["answerable_n_items"] == 2
 
 
+# ---------------------------------------------------------------------------
+# feature17c-26 — 측정 이원화 (faithfulness + citation precision)
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_hallucination_dual_metric_and_flip() -> None:
+    """verification_faithfulness 가 있으면 표준 faithfulness(unfaithful_*)와 per-cited NS의
+    flip 분해(citation_imprecision / true_hallucination)를 함께 산출한다."""
+    from scripts.run_evaluation import _summarize_hallucination
+
+    results = [
+        {
+            "is_answerable": True,
+            "is_blocked": False,
+            "n_sources": 3,
+            # per-cited: 2 NS (s1, s2)
+            "verification": [
+                {"sentence_id": 1, "status": "NOT_SUPPORTED", "cited_chunks": [1]},
+                {"sentence_id": 2, "status": "NOT_SUPPORTED", "cited_chunks": [1]},
+                {"sentence_id": 3, "status": "SUPPORTED", "cited_chunks": [2]},
+            ],
+            # 전체 top-k 재검증: s1 flip(SUPPORTED=오인용), s2 still NS(진짜 환각)
+            "verification_faithfulness": [
+                {"sentence_id": 1, "status": "SUPPORTED"},
+                {"sentence_id": 2, "status": "NOT_SUPPORTED"},
+                {"sentence_id": 3, "status": "SUPPORTED"},
+            ],
+        },
+    ]
+    out = _summarize_hallucination(results)
+
+    # per-cited(citation precision)는 기존대로 유지
+    assert out["not_supported_count_delivered"] == 2
+    assert out["verification_total_delivered"] == 3
+    # faithfulness(전체 top-k): 3문장 중 1 NS
+    assert out["unfaithful_count_delivered"] == 1
+    assert out["unfaithful_ratio_delivered"] == pytest.approx(1 / 3)
+    # flip 분해: per-cited NS 2건 = 오인용 1 + 진짜 환각 1
+    assert out["citation_imprecision_count_delivered"] == 1
+    assert out["true_hallucination_count_delivered"] == 1
+
+
+def test_summarize_hallucination_faithfulness_absent_is_none() -> None:
+    """verification_faithfulness 가 없으면 faithfulness 키는 None(하위호환)."""
+    from scripts.run_evaluation import _summarize_hallucination
+
+    out = _summarize_hallucination(
+        [{"is_answerable": True, "verification": [{"sentence_id": 0, "status": "NOT_SUPPORTED"}]}]
+    )
+    assert out["not_supported_ratio"] == pytest.approx(1.0)
+    assert out["unfaithful_ratio"] is None
+    assert out["unfaithful_count_delivered"] is None
+    assert out["citation_imprecision_count_delivered"] is None
+
+
+def test_compute_faithfulness_verification_uses_full_context() -> None:
+    """rule 1단계는 그대로, 의심 문장만 full_context=True 로 2단계 재판정한다."""
+    from scripts.run_evaluation import _compute_faithfulness_verification
+
+    class _V:
+        def __init__(self, sid: int, status: str) -> None:
+            self.sentence_id = sid
+            self.status = status
+            self.cited_chunks: list[int] = []
+
+    class _Rule:
+        def __init__(self, passed: list, suspicious: list) -> None:
+            self._passed = passed
+            self.suspicious_sentences = suspicious
+
+        def passed_verifications(self) -> list:
+            return self._passed
+
+    captured: dict = {}
+
+    def fake_rules(answer: str, top_chunks: list) -> _Rule:
+        return _Rule([_V(1, "SUPPORTED")], [object()])  # s1 PASS, s2 의심
+
+    def fake_eval(*, answer, top_chunks, suspicious_sentences, provider, config, full_context):
+        captured["full_context"] = full_context
+        captured["n"] = len(suspicious_sentences)
+        return [_V(2, "SUPPORTED")]
+
+    res = _compute_faithfulness_verification(
+        answer="a. b.",
+        top_chunks=["x"],
+        verify_rules=fake_rules,
+        evaluate=fake_eval,
+        provider="P",
+        config="C",
+    )
+    assert [v.sentence_id for v in res] == [1, 2]
+    assert captured["full_context"] is True
+    assert captured["n"] == 1
+    # 빈 답변 → 재검증 없이 빈 목록
+    assert (
+        _compute_faithfulness_verification(
+            answer="   ",
+            top_chunks=[],
+            verify_rules=fake_rules,
+            evaluate=fake_eval,
+            provider=None,
+            config=None,
+        )
+        == []
+    )
+
+
 def test_summarize_hallucination_counts_non_answerable_correct_refusal() -> None:
     """non-answerable 항목 중 검색 후보 0건은 '올바른 거부'로 카운트된다."""
     from scripts.run_evaluation import _summarize_hallucination

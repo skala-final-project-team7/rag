@@ -776,10 +776,12 @@ def _run_evaluation(
     """Evaluation Set 전체 실행 + 지표 산출."""
     from app.api.deps import build_poc_deps, build_real_deps
     from app.config import get_settings
-    from app.pipeline.query_graph import build_query_graph, run_query
+    from app.pipeline.query_graph import build_query_graph, run_query_with_state
     from app.query.acl import build_acl_filter
     from app.query.formatter import BLOCKED_ANSWER_MESSAGE
     from app.query.router import manage_router
+    from app.query.verifier import verify_answer_rules
+    from app.query.verifier_evaluator import manage_verifier_evaluator
     from app.schemas.rag_state import RagState
 
     with eval_set_path.open() as fp:
@@ -856,8 +858,22 @@ def _run_evaluation(
             acl_filter=build_acl_filter("eval-user", eval_groups),
         )
         started = time.perf_counter()
-        response = run_query(state, graph=graph)
+        response, final_state = run_query_with_state(state, graph=graph)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        # feature17c-26 — 측정 이원화. 그래프가 산출한 verification 은 per-cited grounding
+        # (= citation precision). 같은 답변을 전체 top-k 근거로 한 번 더 검증해 표준
+        # faithfulness(검색 근거 어디에라도 있나)를 산출한다. rule 1단계는 결정론이라
+        # suspicious set 이 그래프와 동일하고, 2단계만 full_context=True 로 재판정한다
+        # (suspicious 문장만 → 추가 LLM 호출 소수). 프로덕션 경로(run_query)는 무변경.
+        faithfulness_verification = _compute_faithfulness_verification(
+            answer=final_state.answer or "",
+            top_chunks=list(final_state.top_chunks),
+            verify_rules=verify_answer_rules,
+            evaluate=manage_verifier_evaluator,
+            provider=deps.verifier_provider,
+            config=deps.verifier_config,
+        )
 
         # Precision@k — 응답 sources Top-k 중 expected_page_ids 와 매칭되는지.
         top_k_sources = response.sources[:top_k]
@@ -908,9 +924,24 @@ def _run_evaluation(
                 "actual_top_k_source_titles": [s.title for s in top_k_sources],
                 "n_sources": len(response.sources),
                 "top1_score": response.sources[0].score if response.sources else None,
+                # feature17c-26 — cited_chunks 도 기록(사후 분석·감사용). per-cited 검증
+                # (= citation precision)이다.
                 "verification": [
-                    {"sentence_id": v.sentence_id, "status": v.status.value}
+                    {
+                        "sentence_id": v.sentence_id,
+                        "status": v.status.value,
+                        "cited_chunks": list(v.cited_chunks),
+                    }
                     for v in response.verification
+                ],
+                # feature17c-26 — 전체 top-k 근거 재검증(= 표준 faithfulness).
+                "verification_faithfulness": [
+                    {
+                        "sentence_id": v.sentence_id,
+                        "status": v.status.value,
+                        "cited_chunks": list(v.cited_chunks),
+                    }
+                    for v in faithfulness_verification
                 ],
                 "answer_excerpt": (response.answer or "")[:200],
                 "feedback_enabled": response.feedback_enabled,
@@ -1053,6 +1084,45 @@ def _precision_match(
     return len(top_k_sources) > 0
 
 
+def _compute_faithfulness_verification(
+    *,
+    answer: str,
+    top_chunks: list[Any],
+    verify_rules: Any,
+    evaluate: Any,
+    provider: Any,
+    config: Any,
+) -> list[Any]:
+    """답변을 검색된 전체 top-k 근거로 재검증해 faithfulness용 Verification 목록을 만든다
+    (feature17c-26 측정 이원화).
+
+    그래프가 산출하는 verification 은 per-cited grounding(= citation precision)이다. 본
+    헬퍼는 같은 답변·top_chunks 를 1단계 규칙(``verify_rules``, 결정론)으로 다시 나눠
+    그래프와 동일한 suspicious set 을 얻고, 의심 문장만 2단계(``evaluate``)에
+    ``full_context=True`` 로 넘겨 "검색된 전체 top-k 어디에라도 근거가 있나"로 판정한다.
+    PASS(비의심) 문장은 인용 청크에 이미 근거가 있어 전체 근거에도 당연히 포함되므로 그대로
+    SUPPORTED 로 둔다. provider/config 는 호출자(deps)가 주입 — 앱 의존 없이 테스트 가능.
+    """
+    if not answer.strip():
+        return []
+    rule_result = verify_rules(answer, top_chunks)
+    passed = rule_result.passed_verifications()
+    suspicious = rule_result.suspicious_sentences
+    evaluated = (
+        evaluate(
+            answer=answer,
+            top_chunks=top_chunks,
+            suspicious_sentences=suspicious,
+            provider=provider,
+            config=config,
+            full_context=True,
+        )
+        if suspicious
+        else []
+    )
+    return sorted(passed + evaluated, key=lambda v: v.sentence_id)
+
+
 def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
     """검증 결과(per-item)에서 환각(NOT_SUPPORTED) 집계를 산출한다 (feature17c-13).
 
@@ -1066,9 +1136,18 @@ def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
     사용자 노출 환각(user-facing)에 가장 가깝다. 단 차단도 비용(거부 UX)이므로
     ``blocked_n_items`` 로 차단율을 함께 노출해 "거부 남발로 환각 은폐"를 감시한다.
 
+    feature17c-26 — 측정 이원화. 위 ``not_supported_*`` 지표는 per-cited grounding,
+    즉 "그 문장이 **인용한** 청크에 근거가 있나"로 사실상 **citation precision** 을 잰다.
+    표준 RAG faithfulness(RAGAS/TruLens=검색된 **전체** 컨텍스트 기준)와 다르다. 진단상
+    per-cited NOT_SUPPORTED 의 대부분은 "검색은 됐으나 단일 청크만 인용"한 오인용
+    아티팩트라, 전체 top-k 근거로 재판정하면 SUPPORTED 로 flip 한다(=진짜 환각 아님).
+    각 result 의 ``verification_faithfulness``(전체 top-k 재검증)가 있으면 ``unfaithful_*``
+    (= 표준 환각)와, per-cited NS 중 flip 여부로 ``citation_imprecision_*`` /
+    ``true_hallucination_*`` 를 함께 산출한다. 없으면 해당 키는 None/0(하위호환).
+
     각 result 는 ``is_answerable``(미지정 시 True), ``is_blocked``(미지정 시 False),
-    ``n_sources``, ``verification=[{"status": ...}, ...]`` 를 포함한다고 가정한다. 순수
-    함수라 앱 의존 없이 단위 테스트 가능.
+    ``n_sources``, ``verification=[{"status": ..., "sentence_id": ...}, ...]`` 를 포함한다고
+    가정한다(``verification_faithfulness`` 는 선택). 순수 함수라 앱 의존 없이 단위 테스트 가능.
     """
     verification_total = 0
     not_supported_count = 0
@@ -1108,7 +1187,78 @@ def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
                 if is_ns:
                     not_supported_count_delivered += 1
 
+    # feature17c-26 — faithfulness(전체 top-k 근거) 집계 + per-cited NS 의 flip 분석.
+    faith_total = faith_ns = 0
+    faith_total_ans = faith_ns_ans = 0
+    faith_total_del = faith_ns_del = 0
+    citation_imprecision_del = true_halluc_del = 0
+    citation_imprecision_ans = true_halluc_ans = 0
+    has_faithfulness = False
+
+    for r in results:
+        faith = r.get("verification_faithfulness")
+        if not faith:
+            continue
+        has_faithfulness = True
+        is_answerable = r.get("is_answerable", True)
+        delivered = is_answerable and not bool(r.get("is_blocked", False))
+        faith_status = {v.get("sentence_id"): v.get("status") for v in faith}
+        for v in faith:
+            is_ns = v.get("status") == "NOT_SUPPORTED"
+            faith_total += 1
+            faith_ns += is_ns
+            if is_answerable:
+                faith_total_ans += 1
+                faith_ns_ans += is_ns
+            if delivered:
+                faith_total_del += 1
+                faith_ns_del += is_ns
+        # per-cited NS 문장이 전체 top-k 재판정에서 flip(SUPPORTED)되면 citation 정밀도
+        # 아티팩트, 그대로 NS 면 진짜 환각(true hallucination).
+        for v in r.get("verification", []):
+            if v.get("status") != "NOT_SUPPORTED":
+                continue
+            still_ns = faith_status.get(v.get("sentence_id")) == "NOT_SUPPORTED"
+            if is_answerable:
+                if still_ns:
+                    true_halluc_ans += 1
+                else:
+                    citation_imprecision_ans += 1
+            if delivered:
+                if still_ns:
+                    true_halluc_del += 1
+                else:
+                    citation_imprecision_del += 1
+
+    def _ratio(num: int, den: int) -> float | None:
+        return num / den if den else None
+
+    faithfulness_keys: dict[str, Any] = {
+        # 표준 faithfulness (검색된 전체 top-k 근거 미지원 = 진짜 환각). None=재검증 데이터 없음.
+        "unfaithful_ratio": _ratio(faith_ns, faith_total) if has_faithfulness else None,
+        "unfaithful_count": faith_ns if has_faithfulness else None,
+        "faithfulness_verification_total": faith_total if has_faithfulness else None,
+        "unfaithful_ratio_answerable": (
+            _ratio(faith_ns_ans, faith_total_ans) if has_faithfulness else None
+        ),
+        "unfaithful_count_answerable": faith_ns_ans if has_faithfulness else None,
+        "unfaithful_ratio_delivered": (
+            _ratio(faith_ns_del, faith_total_del) if has_faithfulness else None
+        ),
+        "unfaithful_count_delivered": faith_ns_del if has_faithfulness else None,
+        # per-cited NS 분해: 오인용(citation precision) vs 진짜 환각.
+        "citation_imprecision_count_answerable": (
+            citation_imprecision_ans if has_faithfulness else None
+        ),
+        "true_hallucination_count_answerable": true_halluc_ans if has_faithfulness else None,
+        "citation_imprecision_count_delivered": (
+            citation_imprecision_del if has_faithfulness else None
+        ),
+        "true_hallucination_count_delivered": true_halluc_del if has_faithfulness else None,
+    }
+
     return {
+        # --- per-cited grounding (= citation precision) ---
         "not_supported_ratio": (
             not_supported_count / verification_total if verification_total else None
         ),
@@ -1133,6 +1283,8 @@ def _summarize_hallucination(results: list[dict[str, Any]]) -> dict[str, Any]:
         "non_answerable_n_items": non_answerable_n,
         "non_answerable_correct_refusal_n_items": non_answerable_correct_refusal_n,
         "blocked_n_items": blocked_n,
+        # --- full-context grounding (= 표준 faithfulness) + flip 분해 (feature17c-26) ---
+        **faithfulness_keys,
     }
 
 
