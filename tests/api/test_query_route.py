@@ -284,12 +284,16 @@ def _streaming_client(
     *,
     monkeypatch: pytest.MonkeyPatch,
     streaming_tokens: list[str],
+    indexed: bool = True,
 ) -> httpx.AsyncClient:
     """운영 streaming 분기 회귀용 클라이언트.
 
     app.state 에 streaming_graph / deps / settings 를 수동 채워 lifespan 우회하면서
     stream=True 분기로 진입할 수 있게 한다. ``stream_openai_answer`` 는 monkeypatch
     로 fake token generator 로 대체.
+
+    ``indexed=False`` 면 청크를 인덱싱하지 않아 검색 0건(RETRIEVAL_EMPTY) 분기로
+    진입한다 — feature19 status phase 단축 회귀에 사용.
     """
     from types import SimpleNamespace
 
@@ -304,17 +308,18 @@ def _streaming_client(
     sparse = FakeSparseEmbedder()
     store = QdrantPoolStore.in_memory(settings, dense_dimension=8)
     store.bootstrap_collections()
-    index_chunks(
-        [
-            _chunk(chunk_id="a" * 40, text="alpha bravo charlie"),
-            _chunk(chunk_id="b" * 40, text="bravo delta echo"),
-        ],
-        version_by_page_id={"P1": 1},
-        dense_embedder=dense,
-        sparse_embedder=sparse,
-        store=store,
-        cache=FakeEmbeddingCache(),
-    )
+    if indexed:
+        index_chunks(
+            [
+                _chunk(chunk_id="a" * 40, text="alpha bravo charlie"),
+                _chunk(chunk_id="b" * 40, text="bravo delta echo"),
+            ],
+            version_by_page_id={"P1": 1},
+            dense_embedder=dense,
+            sparse_embedder=sparse,
+            store=store,
+            cache=FakeEmbeddingCache(),
+        )
     deps = QueryGraphDeps(
         dense_embedder=dense,
         sparse_embedder=sparse,
@@ -518,8 +523,159 @@ async def test_query_route_stream_true_emits_multiple_token_chunks(
     token_payloads = [data for name, data in events if name == "token"]
     assert token_payloads[: len(streaming_tokens)] == streaming_tokens
     # 후행 이벤트 시퀀스 정합 — sources / verification / meta / done.
-    trailing_names = [name for name, _ in events if name != "token"]
+    # feature19 — status 이벤트가 추가됐으므로 token/status 를 제외하고 단언한다
+    # (기존 5개 이벤트의 이름·순서·형식 무회귀 확인).
+    trailing_names = [name for name, _ in events if name not in ("token", "status")]
     assert trailing_names == ["sources", "verification", "meta", "done"]
     # meta payload — used_llm 이 generator_config.model 정합 (gpt-4o → GPT_4O).
     meta = json.loads(dict(events)["meta"])
     assert meta["used_llm"] == "gpt-4o"
+
+
+# --- feature19: SSE 진행 status 이벤트 ---
+
+
+def _status_phases(events: list[tuple[str, str]]) -> list[str]:
+    """SSE 이벤트 시퀀스에서 status 이벤트의 phase 만 순서대로 추출한다."""
+    phases: list[str] = []
+    for name, data in events:
+        if name == "status":
+            payload = json.loads(data)
+            phases.append(payload["phase"])
+    return phases
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_status_phases_in_order(
+    populated_graph: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rerank 분기 — status phase 가 정의된 순서대로 송신된다(feature19).
+
+    connecting → acl_filtering → searching → answering → streaming →
+    verifying → formatting. 각 phase 는 정확히 1회 송신되며, message 는 한국어 문자열.
+    """
+    streaming_tokens = ["답변", "시작", "[#1]"]
+    client = _streaming_client(
+        populated_graph,
+        monkeypatch=monkeypatch,
+        streaming_tokens=streaming_tokens,
+    )
+    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
+    async with client as c:
+        resp = await c.post("/api/v1/rag/query", json=body)
+    assert resp.status_code == 200
+
+    events = _parse_sse(resp.text)
+    phases = _status_phases(events)
+    assert phases == [
+        "connecting",
+        "acl_filtering",
+        "searching",
+        "answering",
+        "streaming",
+        "verifying",
+        "formatting",
+    ]
+
+    # 각 status 이벤트는 한국어 message 를 동봉한다 (ensure_ascii=False JSON).
+    for name, data in events:
+        if name == "status":
+            payload = json.loads(data)
+            assert isinstance(payload["message"], str)
+            assert payload["message"] != ""
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_status_ordering_relative_to_token_and_trailing(
+    populated_graph: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status 와 기존 이벤트의 상대 순서 — searching/answering/streaming 은 첫 token 이전,
+    verifying/formatting 은 토큰 송신 이후 sources 이전에 위치한다(feature19)."""
+    streaming_tokens = ["답변", "시작", "[#1]"]
+    client = _streaming_client(
+        populated_graph,
+        monkeypatch=monkeypatch,
+        streaming_tokens=streaming_tokens,
+    )
+    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
+    async with client as c:
+        resp = await c.post("/api/v1/rag/query", json=body)
+    assert resp.status_code == 200
+
+    events = _parse_sse(resp.text)
+    names = [name for name, _ in events]
+    phase_at = {
+        json.loads(data)["phase"]: i for i, (name, data) in enumerate(events) if name == "status"
+    }
+    first_token = names.index("token")
+    sources_idx = names.index("sources")
+
+    # streaming phase 는 첫 token 직전에 송신된다.
+    assert phase_at["streaming"] < first_token
+    assert phase_at["answering"] < phase_at["streaming"]
+    # verifying/formatting 은 token 송신 이후, sources 이전.
+    assert phase_at["verifying"] > first_token
+    assert phase_at["formatting"] > phase_at["verifying"]
+    assert phase_at["formatting"] < sources_idx
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_status_phases_shortened_on_empty_retrieval(
+    populated_graph: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """검색 0건(RETRIEVAL_EMPTY) 분기 — answering/streaming/verifying 를 건너뛰고
+    formatting 으로 직행한다(feature19). status phase 는 단축된다."""
+    client = _streaming_client(
+        populated_graph,
+        monkeypatch=monkeypatch,
+        streaming_tokens=["답변"],
+        indexed=False,
+    )
+    body = {"query": "anything", "jwt": _make_jwt(), "stream": True}
+    async with client as c:
+        resp = await c.post("/api/v1/rag/query", json=body)
+    assert resp.status_code == 200
+
+    events = _parse_sse(resp.text)
+    phases = _status_phases(events)
+    # 단축 시퀀스 — connecting → acl_filtering → searching → formatting.
+    assert phases == ["connecting", "acl_filtering", "searching", "formatting"]
+    # answering/streaming/verifying 는 생략된다.
+    assert "answering" not in phases
+    assert "streaming" not in phases
+    assert "verifying" not in phases
+    # 표준 RETRIEVAL_EMPTY 메시지 + 기존 5개 이벤트는 그대로 송신된다.
+    by_name = dict(events)
+    assert "권한 범위" in by_name["token"]
+    assert json.loads(by_name["sources"]) == []
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_existing_five_events_unchanged_with_status(
+    populated_graph: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """기존 5개 이벤트(token/sources/verification/meta/done) 무회귀 — status 를 무시하면
+    token 누적·후행 이벤트가 feature19 이전과 동일하다(feature19)."""
+    streaming_tokens = ["답변", "시작", "[#1]"]
+    client = _streaming_client(
+        populated_graph,
+        monkeypatch=monkeypatch,
+        streaming_tokens=streaming_tokens,
+    )
+    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
+    async with client as c:
+        resp = await c.post("/api/v1/rag/query", json=body)
+    assert resp.status_code == 200
+
+    events = _parse_sse(resp.text)
+    # status 를 무시한 (기존 클라이언트 관점) 이벤트 시퀀스.
+    non_status = [(name, data) for name, data in events if name != "status"]
+    non_status_names = [name for name, _ in non_status]
+    # token 다중 + 후행 4종 — status 추가 전과 동일한 5개 이벤트 종류·순서.
+    assert non_status_names[: len(streaming_tokens)] == ["token"] * len(streaming_tokens)
+    assert non_status_names[-4:] == ["sources", "verification", "meta", "done"]
+    # token 누적은 streaming_tokens 순서를 보존한다.
+    token_payloads = [data for name, data in non_status if name == "token"]
+    assert token_payloads[: len(streaming_tokens)] == streaming_tokens
+    # done 은 빈 data.
+    assert non_status[-1] == ("done", "")

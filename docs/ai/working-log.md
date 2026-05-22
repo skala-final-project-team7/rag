@@ -6961,8 +6961,66 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   `tests/scripts/test_run_evaluation.py`(이원화·flip·하위호환·헬퍼 회귀 3건)
 - 검증: 샌드박스에서 순수 함수 회귀 통과(이원화 집계·flip 분해·하위호환·헬퍼) + 기존
   summarizer 7건 무회귀. py_compile 통과. 전체 pytest 는 Mac.
+### ★실측 확정 (reports/evaluation_20260522_020421.json) — 측정 이원화 결과★
+
+| 지표 | answerable | delivered(사용자 노출) |
+|---|---|---|
+| **faithfulness (표준 환각)** | **1.91% (3/159)** | **0.81% (1/124)** |
+| citation precision (per-cited) | 32.5% (51/157) | 19.4% (24/124) |
+| per-cited NS 분해 | 오인용 48 + 진짜환각 3 | 오인용 23 + 진짜환각 1 |
+
+- Precision@3 80% / intent 94% / ROUGE-L 0.181(최고) / P95 22s.
+- **결론: 시스템은 사실상 환각하지 않는다(delivered 0.81%, 1문장).** 그 1문장도 추적 결과
+  EVAL-007 #1 `cited=[]`(미인용 → FR-010 규칙상 자동 NOT_SUPPORTED)이라 날조가 아니라
+  "인용 누락"이다. 즉 **진짜 날조 ≈ 0.** 그동안 쫓던 "20~32% 환각률"은 측정 아티팩트로
+  95%+가 오인용(misattribution=citation precision)이었음이 전수(50건)로 확정됨.
+- KPI: 환각 목표 15%/도전 8% → **0.81% 대폭 충족.** (full_context 022251의 0.7%와 일관, 신뢰.)
+- 한계(정직성): faithfulness 도 suspicious set(수치·식별자 문장)만 2단계 판정 → 순수 서술형
+  날조는 양쪽 모두 auto-PASS(미측정). flip 비교는 동일 set apples-to-apples라 "오인용이 대부분"
+  결론은 robust. 판정자(GPT)는 인간 라벨 미검증이나 leniency 통제(fabricated 문장 검출) 통과.
+- 커밋: a1d4d18 (push 완료).
 - 남은 TODO:
-  - Mac 재평가(`run_evaluation --use-real-adapters --rouge-l --bert-score`)로 신규 지표 실측:
-    `unfaithful_ratio_delivered`(=표준 환각, ≈한 자릿수 예상) vs `not_supported_ratio_delivered`
-    (=citation precision ~19%) + `true_hallucination_count_delivered` 확인.
-  - 팀과 KPI 정의 합의: 헤드라인 = faithfulness, citation precision 은 보조 품질 지표로 분리.
+  - 팀과 KPI 정의 합의: **헤드라인 환각 KPI = faithfulness(0.81%)**, citation precision(19.4%)은
+    "출처 정밀도" 보조 품질 지표로 분리 보고(FR-009/010 정의 갱신 필요 — 요구사항 owner 승인).
+  - (선택, 저우선) 미인용 1문장(EVAL-007) 생성기 인용 누락 → 생성기에 "모든 문장 인용" 보강 검토.
+  - (선택) 순수 서술형 날조 가늠용 all-sentence faithfulness 모드는 비용 대비 후순위.
+
+## 2026-05-22 — feature19: SSE 단계별 status 이벤트 (진행 표시)
+
+- 브랜치: `feat/#?/sse-status-event`
+- 변경 사항: streaming SSE 경로(`POST /api/v1/rag/query`, `stream=true`)에 진행 표시용 신규
+  `status` 이벤트를 *추가*. 기존 5개 이벤트(token/sources/verification/meta/done)의 이름·순서·
+  형식은 무변경 — `status`는 추가 전용이라 무시하는 기존 클라이언트도 그대로 동작한다.
+  - 형식: `event: status` / `data: {"phase": "<phase>", "message": "<한국어>"}`
+    (`json.dumps(..., ensure_ascii=False)`). `app/api/routes.py`에 `_STATUS_MESSAGES` 상수 +
+    `_status_event(phase)` 헬퍼 신설.
+  - phase 7종을 `_streaming_event_stream` 각 단계 진입 시 1회 yield:
+    connecting → acl_filtering(둘 다 제너레이터 진입부, ACL은 query_route에서 이미 산출됐으나
+    SSE 가시화를 위해 스트림 안에서 송신) → searching(`streaming_graph.invoke` 직전) →
+    answering(`stream_openai_answer` 직전) → streaming(첫 token chunk 직전, 플래그로 1회만 —
+    Rate Limit fallback 재시도 시 중복 방지) → verifying(`verify_pipeline_node` 직전) →
+    formatting(`format_response`/후행 이벤트 직전).
+  - 검색 0건(RETRIEVAL_EMPTY) 분기는 answering/streaming/verifying를 건너뛰고
+    connecting→acl_filtering→searching→formatting으로 단축.
+  - **결정 사항**: 그래프 내부 4단계(history/router/search/rerank)는 절충안으로 `searching`
+    단일 phase로 통합(astream 전환 없이 invoke 직전 1회). done/error는 기존 done 이벤트 +
+    기존 에러 처리를 그대로 쓰며 `status:{phase:done/error}`는 만들지 않는다.
+  - **비-streaming 경로(`_sse_payload`/`_event_stream`)는 적용 제외** — 단일 블로킹 invoke 후
+    모든 이벤트를 한꺼번에 flush해 phase가 동시에 발사되므로 진행 표시 가치가 없다(PoC fallback
+    경로). 사용자에게 사전 판단 보고 후 streaming 경로만 적용.
+- 수정 파일: `app/api/routes.py`(헬퍼+status yield), `docs/api-spec.md`(진행 status 이벤트 절
+  추가), `tests/api/test_query_route.py`(회귀 4건 추가 + 기존 trailing_names 단언 1건 갱신:
+  status 제외).
+- 테스트: 회귀 추가 — (1) rerank 분기 phase 순서 7종 정합, (2) status와 token/후행 이벤트
+  상대 순서(streaming<첫 token, verifying/formatting>token & <sources), (3) 검색 0건 시 phase
+  단축(answering/streaming/verifying 생략), (4) status 무시 시 기존 5개 이벤트·token 누적 무회귀.
+  `_streaming_client`에 `indexed` 파라미터 추가(검색 0건 분기 진입용).
+- 실행 명령: `ruff format --check .` / `ruff check .` / `mypy app` — 전부 통과(format 141 files,
+  lint All checks passed, mypy Success 64 files). pytest는 본 샌드박스가 Python 3.10이라
+  StrEnum(3.11+) 미지원으로 in-process 실행 제약 — 검증 환경 갖춰 실행(아래 TODO).
+- 수정하지 않은 파일: `app/pipeline/query_graph.py`(그래프 구조), `app/schemas/*`,
+  vendoring agent 패키지, 기존 5개 이벤트 형식.
+- 남은 TODO:
+  - Mac/3.11 환경에서 `./scripts/test.sh`·`./scripts/verify.sh` 전체 pytest 실행 확인 후 커밋·push.
+  - feature13 코드 마이그레이션(/ml/query·새 SSE 형식) 반영 시 status `data`(엔드포인트·필드)
+    정렬 + FE에 phase 목록·형식 핸드오프.
