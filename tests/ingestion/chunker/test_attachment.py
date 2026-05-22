@@ -1,13 +1,15 @@
-"""첨부 3유형 청킹 검증 (feature4-A: docx / xlsx) — chunking-strategy.md §5.
+"""첨부 청킹 검증 (feature4-A: docx / xlsx, feature4-B: csv) — chunking-strategy.md §5.
 
 split_attachment는 첨부 파일을 attachment_type별 전략으로 1차 분할하고,
 chunk_attachment는 크기 규칙·메타데이터 부착까지 거쳐 Chunk 목록을 산출한다.
-실제 픽스처는 samples/attachments/ 의 docx 2건·xlsx 2건을 사용한다.
+docx/xlsx 픽스처는 samples/attachments/ 의 4건을 쓰고, csv는 tmp_path에 생성한다.
 """
 
+import json
 from datetime import datetime
 from pathlib import Path
 
+import fitz
 import openpyxl
 import pytest
 from docx import Document as DocxDocument
@@ -356,11 +358,224 @@ def test_chunk_attachment_infers_type_when_omitted() -> None:
     assert all(c.metadata.doc_type == "xlsx" for c in chunks)
 
 
-def test_chunk_attachment_rejects_unsupported_type() -> None:
-    # feature4-A는 docx/xlsx만 지원 — PDF/CSV는 feature4-B
-    pdf = _attachment("report.pdf", "application/pdf")
-    with pytest.raises(ValueError, match="feature4-B"):
-        chunk_attachment(pdf, _PARENT_PAGE, attachment_type=AttachmentType.PDF)
+def test_chunk_attachment_rejects_unknown_type() -> None:
+    # pdf/docx/xlsx/csv 4종 외의 알 수 없는 유형 문자열은 _coerce_attachment_type에서 거부
+    docx = _attachment("memo.docx", _DOCX_MIME)
+    with pytest.raises(ValueError, match="알 수 없는 attachment_type"):
+        chunk_attachment(docx, _PARENT_PAGE, attachment_type="hwp")
+
+
+# --- csv 1차 분할 (split_attachment / chunk_attachment) ---
+
+_CSV_MIME = "text/csv"
+
+
+def _csv_attachment(tmp_path: Path, filename: str, data: bytes) -> Attachment:
+    """tmp_path에 csv 파일을 쓰고 그것을 가리키는 Attachment 픽스처를 만든다."""
+    path = tmp_path / filename
+    path.write_bytes(data)
+    return _attachment(filename, _CSV_MIME).model_copy(
+        update={"local_path": str(path), "download_url": path.as_uri()}
+    )
+
+
+def test_infer_attachment_type_csv() -> None:
+    assert infer_attachment_type(_attachment("usage.csv", _CSV_MIME)) is AttachmentType.CSV
+    # mime이 일반값이어도 확장자로 fallback
+    generic = _attachment("usage.csv", "application/octet-stream")
+    assert infer_attachment_type(generic) is AttachmentType.CSV
+
+
+def test_csv_serializes_rows_with_header(tmp_path: Path) -> None:
+    data = "메트릭,임계값,설명\nCPU,80,사용률\n메모리,90,여유\n".encode()
+    att = _csv_attachment(tmp_path, "metrics.csv", data)
+    drafts = split_attachment(att, AttachmentType.CSV)
+    assert len(drafts) == 1
+    text = drafts[0].text
+    # 시트명은 파일 stem, 컬럼명은 매 행에 반복 부착
+    assert "[metrics]" in text
+    assert "메트릭: CPU" in text
+    assert "임계값: 80" in text
+    assert "메트릭: 메모리" in text
+    # 헤더 행 자체는 데이터로 직렬화되지 않는다
+    assert "메트릭: 메트릭" not in text
+
+
+def test_csv_no_header_falls_back_to_col_n(tmp_path: Path) -> None:
+    # 첫 행이 모두 숫자 → 헤더 없음으로 보아 col_1, col_2... 부여
+    data = b"1,2,3\n4,5,6\n"
+    att = _csv_attachment(tmp_path, "nohdr.csv", data)
+    drafts = split_attachment(att, AttachmentType.CSV)
+    text = drafts[0].text
+    assert "col_1: 1" in text
+    assert "col_3: 3" in text
+    assert "col_1: 4" in text
+
+
+def test_csv_omits_empty_cells(tmp_path: Path) -> None:
+    data = b"a,b,c\n1,,3\n"
+    att = _csv_attachment(tmp_path, "sparse.csv", data)
+    drafts = split_attachment(att, AttachmentType.CSV)
+    text = drafts[0].text
+    assert "a: 1" in text
+    assert "c: 3" in text
+    assert "b:" not in text  # 빈 셀은 생략
+
+
+def test_csv_handles_cp949_encoding(tmp_path: Path) -> None:
+    # 한글 cp949 인코딩도 깨지지 않고 읽힌다 (인코딩 fallback)
+    data = "이름,부서\n홍길동,클라우드\n".encode("cp949")
+    att = _csv_attachment(tmp_path, "names.csv", data)
+    drafts = split_attachment(att, AttachmentType.CSV)
+    text = drafts[0].text
+    assert "이름: 홍길동" in text
+    assert "부서: 클라우드" in text
+
+
+def test_csv_handles_utf8_bom(tmp_path: Path) -> None:
+    # Excel이 저장하는 utf-8-sig(BOM)에서도 첫 컬럼명이 깨지지 않는다
+    data = "메트릭,값\nCPU,80\n".encode("utf-8-sig")
+    att = _csv_attachment(tmp_path, "bom.csv", data)
+    drafts = split_attachment(att, AttachmentType.CSV)
+    assert "메트릭: CPU" in drafts[0].text
+
+
+def test_csv_groups_rows_by_50(tmp_path: Path) -> None:
+    lines = ["col_a,col_b"] + [f"row{i},val{i}" for i in range(120)]
+    data = ("\n".join(lines) + "\n").encode()
+    att = _csv_attachment(tmp_path, "many.csv", data)
+    drafts = split_attachment(att, AttachmentType.CSV)
+    # 120 데이터 행 → 50행 그룹으로 최소 3청크 (oversize 시 더 작게 축소)
+    assert len(drafts) >= 3
+    assert any(d.section_header.startswith("[many] 행 1~") for d in drafts)
+
+
+def test_chunk_attachment_csv_returns_indexed_chunks(tmp_path: Path) -> None:
+    data = "메트릭,값\nCPU,80\n메모리,90\n".encode()
+    att = _csv_attachment(tmp_path, "metrics.csv", data)
+    chunks = chunk_attachment(att, _PARENT_PAGE, attachment_type=AttachmentType.CSV)
+    assert len(chunks) >= 1
+    assert [c.metadata.chunk_index for c in chunks] == list(range(len(chunks)))
+    assert all(c.metadata.source_type is SourceType.ATTACHMENT for c in chunks)
+    assert all(c.metadata.extracted_format is ExtractedFormat.SHEET_SERIALIZED for c in chunks)
+    assert all(c.metadata.doc_type == "csv" for c in chunks)
+    # ACL은 부모 페이지에서 상속
+    assert all(c.metadata.allowed_groups == _PARENT_PAGE.allowed_groups for c in chunks)
+
+
+def test_chunk_attachment_infers_csv_when_omitted(tmp_path: Path) -> None:
+    data = b"a,b\n1,2\n"
+    att = _csv_attachment(tmp_path, "infer.csv", data)
+    chunks = chunk_attachment(att, _PARENT_PAGE)  # type 미지정 → mime 추정
+    assert len(chunks) >= 1
+    assert all(c.metadata.doc_type == "csv" for c in chunks)
+
+
+# --- pdf 1차 분할 (split_attachment / chunk_attachment) ---
+
+_PDF_MIME = "application/pdf"
+
+
+def _make_pdf(tmp_path: Path, filename: str, lines: list[tuple[str, int, bool]]) -> Attachment:
+    """(텍스트, fontsize, bold) 라인 목록으로 PDF를 생성하고 Attachment 픽스처를 만든다."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 72.0
+    for text, size, bold in lines:
+        page.insert_text((72, y), text, fontsize=size, fontname="hebo" if bold else "helv")
+        y += size + 10
+    path = tmp_path / filename
+    doc.save(str(path))
+    doc.close()
+    return _attachment(filename, _PDF_MIME).model_copy(
+        update={"local_path": str(path), "download_url": path.as_uri()}
+    )
+
+
+def test_infer_attachment_type_pdf() -> None:
+    assert infer_attachment_type(_attachment("doc.pdf", _PDF_MIME)) is AttachmentType.PDF
+    # mime이 일반값이어도 확장자로 fallback
+    assert infer_attachment_type(_attachment("doc.pdf", "application/octet-stream")) is (
+        AttachmentType.PDF
+    )
+
+
+def test_pdf_splits_by_font_heuristic(tmp_path: Path) -> None:
+    att = _make_pdf(
+        tmp_path,
+        "guide.pdf",
+        [
+            ("Introduction", 18, True),
+            ("This is the body text of the introduction section here.", 11, False),
+            ("It continues with more normal body content.", 11, False),
+            ("Architecture", 18, True),
+            ("The system has three layers described below.", 11, False),
+        ],
+    )
+    drafts = split_attachment(att, AttachmentType.PDF)
+    # 큰 폰트/볼드 짧은 행 → 헤딩, section_header는 'p.<페이지>: <제목>'
+    assert [d.section_header for d in drafts] == ["p.1: Introduction", "p.1: Architecture"]
+    # 제목이 본문 텍스트 앞에 포함되고, 본문 라인이 해당 섹션에 누적된다
+    assert drafts[0].text.startswith("Introduction")
+    assert "body text of the introduction" in drafts[0].text
+    assert "three layers" in drafts[1].text
+
+
+def test_pdf_headingless_falls_back_to_single_draft(tmp_path: Path) -> None:
+    # 균일 폰트(헤딩 미검출) → 단일 draft (chunk_attachment에서 800토큰 슬라이딩 윈도우)
+    lines = [
+        (f"Uniform body line number {i} with identical font size.", 11, False) for i in range(6)
+    ]
+    att = _make_pdf(tmp_path, "flat.pdf", lines)
+    drafts = split_attachment(att, AttachmentType.PDF)
+    assert len(drafts) == 1
+    assert drafts[0].section_header == "flat.pdf"
+    assert "Uniform body line number 0" in drafts[0].text
+
+
+def test_pdf_rejects_encrypted(tmp_path: Path) -> None:
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "secret content", fontsize=11)
+    path = tmp_path / "enc.pdf"
+    doc.save(str(path), encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="o", user_pw="u")
+    doc.close()
+    enc = _attachment("enc.pdf", _PDF_MIME).model_copy(
+        update={"local_path": str(path), "download_url": path.as_uri()}
+    )
+    with pytest.raises(ValueError, match="ATTACH_ENCRYPTED"):
+        split_attachment(enc, AttachmentType.PDF)
+
+
+def test_chunk_attachment_pdf_returns_indexed_chunks(tmp_path: Path) -> None:
+    att = _make_pdf(
+        tmp_path,
+        "guide.pdf",
+        [
+            ("Overview", 18, True),
+            ("Body content for the overview section goes here in detail.", 11, False),
+            ("Setup", 18, True),
+            ("Steps to set up the system are described in this section.", 11, False),
+        ],
+    )
+    chunks = chunk_attachment(att, _PARENT_PAGE, attachment_type=AttachmentType.PDF)
+    assert len(chunks) >= 1
+    assert [c.metadata.chunk_index for c in chunks] == list(range(len(chunks)))
+    assert all(c.metadata.source_type is SourceType.ATTACHMENT for c in chunks)
+    assert all(c.metadata.extracted_format is ExtractedFormat.RAW_TEXT for c in chunks)
+    assert all(c.metadata.doc_type == "pdf" for c in chunks)
+    # ACL은 부모 페이지에서 상속
+    assert all(c.metadata.allowed_groups == _PARENT_PAGE.allowed_groups for c in chunks)
+
+
+def test_chunk_attachment_infers_pdf_when_omitted(tmp_path: Path) -> None:
+    att = _make_pdf(
+        tmp_path,
+        "infer.pdf",
+        [("Title", 18, True), ("Body text here for the document.", 11, False)],
+    )
+    chunks = chunk_attachment(att, _PARENT_PAGE)  # type 미지정 → mime 추정
+    assert len(chunks) >= 1
+    assert all(c.metadata.doc_type == "pdf" for c in chunks)
 
 
 # --- samples/attachments 통합 청킹 ---
@@ -393,3 +608,82 @@ def test_samples_attachments_chunk_without_error() -> None:
     # docx 2건 → raw_text, xlsx 2건 → sheet_serialized
     assert format_counts[ExtractedFormat.RAW_TEXT] == 2
     assert format_counts[ExtractedFormat.SHEET_SERIALIZED] == 2
+
+
+def test_samples_attachments_pdf_csv_through_adapter(tmp_path: Path) -> None:
+    """PDF/CSV 첨부가 JsonFixtureSourceAdapter 전체 경로를 통과하는지 검증한다.
+
+    canonical samples/ 는 docx/xlsx만 가지므로(다른 테스트가 4건을 단언), PDF/CSV의
+    어댑터 경유 통합은 tmp_path에 미니 confluence 픽스처(페이지 1건 + 실제 PDF/CSV 파일)를
+    만들어 검증한다. fetch_pages → _map_attachments → chunk_attachment → 메타데이터
+    무결성(어댑터가 space_key로 합성한 ACL 상속·source_type·extracted_format)을 확인한다.
+    canonical 데이터셋을 건드리지 않아 기존 테스트에 영향이 없다.
+    """
+    attachments_dir = tmp_path / "attachments"
+    attachments_dir.mkdir()
+    # 실제 CSV (Excel utf-8-sig BOM)
+    (attachments_dir / "월간_사용량.csv").write_bytes(
+        "메트릭,값\nCPU,80\n메모리,90\n".encode("utf-8-sig")
+    )
+    # 실제 PDF (헤딩+본문)
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 72.0
+    for text, size, bold in [
+        ("Overview", 18, True),
+        ("This document describes the monthly usage report in detail.", 11, False),
+        ("Details", 18, True),
+        ("The detailed breakdown is shown across multiple resource pools here.", 11, False),
+    ]:
+        page.insert_text((72, y), text, fontsize=size, fontname="hebo" if bold else "helv")
+        y += size + 10
+    doc.save(str(attachments_dir / "운영_리포트.pdf"))
+    doc.close()
+
+    fixture = {
+        "single_page_responses": [
+            {
+                "id": "CONF-INT-1",
+                "title": "월간 운영 리포트",
+                "space": {"key": "CLOUD"},
+                "body": {"storage": {"value": "<h2>본문</h2>"}},
+                "version": {"when": "2026-04-22T08:15:00.000+0900", "number": 3},
+                "_links": {"webui": "/display/CLOUD/report"},
+                "metadata": {"labels": {"results": [{"name": "eks"}]}},
+                "ancestors": [{"title": "Cloud 운영 문서"}],
+                "attachments": [
+                    {"filename": "운영_리포트.pdf", "content_type": "application/pdf"},
+                    {"filename": "월간_사용량.csv", "content_type": "text/csv"},
+                ],
+            }
+        ]
+    }
+    (tmp_path / "confluence_sample_data.json").write_text(
+        json.dumps(fixture, ensure_ascii=False), encoding="utf-8"
+    )
+
+    adapter = JsonFixtureSourceAdapter(
+        samples_dir=tmp_path, fixture_files=["confluence_sample_data.json"]
+    )
+    pairs = [(p, a) for p in adapter.fetch_pages() for a in p.attachments]
+    assert len(pairs) == 2
+
+    formats_seen: set[ExtractedFormat] = set()
+    for page_obj, attachment in pairs:
+        chunks = chunk_attachment(attachment, page_obj)  # type 미지정 → mime 추정
+        assert len(chunks) >= 1, f"attachment {attachment.filename} produced no chunks"
+        for index, chunk in enumerate(chunks):
+            meta = chunk.metadata
+            assert chunk.text.strip()
+            assert meta.chunk_index == index
+            assert meta.section_header, "section_header must not be empty"
+            assert meta.source_type is SourceType.ATTACHMENT
+            assert meta.attachment_id == attachment.attachment_id
+            assert meta.page_id == page_obj.page_id
+            # 어댑터가 space_key로 합성한 ACL을 청크가 상속
+            assert meta.allowed_groups == page_obj.allowed_groups == ["space:CLOUD"]
+            assert meta.token_count > 0
+        formats_seen.add(chunks[0].metadata.extracted_format)
+
+    # pdf → raw_text, csv → sheet_serialized 두 경로 모두 어댑터 경유로 동작
+    assert formats_seen == {ExtractedFormat.RAW_TEXT, ExtractedFormat.SHEET_SERIALIZED}

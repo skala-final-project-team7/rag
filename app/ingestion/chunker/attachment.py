@@ -1,30 +1,44 @@
-"""첨부 3유형 1차 분할 + 첨부 청킹 엔트리 (feature4-A: docx / xlsx).
+"""첨부 1차 분할 + 첨부 청킹 엔트리 (feature4: pdf / docx / xlsx / csv).
 
 --------------------------------------------------
 작성자 : 최태성
 작성목적 : 다운로드된 첨부 파일을 attachment_type별 전략으로 청크로 분할한다
-          (chunking-strategy.md §5). docx는 python-docx로 Heading 1/2/3 계층을
-          1차 분할 단위로 삼고(표는 markdown 변환), xlsx는 openpyxl로 시트 단위 →
-          시트 내 N행 그룹으로 분할해 각 행을 컬럼명과 함께 자연어로 직렬화한다.
+          (chunking-strategy.md §5). pdf는 PyMuPDF(fitz)로 폰트 크기·굵기·짧은 행
+          휴리스틱을 적용해 섹션을 잡고(미검출 시 슬라이딩 윈도우, 추출 실패 시
+          pdfplumber 폴백), docx는 python-docx로 Heading 1/2/3 계층을 1차 분할 단위로
+          삼고(표는 markdown 변환), xlsx는 openpyxl로 시트 단위 → 시트 내 N행 그룹으로
+          분할해 각 행을 컬럼명과 함께 자연어로 직렬화한다. csv는 단일 시트로 보고
+          xlsx 행 직렬화 자산을 재사용한다.
 작성일 : 2026-05-15
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-15, 최초 작성, feature4-A — docx/xlsx 분할기 + chunk_attachment
   - 2026-05-17, 코드 리뷰 후속(P1-3·P2) — attachment.local_path 우선 사용(ADR-2026-001),
     xlsx 단일 행/축소 한계 그룹 oversize 슬라이딩 윈도우 분할, _looks_like_header가
     raw value 기반으로 datetime을 헤더로 오인하지 않도록 보강, doc_type enum 그대로 전달
+  - 2026-05-22, feature4-B(csv) — csv 분할기 추가. 단일 시트로 보고 _resolve_header/
+    _group_sheet_rows 재사용, 인코딩 자동감지(utf-8-sig/cp949 fallback, 의존성 없음),
+    수치 문자열을 비헤더로 보도록 _looks_like_header 보강(xlsx 무회귀).
+  - 2026-05-22, feature4-B(pdf) — pdf 분할기 추가. fitz로 폰트 휴리스틱 섹션 분할
+    (section_header=p.<N>: <제목>), 헤딩 미검출 시 단일 draft→800토큰 슬라이딩 윈도우,
+    fitz 추출 0건 시 pdfplumber 폴백, 암호화 PDF는 ATTACH_ENCRYPTED ValueError.
+    feature4 (pdf/docx/xlsx/csv) 전부 완료.
 --------------------------------------------------
 [호환성]
-  - Python 3.11.x, python-docx 1.1+, openpyxl 3.1+
-  - NOTE: PDF/CSV(feature4-B)는 픽스처·의존성 확보 후 별도 세션에서 구현한다.
+  - Python 3.11.x, python-docx 1.1+, openpyxl 3.1+, pymupdf 1.24+, pdfplumber 0.11+.
+    csv는 표준 라이브러리만 사용. pdfplumber는 폴백 경로에서만 지연 import한다.
 --------------------------------------------------
 """
 
+import csv
+import io
 import re
+from collections import Counter
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import fitz
 import openpyxl
 from docx import Document as load_docx
 from docx.oxml.ns import qn
@@ -51,6 +65,13 @@ _DOCX_HEADING_STYLE = re.compile(r"^Heading [123]$")
 # xlsx 행 그룹 크기 — 직렬화 결과가 800토큰 초과 시 다음 단계로 축소 (chunking-strategy.md §5).
 _XLSX_GROUP_SIZES = (50, 25, 10)
 
+# csv 디코딩 인코딩 후보 — 앞에서부터 시도한다 (PoC 인코딩 자동감지, 의존성 없음).
+# utf-8-sig는 Excel이 저장한 BOM을 제거하고, cp949는 국내 CSV에 흔하다.
+_CSV_ENCODINGS = ("utf-8-sig", "cp949", "utf-8", "latin-1")
+
+# 셀 문자열이 순수 수치로 보이는지 — 헤더 판정에서 수치 문자열을 데이터로 본다 (csv 보강).
+_NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
 # attachment_type 판별용 mime 힌트 (PoC) — 실제 분류는 첨부 분석기 [Pipeline]=feature6 책임.
 _MIME_HINTS = (
     ("pdf", AttachmentType.PDF),
@@ -65,9 +86,18 @@ _EXTENSION_TYPES = {
     ".csv": AttachmentType.CSV,
 }
 _EXTRACTED_FORMAT_BY_TYPE = {
+    AttachmentType.PDF: ExtractedFormat.RAW_TEXT,
     AttachmentType.DOCX: ExtractedFormat.RAW_TEXT,
     AttachmentType.XLSX: ExtractedFormat.SHEET_SERIALIZED,
+    AttachmentType.CSV: ExtractedFormat.SHEET_SERIALIZED,
 }
+
+# pdf 헤딩 휴리스틱 임계 — 본문 폰트 대비 비율·짧은 행 기준 (chunking-strategy.md §5).
+_PDF_HEADING_SIZE_RATIO = 1.15  # 본문보다 충분히 큰 폰트
+_PDF_BOLD_SIZE_RATIO = 1.05  # 볼드는 약간만 커도 헤딩 후보
+_PDF_HEADING_MAX_CHARS = 80  # 헤딩으로 볼 짧은 행 길이 상한
+_PDF_HEADING_MAX_WORDS = 12
+_PDF_BOLD_FLAG = 16  # PyMuPDF span flags의 bold 비트(2**4)
 
 
 def infer_attachment_type(attachment: Attachment) -> AttachmentType:
@@ -238,11 +268,20 @@ def _looks_like_header(row: list[object]) -> bool:
     raw 셀 값(`int`/`float`/`datetime`)을 그대로 검사한다. ``_cell_to_str``이 datetime을
     isoformat 문자열로 미리 변환하면 datetime 셀이 텍스트로 보이는 false-positive가
     발생하므로, raw value 기반 판정으로 보강한다 (P2 보완, 2026-05-17).
+
+    csv는 모든 셀이 문자열이라 raw 타입 판정만으로는 수치 행을 데이터로 구분할 수 없다.
+    수치로 보이는 문자열(``_NUMERIC_RE``)도 비헤더로 본다 (feature4-B csv 보강).
+    xlsx 헤더는 통상 설명 텍스트라 이 보강은 무회귀다.
     """
     non_empty = [cell for cell in row if cell is not None and _cell_to_str(cell) != ""]
     if not non_empty:
         return False
-    return all(not isinstance(cell, (int, float, datetime)) for cell in non_empty)
+    for cell in non_empty:
+        if isinstance(cell, (int, float, datetime)):
+            return False
+        if _NUMERIC_RE.match(_cell_to_str(cell)):
+            return False
+    return True
 
 
 def _resolve_header(rows: list[list[object]]) -> tuple[list[str], list[list[object]]]:
@@ -367,6 +406,170 @@ def _chunk_xlsx(attachment: Attachment) -> list[ChunkDraft]:
     return drafts
 
 
+# --- csv 1차 분할 ---
+
+
+def _read_csv_rows(path: str) -> list[list[object]]:
+    """csv 파일을 행 목록으로 읽는다 — 인코딩 자동감지(PoC) + 완전 빈 행 제외.
+
+    ``_CSV_ENCODINGS`` 순으로 디코딩을 시도하고(utf-8-sig가 Excel BOM 제거), 모두
+    실패하면 utf-8 + replace로 폴백한다. 셀 값은 좌우 공백을 제거해 문자열로 보존하며,
+    수치/날짜 형태로 변환하지 않는다(원본 충실 — ID·선행 0 손실 방지). 반환 타입은
+    xlsx 직렬화 헬퍼(`_resolve_header`/`_group_sheet_rows`)와 정합하도록 list[list[object]]다.
+    """
+    raw = Path(path).read_bytes()
+    text: str | None = None
+    for encoding in _CSV_ENCODINGS:
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    rows: list[list[object]] = [
+        [cell.strip() for cell in row] for row in csv.reader(io.StringIO(text))
+    ]
+    return [row for row in rows if any(cell != "" for cell in row)]
+
+
+def _chunk_csv(attachment: Attachment) -> list[ChunkDraft]:
+    """csv 첨부를 단일 시트로 보고 N행 그룹 단위로 1차 분할한다.
+
+    xlsx의 행 직렬화 자산(``_resolve_header``/``_group_sheet_rows``)을 그대로 재사용한다.
+    시트명이 없으므로 파일명 stem을 시트명으로 쓴다. xlsx와 마찬가지로 행 그룹 분할이
+    크기 처리를 겸하므로 chunk_attachment는 별도 크기 규칙을 적용하지 않는다.
+    """
+    rows = _read_csv_rows(_resolve_attachment_path(attachment))
+    if not rows:
+        return []
+    sheet_name = Path(attachment.filename).stem or attachment.filename
+    header, data_rows = _resolve_header(rows)
+    if not data_rows:
+        return []
+    return _group_sheet_rows(sheet_name, header, data_rows)
+
+
+# --- pdf 1차 분할 ---
+
+
+def _pdf_line_records(
+    document: "fitz.Document",
+) -> tuple[list[tuple[int, str, float, bool]], float]:
+    """PDF 라인을 (page_no, text, max_size, bold) 레코드로 추출하고 본문 폰트 크기를 추정한다.
+
+    본문 폰트 크기는 글자 수로 가중한 최빈 span 크기로 본다(가장 많은 글자를 차지하는 크기).
+    bold는 span flags의 bold 비트 또는 폰트명에 'bold' 포함으로 판정한다.
+    """
+    records: list[tuple[int, str, float, bool]] = []
+    size_chars: Counter[float] = Counter()
+    for page_no, page in enumerate(document, start=1):
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                spans = line["spans"]
+                text = "".join(span["text"] for span in spans).strip()
+                if not text:
+                    continue
+                max_size = round(max(span["size"] for span in spans), 1)
+                bold = any(
+                    bool(int(span["flags"]) & _PDF_BOLD_FLAG) or "bold" in span["font"].lower()
+                    for span in spans
+                )
+                records.append((page_no, text, max_size, bold))
+                size_chars[round(min(span["size"] for span in spans), 1)] += len(text)
+    body_size = size_chars.most_common(1)[0][0] if size_chars else 0.0
+    return records, body_size
+
+
+def _is_pdf_heading(text: str, size: float, bold: bool, body_size: float) -> bool:
+    """라인이 섹션 헤딩으로 보이는지 판단한다 — 짧은 행 + 큰 폰트(또는 볼드)."""
+    if body_size <= 0:
+        return False
+    if len(text) > _PDF_HEADING_MAX_CHARS or len(text.split()) > _PDF_HEADING_MAX_WORDS:
+        return False
+    if size >= body_size * _PDF_HEADING_SIZE_RATIO:
+        return True
+    return bool(bold and size >= body_size * _PDF_BOLD_SIZE_RATIO)
+
+
+def _extract_pdf_sections(path: str) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """PDF 본문을 (preamble 블록, [(section_header, [본문 블록])]) 구조로 추출한다.
+
+    헤딩 검출 휴리스틱(폰트 크기·굵기·짧은 행)으로 섹션 경계를 잡고, section_header는
+    ``p.<페이지>: <제목>`` 형식으로 만든다(chunking-strategy.md §5). 첫 헤딩 이전 라인은
+    preamble로 모은다. 텍스트가 전혀 없으면 ([], [])를 돌려 호출자가 pdfplumber로 폴백한다.
+
+    Raises:
+        ValueError: 암호화되어 텍스트를 추출할 수 없는 PDF (ATTACH_ENCRYPTED).
+    """
+    document = fitz.open(path)
+    try:
+        if document.needs_pass:
+            raise ValueError(f"ATTACH_ENCRYPTED: 암호화된 PDF는 처리할 수 없습니다 ({path})")
+        records, body_size = _pdf_line_records(document)
+    finally:
+        document.close()
+    preamble: list[str] = []
+    sections: list[tuple[str, list[str]]] = []
+    for page_no, text, size, bold in records:
+        if _is_pdf_heading(text, size, bold, body_size):
+            sections.append((f"p.{page_no}: {text}", []))
+        elif sections:
+            sections[-1][1].append(text)
+        else:
+            preamble.append(text)
+    return preamble, sections
+
+
+def _extract_pdf_plain_text(path: str) -> str:
+    """pdfplumber로 PDF 전체 텍스트를 추출한다 — fitz가 텍스트를 못 뽑을 때의 폴백.
+
+    pdfplumber는 무거운 폴백 경로이므로 지연 import한다(복잡 레이아웃 대비).
+    """
+    import pdfplumber
+
+    parts: list[str] = []
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            if text.strip():
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _chunk_pdf(attachment: Attachment) -> list[ChunkDraft]:
+    """PDF 첨부를 폰트 휴리스틱 섹션 단위로 1차 분할한다.
+
+    fitz로 헤딩을 검출해 섹션을 만들고(section_header=``p.<N>: <제목>``), 헤딩이 하나도
+    없으면 전체를 단일 draft로 폴백한다(chunk_attachment의 2차 크기 규칙이 800토큰 슬라이딩
+    윈도우로 재분할). fitz가 텍스트를 전혀 못 뽑으면 pdfplumber 폴백으로 평문을 추출한다.
+    PDF 섹션은 원자성이 없으므로 is_atomic=False.
+    """
+    path = _resolve_attachment_path(attachment)
+    preamble, sections = _extract_pdf_sections(path)
+    if not preamble and not sections:
+        # fitz 추출 0건 → pdfplumber 평문 폴백 (이미지/복잡 레이아웃 대비).
+        text = _extract_pdf_plain_text(path).strip()
+        if not text:
+            return []
+        return [ChunkDraft(text=text, section_header=attachment.filename, is_atomic=False)]
+    if not sections:
+        text = "\n".join(preamble).strip()
+        if not text:
+            return []
+        return [ChunkDraft(text=text, section_header=attachment.filename, is_atomic=False)]
+    drafts: list[ChunkDraft] = []
+    for index, (header, body_blocks) in enumerate(sections):
+        title = header.split(": ", 1)[1] if ": " in header else header
+        body = "\n".join(body_blocks).strip()
+        text = f"{title}\n{body}".strip() if body else title
+        # 첫 헤딩 이전 preamble은 첫 섹션 도입부에 부착한다 (맥락 동봉).
+        if index == 0 and preamble:
+            text = "\n".join(preamble).strip() + "\n\n" + text
+        drafts.append(ChunkDraft(text=text, section_header=header, is_atomic=False))
+    return drafts
+
+
 # --- 공통 엔트리 ---
 
 
@@ -376,29 +579,30 @@ def split_attachment(
 ) -> list[ChunkDraft]:
     """첨부 파일을 attachment_type별 전략으로 1차 분할한다.
 
-    docx는 Heading 1/2/3 섹션, xlsx는 시트 내 N행 그룹을 1차 분할 단위로 한다.
-    2차 크기 규칙은 chunk_attachment가 docx에 한해 적용한다 (xlsx는 행 그룹 분할이
-    크기 처리를 겸한다).
+    pdf는 폰트 휴리스틱 섹션, docx는 Heading 1/2/3 섹션, xlsx/csv는 N행 그룹을 1차 분할
+    단위로 한다. 2차 크기 규칙은 chunk_attachment가 pdf/docx에 적용한다 (xlsx/csv는 행
+    그룹 분할이 크기 처리를 겸한다).
 
     Args:
         attachment: 텍스트 추출 대상 첨부 객체. download_url이 실제 파일 경로를 가리킨다.
-        attachment_type: 첨부 유형. docx/xlsx만 지원한다.
+        attachment_type: 첨부 유형. pdf/docx/xlsx/csv를 지원한다.
 
     Returns:
         1차 분할 결과 ChunkDraft 목록. 본문이 비면 빈 목록.
 
     Raises:
-        ValueError: docx/xlsx 외 유형(PDF/CSV)이 전달된 경우 — feature4-B 대상.
+        ValueError: 암호화된 PDF(ATTACH_ENCRYPTED) 등 처리할 수 없는 첨부.
     """
     resolved = _coerce_attachment_type(attachment_type)
+    if resolved is AttachmentType.PDF:
+        return _chunk_pdf(attachment)
     if resolved is AttachmentType.DOCX:
         return _chunk_docx(attachment)
     if resolved is AttachmentType.XLSX:
         return _chunk_xlsx(attachment)
-    raise ValueError(
-        f"feature4-A는 docx/xlsx만 지원한다 (요청: {resolved}). "
-        "PDF/CSV 청킹은 feature4-B에서 구현한다."
-    )
+    if resolved is AttachmentType.CSV:
+        return _chunk_csv(attachment)
+    raise ValueError(f"지원하지 않는 첨부 유형: {resolved}.")
 
 
 def build_attachment_metadata(
@@ -458,20 +662,20 @@ def chunk_attachment(
 ) -> list[Chunk]:
     """첨부 파일을 attachment_type별 전략으로 분할해 Chunk 목록을 반환한다.
 
-    1차 분할 → (docx만)2차 크기 규칙 → 메타데이터 부착 순으로 처리한다.
+    1차 분할 → (pdf/docx만)2차 크기 규칙 → 메타데이터 부착 순으로 처리한다.
     attachment_type이 None이면 mime/확장자 기반 PoC 휴리스틱(infer_attachment_type)으로
     추정한다.
 
     Args:
         attachment: 청킹 대상 첨부 객체. download_url이 실제 파일 경로를 가리킨다.
         page: 첨부의 부모 PageObject (ACL·메타 상속원).
-        attachment_type: 첨부 유형. None이면 추정한다. docx/xlsx만 지원한다.
+        attachment_type: 첨부 유형. None이면 추정한다. pdf/docx/xlsx/csv를 지원한다.
 
     Returns:
         메타데이터가 부착된 Chunk 목록.
 
     Raises:
-        ValueError: docx/xlsx 외 유형(PDF/CSV)이 전달·추정된 경우 — feature4-B 대상.
+        ValueError: 암호화된 PDF(ATTACH_ENCRYPTED) 등 처리할 수 없는 첨부.
     """
     resolved = (
         _coerce_attachment_type(attachment_type)
@@ -479,9 +683,10 @@ def chunk_attachment(
         else infer_attachment_type(attachment)
     )
     drafts = split_attachment(attachment, resolved)
-    # docx 섹션은 비원자성이므로 2차 재분할·하한선 병합을 적용한다.
-    # xlsx는 행 그룹 분할이 크기 처리를 겸하므로 적용하지 않는다.
-    if resolved is AttachmentType.DOCX:
+    # pdf/docx 섹션은 비원자성이므로 2차 재분할·하한선 병합을 적용한다(헤딩 미검출 pdf의
+    # 단일 draft는 여기서 800토큰 슬라이딩 윈도우로 재분할된다).
+    # xlsx/csv는 행 그룹 분할이 크기 처리를 겸하므로 적용하지 않는다.
+    if resolved in (AttachmentType.PDF, AttachmentType.DOCX):
         drafts = apply_size_rules(drafts)
     return [
         Chunk(

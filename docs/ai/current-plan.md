@@ -152,11 +152,15 @@
     분할·헤더 누락 fallback, 첨부 메타데이터 19종·결정론 chunk_id·ACL 상속,
     `samples/attachments/` 4건 통합 청킹, `merge_undersized` 봉인 회귀 테스트
 
-  **feature4-B: PDF / CSV 첨부 분할기**  ⏳ 보류 (픽스처·의존성 대기)
-  - PDF: PyMuPDF(fitz) → pdfplumber fallback, 섹션 휴리스틱(폰트 크기·굵기·짧은 행),
-    미검출 시 800토큰 슬라이딩 윈도우. **PDF 픽스처 미확보 + `pymupdf` 미설치** → 보류
-  - CSV: pandas(인코딩 자동감지), xlsx와 직렬화 로직 공유. 별도 픽스처 없음 → 보류
-  - 착수 조건: PDF 픽스처 확보 + `pymupdf`/`pdfplumber` 설치 후 별도 세션
+  **feature4-B: PDF / CSV 첨부 분할기**  ✅ 완료 (2026-05-22) — feature4 전체 완료
+  - PDF: ✅ 완료. PyMuPDF(fitz)로 폰트 휴리스틱 섹션 분할(본문 대비 ≥1.15배 큰 폰트 또는
+    볼드 짧은 행), section_header=`p.<N>: <제목>`. 헤딩 미검출 시 단일 draft→`apply_size_rules`
+    800토큰 슬라이딩 윈도우. fitz 추출 0건 시 pdfplumber 평문 폴백(지연 import). 암호화 PDF는
+    `ATTACH_ENCRYPTED` ValueError. tmp_path에서 fitz로 PDF 생성해 테스트 6건 추가.
+  - CSV: ✅ 완료. 표준 라이브러리 `csv` + 인코딩 자동감지(utf-8-sig/cp949 fallback,
+    pandas 미사용 — 무거운 의존성 회피), xlsx 직렬화 로직(`_resolve_header`/
+    `_group_sheet_rows`) 재사용. 단일 시트(파일명 stem)로 처리. tmp_path 픽스처로
+    테스트 10건 추가. `_looks_like_header`를 수치 문자열도 비헤더로 보도록 보강(xlsx 무회귀).
 - **수정하지 않을 파일**: `app/schemas/*`(ChunkMetadata 19종은 첨부 5종 이미 포함),
   `app/ingestion/chunker/{body,metadata,storage_format,tokenizer}.py`(feature3 완료분 — 재사용만),
   `app/adapters/*`, 다른 팀원 담당 영역
@@ -169,7 +173,9 @@
 작업 항목:
 
 - [x] feature4-A: docx / xlsx 첨부 분할기 + 첨부 메타데이터 + chunk_attachment
-- [ ] feature4-B: PDF / CSV 첨부 분할기 (픽스처·`pymupdf` 확보 후 별도 세션)
+- [x] feature4-B: PDF / CSV 첨부 분할기
+  - [x] CSV 분할기 (2026-05-22, 표준 라이브러리 csv + 인코딩 fallback, xlsx 자산 재사용, 테스트 10건)
+  - [x] PDF 분할기 (2026-05-22, fitz 폰트 휴리스틱 + pdfplumber 폴백 + 암호화 거부, 테스트 6건)
 
 ### feature5: Dual Embedding + Multi-Pool Vector Store [Pipeline + Storage]
 
@@ -716,8 +722,15 @@ BE 담당자 명세 확정 후 진행.
   - [x] **feature17c-24** — 프롬프트 3종 개입 실패 확정(다중 인용 0건) → 17c-22/23 vendored
     프롬프트 변경 + 회귀 테스트 **전부 롤백**(원본 복구, 새 revert 커밋). 요청서 §5.3을
     **Function Calling tools schema(citations minItems:1) 주 권장으로 승격, Agent 이관**.
-  - [ ] **목표 15% 달성 = FC tools schema (Agent 영역, 이관 완료)** — 생성 단계에서 citations
-    배열 구조적 강제. 적용 후 우리 측 per-cited-chunk 재평가. 우리 영역 추가 레버 없음
+  - [x] **feature17c-25** — 생성기 문장별 인용 구조 강제 구현(Agent 권한 위임). vendored
+    프롬프트 대신 transport 경계에서 OpenAI Structured Outputs(json_schema, strict) 주입
+    (`GROUNDED_CITATION_RESPONSE_FORMAT`, opt-in `RAG_GENERATOR_FORCE_CITATION_SCHEMA`).
+    sentences[].citations 문장마다 필수 배열 + 다중 인용 description. transport 회귀 3건.
+    한계: strict 가 minItems 미지원이라 빈 배열 valid → 효과는 A/B 재평가로 확인. 측정
+    방식 점검: 현 환각 지표는 per-cited(=citation precision)라 표준 faithfulness와 다름 →
+    측정 이원화(전체 컨텍스트 faithfulness + citation precision) 별도 권고.
+  - [ ] **목표 15% 달성 = FC schema A/B 재평가** — Mac에서 토글 ON 재평가로 per-cited-chunk
+    환각 before/after 확인. 미흡 시 문장별 tool 호출 / 생성-후 재귀속 차선. 측정 이원화 별도
     (프롬프트 텍스트 한계 실증). KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
@@ -729,14 +742,14 @@ BE 담당자 명세 확정 후 진행.
 - **Data Ingestion Agent 책임 협의** — `data-ingestion-agent` / `data-sync-agent` 가
   본 저장소 외부 (백엔드/Data 담당자) 영역인지 합의. `document_analyzer_stub` 처리
   방향 결정 (별도 Agent 패키지 받기 vs 본 저장소 직접 작성)
-- **feature4-B PDF/CSV 첨부 분할기** — pymupdf + 외부 픽스처
+- ~~feature4-B PDF/CSV 첨부 분할기~~ — ✅ 완료 (2026-05-22, feature4-B로 이동·종결)
 - **(D) Function Calling 강제 + (E) 자연어 출처 인용 패턴** — Agent 담당자 영역
   (answer_generation_agent prompt template 갱신 요청)
 
 작업 항목:
 
 - [ ] Data Ingestion Agent 책임 협의 + document_analyzer 방향 확정
-- [ ] feature4-B PDF/CSV 첨부 분할기
+- [x] feature4-B PDF/CSV 첨부 분할기 (2026-05-22 완료)
 - [ ] (D) Function Calling + (E) 자연어 출처 — Agent 담당자 보고
 
 ---
