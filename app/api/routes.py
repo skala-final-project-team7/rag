@@ -42,6 +42,17 @@
     에서는 별도 observe 하지 않는다 (streaming 경로는 generator 노드 미경유
     이므로 streaming 시작 ~ 마지막 토큰 도착 구간 own observe). 설계서 §6.4
     KPI 정합.
+  - 2026-05-22, feature19 — SSE 진행 표시용 ``status`` 이벤트 *추가*. 기존 5개
+    이벤트(token/sources/verification/meta/done)의 이름·순서·형식은 무변경이며
+    status 는 추가 전용이라 무시하는 기존 클라이언트도 그대로 동작한다. streaming
+    경로(``_streaming_event_stream``)에만 적용 — 비-streaming 경로는 단일 블로킹
+    invoke 후 모든 이벤트를 한꺼번에 flush 해 phase 가 동시에 발사되므로 진행 표시
+    가치가 없어 제외. phase 7종(connecting → acl_filtering → searching → answering
+    → streaming → verifying → formatting)을 각 단계 진입 시 1회 송신한다. 그래프
+    내부 4단계(history/router/search/rerank)는 절충안으로 ``searching`` 하나로
+    통합(astream 전환 없이 invoke 직전 1회). 검색 0건(RETRIEVAL_EMPTY) 분기는
+    answering/streaming/verifying 를 건너뛰고 formatting 으로 직행. done/error 는
+    기존 done 이벤트 + 기존 에러 처리를 그대로 쓰며 status 로는 만들지 않는다.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+, sse-starlette 2.1+
@@ -153,6 +164,34 @@ async def _event_stream(response: QueryResponse) -> AsyncIterator[dict[str, str]
         yield event
 
 
+# feature19 — SSE 진행 표시용 ``status`` 이벤트.
+# 기존 5개 이벤트(token/sources/verification/meta/done)와 별개로, RAG 라이프사이클
+# 단계 진입 시 진행 phase 를 1회 push 한다. status 를 무시하는 기존 클라이언트도
+# 그대로 동작한다(추가 전용). streaming 경로(``_streaming_event_stream``)에만 적용하며,
+# 비-streaming 경로(``_sse_payload``)는 단일 블로킹 invoke 후 모든 이벤트를 한꺼번에
+# flush 해 phase 가 동시에 발사되므로 진행 표시 가치가 없어 적용하지 않는다.
+# done/error 는 기존 done 이벤트 + 기존 에러 처리를 그대로 쓰며 status 로는 만들지 않는다.
+_STATUS_MESSAGES: dict[str, str] = {
+    "connecting": "연결 중이에요",
+    "acl_filtering": "접근 권한을 확인하고 있어요",
+    "searching": "관련 문서를 검색하고 있어요",
+    "answering": "답변을 준비하고 있어요",
+    "streaming": "답변을 작성하고 있어요",
+    "verifying": "답변 근거를 검증하고 있어요",
+    "formatting": "답변을 정리하고 있어요",
+}
+
+
+def _status_event(phase: str) -> dict[str, str]:
+    """진행 phase → SSE ``status`` 이벤트 dict.
+
+    ``data`` 는 다른 JSON 이벤트와 동일하게 ``json.dumps(..., ensure_ascii=False)`` 로
+    직렬화한 ``{"phase": "<phase>", "message": "<한국어 메시지>"}`` 객체다.
+    """
+    payload = {"phase": phase, "message": _STATUS_MESSAGES[phase]}
+    return {"event": "status", "data": json.dumps(payload, ensure_ascii=False)}
+
+
 def _resolve_used_llm(model: str) -> LlmModel:
     """generator_config.model 문자열을 LlmModel enum 으로 안전 변환.
 
@@ -204,7 +243,17 @@ async def _streaming_event_stream(
     """
     started = time.perf_counter_ns()
 
+    # feature19 status — connecting / acl_filtering.
+    # ACL 필터는 query_route 에서 이미 산출됐으나, FE 진행 표시를 위해 제너레이터
+    # 진입 시 두 phase 를 순서대로 송신한다(query_route 가 아니라 SSE 스트림 안에서
+    # yield 해야 클라이언트에 보인다).
+    yield _status_event("connecting")
+    yield _status_event("acl_filtering")
+
     streaming_graph = request.app.state.streaming_graph
+    # feature19 status — searching. 그래프 내부 history/router/search/rerank 4단계를
+    # 절충안으로 단일 phase 하나로 통합한다(astream 전환 없이 invoke 직전 1회 송신).
+    yield _status_event("searching")
     result_dict = streaming_graph.invoke(state)
     rerank_state = RagState.model_validate(result_dict)
 
@@ -213,8 +262,10 @@ async def _streaming_event_stream(
     deps = request.app.state.deps
 
     # 검색 0건 분기 — empty_retrieval 노드가 answer/used_llm/intent 를 채워준다.
+    # answering/streaming/verifying 를 건너뛰고 formatting 으로 직행한다(feature19).
     if not rerank_state.top_chunks:
         used_llm = rerank_state.used_llm or LlmModel.GPT_4O_MINI
+        yield _status_event("formatting")
         elapsed_ms = (time.perf_counter_ns() - started) // 1_000_000
         response = format_response(
             answer=rerank_state.answer or "",
@@ -243,8 +294,14 @@ async def _streaming_event_stream(
     # 모드에서만 도달.
     from openai import RateLimitError
 
+    # feature19 status — answering. 프롬프트 구성 / stream_openai_answer 호출 직전.
+    yield _status_event("answering")
+
     accumulated_tokens: list[str] = []
     used_model = primary_model
+    # feature19 status — streaming. 첫 token chunk 송신 직전 1회만 송신(fallback 재시도
+    # 시에도 중복 송신하지 않도록 플래그로 한 번만 보낸다).
+    streaming_status_sent = False
     try:
         for token_chunk in stream_openai_answer(
             api_key=api_key,
@@ -254,6 +311,9 @@ async def _streaming_event_stream(
             query=state.query,
             top_chunks=rerank_state.top_chunks,
         ):
+            if not streaming_status_sent:
+                yield _status_event("streaming")
+                streaming_status_sent = True
             accumulated_tokens.append(token_chunk.text)
             yield {"event": "token", "data": token_chunk.text}
     except RateLimitError:
@@ -281,6 +341,9 @@ async def _streaming_event_stream(
             query=state.query,
             top_chunks=rerank_state.top_chunks,
         ):
+            if not streaming_status_sent:
+                yield _status_event("streaming")
+                streaming_status_sent = True
             accumulated_tokens.append(token_chunk.text)
             yield {"event": "token", "data": token_chunk.text}
 
@@ -288,10 +351,14 @@ async def _streaming_event_stream(
     rerank_state.answer = answer
     rerank_state.used_llm = _resolve_used_llm(used_model)
 
+    # feature19 status — verifying. verify_pipeline_node(1+2단계) 호출 직전.
+    yield _status_event("verifying")
     # 검증 1+2단계 — verify_pipeline_node 에 deps 의 verify_llm_evaluator 주입.
     verify_pipeline_node(rerank_state, llm_evaluator=deps.verify_llm_evaluator)
 
     elapsed_ms = (time.perf_counter_ns() - started) // 1_000_000
+    # feature19 status — formatting. format_response → sources/verification/meta 송신 직전.
+    yield _status_event("formatting")
     response = format_response(
         answer=rerank_state.answer,
         sources=rerank_state.sources,
