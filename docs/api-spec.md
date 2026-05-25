@@ -1,99 +1,188 @@
 # API Spec
 
-이 문서는 RAG 파이프라인이 API Gateway / BFF에 노출하는 API 계약을 정의한다.
-RAG 파이프라인 설계서 v0.2.2(`docs/rag-pipeline-design.md`) §4.8과 정합한다.
-API 변경 시 이 문서를 함께 수정한다(루트 `CLAUDE.md` 규칙).
+이 문서는 RAG 파이프라인이 BFF에 노출하는 **내부 API 계약(BFF → ML 서버)**을 정의한다.
+BE 통합 API 스펙(`api-spec-BE-adjust.md`, 2026-05-21 전달) §2-1 `/ml/query` 및 §1-1
+SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정한다(루트 `CLAUDE.md` 규칙).
 
-> 인증/인가 플로우, JWT 발급, Gateway 라우팅은 백엔드/BFF 담당 영역이다. 본 파이프라인은
-> BFF가 전달한 JWT에서 `user_id`/`groups`를 추출해 ACL 필터에 사용한다.
-> 엔드포인트 경로·버전은 BFF 설계서와 동결 전까지 잠정값이다.
+> 인증/JWT 발급·Gateway 라우팅·대화/메시지 영속화·피드백·미리보기 등 FE↔BFF 외부 API는
+> BFF/BE 담당 영역이다(`api-spec-BE-adjust.md` §1 참조). 본 파이프라인은 BFF가 전달한
+> `userId`/`groups`로 ACL 필터를 만들고 `spaceKey`로 검색 범위를 제한한다.
+
+> **변경 이력**
+> - 2026-05-22, feature13 — BE 통합 스펙 반영. 엔드포인트 `/api/v1/rag/query` → `/ml/query`,
+>   요청 본문 재정의(JWT 제거 → userId/groups/spaceKey/accessToken/cloudId), SSE 이벤트 형식
+>   변경(token=`{content}`, sources 래핑+필드 변경, verification 집계, done=`{}`, error 신규),
+>   `meta` 이벤트 제거. **본 문서는 합의된 목표 계약이며, 코드 마이그레이션은 plan feature13의
+>   코드 항목에서 별도 진행한다**(현재 구현 엔드포인트는 여전히 `/api/v1/rag/query`).
 
 ---
 
-## POST /api/v1/rag/query
+## POST /ml/query  (BFF → ML)
 
-사용자 질의를 받아 ACL 기반 검색 → 답변 생성 → 출처 검증을 수행하고 답변·출처를 SSE로 스트리밍한다.
+사용자 질의를 받아 ACL 기반 검색 → 답변 생성 → 출처 검증을 수행하고 답변·출처를 SSE로
+스트리밍한다. BFF는 이 응답을 FE의 `POST /api/conversations/{conversationId}/chat` 으로
+그대로 중계하며, `done` 이벤트에 DB 메시지 UUID(`messageId`)를 주입한다.
 
-- 인증 필요: 예 (BFF가 JWT 전달)
-- 응답 방식: `text/event-stream` (SSE). 답변 토큰을 순차 전송하고, 출처 카드·검증 결과는 답변 완료 직후 일괄 push
+- 응답 방식: `text/event-stream` (SSE). **Common Response Wrapper 미적용**(BE 스펙 §Common 예외).
+- 인증: BFF가 JWT에서 `userId`/`groups`를 추출해 본문으로 전달한다. **ML은 JWT를 직접 검증하지 않는다.**
+- Gateway 타임아웃: SSE 특성상 60초 별도 설정(BE 스펙 §1-1).
 
 ### Request Body
 
 | 필드 | 타입 | 필수 | 설명 |
 |---|---|---|---|
-| `query` | string | Y | 사용자 자연어 질문 |
-| `conversation_id` | string | N | 대화 컨텍스트 ID (멀티턴 히스토리 관리자가 사용) |
-| `jwt` | string | Y | 인증 토큰. `sub`(user_id) + `groups[]` 포함 |
+| `question` | string | Y | 사용자 자연어 질문 |
+| `conversationId` | string | N | 대화 컨텍스트 ID |
+| `history` | array | N | 이전 대화 이력 `[{ "role": "user"\|"assistant", "content": "..." }]`. BFF가 DB에서 조회해 전달(멀티턴) |
+| `userId` | string | Y | ACL Pre-filtering 사용자 식별자(BFF가 JWT에서 추출, 2단계 데모는 고정값) |
+| `groups` | string[] | Y | 사용자 그룹 — ACL `should`-OR 필터 |
+| `spaceKey` | string | Y | 검색 대상 Confluence 스페이스. 2단계는 고정값(`lina.demo.fixed-space-key`) |
+| `accessToken` | string | N | (**PoC, 3단계**) Confluence OAuth access token. BFF가 auth-server로부터 수신해 전달 |
+| `cloudId` | string | N | (**PoC, 3단계**) Confluence cloudId |
 
-### SSE 이벤트 순서
-
-1. `token` 이벤트 (n회) — 답변 텍스트 토큰 (Markdown)
-2. `sources` 이벤트 (1회) — 출처 카드 배열
-3. `verification` 이벤트 (1회) — 문장별 검증 결과
-4. `meta` 이벤트 (1회) — `intent`, `used_llm`, `feedback_enabled`, `latency_ms`
-5. `done` 이벤트
-
-> **PoC 제약** — 답변 토큰 스트리밍은 답변 생성기 Agent 통합 후 활성화된다.
-> feature11 통합 Phase 2 구현(`app/api/routes.py`)은 `token` 이벤트를 1회만 송신해
-> 전체 답변을 한 번에 전달하며, 나머지 이벤트(sources / verification / meta / done)
-> 시퀀스·계약은 동일하게 유지한다. Agent 코드 전달 시 `token` 다중 송신만 확장하면
-> BFF/프론트 호환성 유지.
-
-### 응답 객체 스키마 (완성형)
-
-```jsonc
+```json
 {
-  "answer": "string (Markdown). 각 문장에 [#n] 형식 근거 청크 번호 명시",
-  "sources": [
-    {
-      "title": "page_title > section_header",
-      "score": 87,                    // Cross-Encoder 관련도 0~100
-      "path": "section_path (계층 경로)",
-      "space_key": "INFRA",            // 사용자 단위 검색 시 다중 스페이스 혼재 가능
-      "source_type": "page",           // page | attachment
-      "attachment_filename": "...",    // source_type=attachment 일 때만
-      "attachment_mime": "...",        // source_type=attachment 일 때만
-      "download_url": "...",           // source_type=attachment 일 때만
-      "confluence_url": "https://confluence.../pages/12345#anchor",
-      "last_modified": "ISO 8601",
-      "text_preview": "청크 본문 첫 200자"
-    }
+  "question": "지난번 S3 버킷 권한 오류 때 어떻게 해결했어?",
+  "conversationId": "conv-uuid-001",
+  "history": [
+    { "role": "user", "content": "S3 관련 장애 이력 알려줘" },
+    { "role": "assistant", "content": "최근 S3 관련 장애는 3건이 있었습니다..." }
   ],
-  "verification": [
-    {
-      "sentence_id": 1,
-      "status": "PASS",               // PASS | SUPPORTED | NOT_SUPPORTED
-      "cited_chunks": [1, 3]
-    }
-  ],
-  "intent": "장애대응",                // 장애대응 | 운영가이드 | 정책절차 | 이력조회
-  "used_llm": "gpt-4o",                // gpt-4o | gpt-4o-mini
-  "feedback_enabled": true,            // 저신뢰 응답이면 false 가능
-  "latency_ms": 4120
+  "userId": "user-001",
+  "groups": ["Cloud-Control-Center"],
+  "spaceKey": "CPC",
+  "accessToken": "<Confluence OAuth access_token>",
+  "cloudId": "11111111-2222-3333-4444-555555555555"
 }
 ```
 
-### 표준 분기 응답
+> **보안(PoC 모드 한정, BE 스펙 §2-1)** — `accessToken`은 로그·tracing 본문·RabbitMQ 메시지·
+> 이벤트 페이로드에 미수집(마스킹 또는 본문 제외)한다.
+
+### SSE 이벤트 순서
+
+1. `token` 이벤트 (n회) — 답변 텍스트 청크
+2. `sources` 이벤트 (1회) — 출처 카드 배열
+3. `verification` 이벤트 (1회) — 답변 신뢰도 검증(집계)
+4. `done` 이벤트 (1회) — 스트림 종료 마커
+- 오류 시: 위 순서 대신 `error` 이벤트로 전달하고 스트림을 종료한다.
+- 진행 표시용 `status` 이벤트(아래 "진행 status 이벤트")가 위 이벤트들 사이사이에 추가로
+  송신될 수 있다. `status`는 *추가 전용* 이벤트이므로, 이를 무시하는 클라이언트는 위 4종
+  이벤트만으로 기존과 동일하게 동작한다.
+
+> **`meta` 이벤트 제거** — 이전 `meta`(intent / used_llm / feedback_enabled / latency_ms)는
+> BE 스펙에 없어 응답 계약에서 제외한다. 해당 값은 ML 내부 Prometheus 메트릭으로만 관측한다.
+> 저신뢰(이전 `feedback_enabled=false`) 신호는 `verification.confidenceScore`로 표현한다.
+
+#### `token`
+```
+event: token
+data: {"content": "S3 권한 오류는"}
+```
+- `data`는 JSON 객체 `{"content": "<청크 텍스트>"}`. 프론트는 `content`를 누적 렌더링한다.
+
+#### `sources`
+```jsonc
+event: sources
+data: {
+  "sources": [
+    {
+      "title": "page_title > section_header",
+      "pageId": "12345",
+      "spaceId": "98310",
+      "spaceName": "Cloud Control Center",
+      "url": "https://confluence.example.com/pages/12345#anchor",
+      "updatedAt": "2026-04-15T18:30:00+09:00",   // KST(+09:00)
+      "relevanceScore": 0.92                        // 0~1 (Cross-Encoder score/100)
+    }
+  ]
+}
+```
+- 배열은 `{"sources": [...]}`로 래핑된다.
+- `relevanceScore`는 0~1 float(기존 0~100 정수 `score`를 100으로 나눈 값).
+- `updatedAt`은 KST(`+09:00`) 절대 전환(BE 스펙 §시간 표기 정책).
+- **TBD(BE 협의)**: 첨부 출처 전용 필드(`attachment_filename`/`attachment_mime`/`download_url`)는
+  현재 BE `sources` 항목 스키마에 미정의 — 첨부 검색 노출 시 BE와 필드 확정 필요.
+
+#### `verification`
+```jsonc
+event: verification
+data: { "confidenceScore": 0.85, "verificationResult": "SUPPORTED" }
+```
+- `verificationResult`: `SUPPORTED` | `PARTIALLY_SUPPORTED` | `NOT_SUPPORTED`
+- **집계 규칙** (문장별 1+2단계 결과 → 단일 값):
+  - `NOT_SUPPORTED` 비율 > 0.5 → `NOT_SUPPORTED` (답변 차단 분기와 동일 임계)
+  - 그 외 `NOT_SUPPORTED` 문장이 1개 이상 존재 → `PARTIALLY_SUPPORTED`
+  - 전 문장이 `PASS`/`SUPPORTED` → `SUPPORTED`
+- **`confidenceScore`(0~1)**: `(PASS+SUPPORTED 문장 수) / (전체 문장 수)`. 문장 0개면 `0.0`.
+  (휴리스틱 — 운영 튜닝 가능. 저신뢰 경고 배지의 기준값으로 FE가 사용)
+
+#### `done`
+```
+event: done
+data: {}
+```
+- ML은 `done`을 빈 객체 `{}`로 emit한다. **`messageId`는 BFF가 DB 메시지 UUID로 주입**해
+  FE에 `{"messageId": "msg-uuid-001"}` 형태로 중계한다(ML은 messageId를 생성하지 않는다).
+
+#### `error`
+```
+event: error
+data: {"code": "UPSTREAM_LLM_ERROR", "message": "답변 생성 중 오류가 발생했습니다"}
+```
+- 오류는 HTTP 에러 응답이 아니라 **SSE `error` 이벤트**로 전달하고 스트림을 종료한다.
+- `code`: `UNAUTHORIZED` | `RETRIEVAL_EMPTY` | `LOW_CONFIDENCE` | `UPSTREAM_LLM_ERROR` |
+  `VERIFICATION_BLOCKED` | `ML_SERVER_ERROR`.
+- 단, `RETRIEVAL_EMPTY` / `LOW_CONFIDENCE` / `VERIFICATION_BLOCKED`는 아래 "표준 분기 응답"처럼
+  정상 200 SSE 흐름 내부에서 처리하는 것을 우선한다(`error` 이벤트는 본격 오류에만 사용).
+
+### 진행 status 이벤트 (feature19)
+
+답변 토큰 전/중에 RAG 라이프사이클 단계(연결 → 검색 → 답변 → 검증 …) 진입을 프론트에 push하는
+진행 표시용 이벤트다. **기존 `token`/`sources`/`verification`/`done` 이벤트와 별개로 *추가*되며,
+이름·순서·형식은 무변경이다.** `status`를 무시하는 클라이언트는 기존과 동일하게 동작한다.
+
+```
+event: status
+data: {"phase": "searching", "message": "관련 문서를 검색하고 있어요"}
+```
+
+- `data`는 JSON 객체 `{"phase": "<phase>", "message": "<한국어 진행 메시지>"}` (다른 JSON
+  이벤트와 동일하게 `ensure_ascii=False` 직렬화).
+- 각 phase는 해당 단계 진입 시 1회 송신된다.
+- **streaming 모드(`stream=true`, 운영 경로)에만 적용**된다. 비-streaming 경로는 그래프를 단일
+  블로킹 호출로 실행한 뒤 모든 이벤트를 한꺼번에 flush해 phase가 동시에 발사되므로(진행 표시
+  가치 없음) 송신하지 않는다.
+
+| phase | message(예) | 송신 시점 |
+|---|---|---|
+| `connecting` | 연결 중이에요 | 스트림 진입 |
+| `acl_filtering` | 접근 권한을 확인하고 있어요 | ACL 필터 확인 단계 |
+| `searching` | 관련 문서를 검색하고 있어요 | 그래프 검색(history/router/search/rerank 통합) 직전 |
+| `answering` | 답변을 준비하고 있어요 | LLM 답변 생성 호출 직전 |
+| `streaming` | 답변을 작성하고 있어요 | 첫 `token` chunk 송신 직전 |
+| `verifying` | 답변 근거를 검증하고 있어요 | 답변 검증(1+2단계) 직전 |
+| `formatting` | 답변을 정리하고 있어요 | 응답 포맷팅 → `sources`/`verification` 송신 직전 |
+
+- 정상 흐름 순서: `connecting` → `acl_filtering` → `searching` → `answering` → `streaming` →
+  `verifying` → `formatting`.
+- 검색 0건(`RETRIEVAL_EMPTY`) 분기는 `answering`/`streaming`/`verifying`을 건너뛰고 `searching`
+  다음 `formatting`으로 직행한다.
+- `done`/`error`는 별도 status phase로 만들지 않는다 — 기존 `done` 이벤트와 에러 처리(SSE
+  `error` 이벤트 / HTTP 에러)로 표현한다. 즉 `status`로는 진행 phase(`connecting`~`formatting`)만
+  송신한다.
+
+> **참고**: 그래프 내부 4단계(history/router/search/rerank)는 현재 단일 블로킹 호출 안에서
+> 실행되므로 절충안으로 `searching` 단일 phase로 통합해 송신한다. 4단계 세분화가 필요해지면
+> 그래프 호출을 노드 단위 스트리밍으로 전환하는 별도 작업으로 다룬다.
+
+### 표준 분기 응답 (정상 SSE 흐름 내부)
 
 | 상황 | 처리 |
 |---|---|
-| ACL 결과 후보 0건 | "권한 범위 내에서 참고할 수 있는 문서를 찾지 못했습니다" 표준 응답, LLM 미호출 |
-| Cross-Encoder Top-5 최고 점수 < 0.20 | 저신뢰 분기 — 출처를 '참고용'으로 제시 + 경고 배지, `feedback_enabled=false` |
-| `verification` 중 `NOT_SUPPORTED` 비율 > 50% | 답변 차단, 저신뢰 응답으로 대체, 운영 긴급 알림 |
-
-### Error Response
-
-```jsonc
-{ "success": false, "error": { "code": "RETRIEVAL_EMPTY", "message": "..." } }
-```
-
-| code | 상황 |
-|---|---|
-| `UNAUTHORIZED` | JWT에서 `user_id`/`groups` 추출 실패 (401) |
-| `RETRIEVAL_EMPTY` | 권한 내 검색 결과 0건 |
-| `LOW_CONFIDENCE` | 재순위화 최고 점수 < 0.20 (저신뢰) |
-| `UPSTREAM_LLM_ERROR` | LLM 호출 실패 / 타임아웃 |
-| `VERIFICATION_BLOCKED` | `NOT_SUPPORTED` 비율 > 50%로 답변 차단 |
+| ACL 결과 후보 0건 | "권한 범위 내에서 참고할 수 있는 문서를 찾지 못했습니다" 표준 응답을 `token`으로 송신, LLM 미호출. `verification.confidenceScore`를 낮게, `verificationResult=NOT_SUPPORTED`로 보고 |
+| Cross-Encoder Top-5 최고 score < 55 (0.55) | 저신뢰 분기 — 출처를 '참고용'으로 제시. `confidenceScore`를 낮게 반영(FE가 경고 배지 표시) |
+| `verification` 중 `NOT_SUPPORTED` 비율 > 50% | 답변 차단, 저신뢰 응답으로 대체, `verificationResult=NOT_SUPPORTED`, 운영 긴급 알림 |
 
 ---
 
@@ -104,10 +193,15 @@ API 변경 시 이 문서를 함께 수정한다(루트 `CLAUDE.md` 규칙).
 - **PageObject** — Document Source Adapter → Ingestion 파이프라인 입력. `docs/rag-pipeline-design.md` §7.1
 - **DocumentSourceAdapter** — `fetch_pages()` / `list_active_ids()` / `watch_changes()`. 구현은 백엔드 책임
 
+> 데이터 수집 트리거/상태/헬스체크(`/ml/ingest`, `/ml/ingest/status/{jobId}`,
+> `/ml/rag/health`, `/ml/ingest/health`)는 `api-spec-BE-adjust.md` §2-2~§2-4 정합으로
+> 별도 정의한다(Ingestion 파이프라인 영역).
+
 ---
 
 ## 변경 규칙
 
-- 엔드포인트·요청/응답 필드 변경 시 이 문서를 함께 수정한다.
-- 응답에서 출처(`sources`)·검증(`verification`)은 제거하지 않는다 (출처 기반·검증 가능성 원칙).
-- SSE 이벤트 순서·이름 변경은 BFF/프론트 영향이 있으므로 Plan에 영향 범위를 명시하고 사전 협의한다.
+- 엔드포인트·요청/응답 필드 변경 시 이 문서와 `api-spec-BE-adjust.md`(BE 통합 스펙) 정합을 유지한다.
+- 응답에서 출처(`sources`)·검증(`verification`)은 제거하지 않는다(출처 기반·검증 가능성 원칙).
+- SSE 이벤트 순서·이름·`data` 형식 변경은 BFF/프론트 영향이 있으므로 Plan에 영향 범위를 명시하고
+  사전 협의한다.

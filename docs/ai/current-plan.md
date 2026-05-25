@@ -500,13 +500,30 @@
 - [x] 라우터 LangGraph config rename — `78286ea`
 - [x] config.py 기본값 + build_real_deps api_key 명시 전달 — `78286ea`
 
-### feature13: ML 코드 리뷰 (PDF 2+3) — P1 ⏳ 외부 협의 대기
+### feature13: ML 코드 리뷰 (PDF 2+3) — P1 ⚙ BE 스펙 수신, 문서 반영 완료 / 코드 마이그레이션 대기
 
-BE 담당자 명세 확정 후 진행.
+BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). 문서 정합은 완료, 코드 반영은 별도 세션.
 
 - **(PDF #2) API Spec — BE 변경사항 업데이트**
-  - 대기: BE 담당자가 변경사항 전달
-  - 갱신 대상: `docs/api-spec.md`, `tests/api/test_query_route.py`
+  - [x] BE 변경분 수신 (`api-spec-BE-adjust.md`) — §2-1 `/ml/query` + §1-1 SSE 이벤트 형식
+  - [x] `docs/api-spec.md` 갱신 (2026-05-22) — 목표 계약 반영:
+    - 엔드포인트 `/api/v1/rag/query` → `/ml/query`
+    - 요청 본문 재정의: `jwt` 제거 → `question`/`conversationId`/`history[]`/`userId`/
+      `groups[]`/`spaceKey`/`accessToken`/`cloudId`
+    - SSE 이벤트: `token`=`{"content"}`, `sources`=`{"sources":[...]}`(필드 `pageId`/
+      `spaceId`/`spaceName`/`url`/`updatedAt`(KST)/`relevanceScore`(0~1)), `verification`=
+      집계 `{"confidenceScore","verificationResult"}`(+`PARTIALLY_SUPPORTED`), `done`=`{}`
+      (messageId는 BFF 주입), `error` 이벤트 신규
+    - `meta` 이벤트 제거(intent/used_llm/feedback_enabled/latency_ms → 내부 메트릭만)
+  - [ ] **코드 마이그레이션** (별도 세션 — 영향범위 큰 계약 변경, 사전 결정 4건 반영됨):
+    - `app/api/routes.py` — 엔드포인트 경로/`QueryRequest` 필드(question/userId/groups/
+      spaceKey/...) 변경, SSE 이벤트 형식 변경(token JSON·sources 래핑·verification 집계·
+      done `{}`·error 이벤트), `meta` 송신 제거, JWT 추출 경로 제거(userId/groups 직접 수신)
+    - `app/schemas/response.py` — `Source`에 `pageId`/`spaceId`/`spaceName` 추가 + `score`(0~100)
+      → `relevanceScore`(0~1) 매핑, `last_modified` KST 직렬화. `verification` 집계 모델 신설
+      (또는 포맷터에서 집계). `feedback_enabled` 제거 영향 정리
+    - `app/query/acl.py` — `extract_principal(jwt)` 대신 userId/groups 직접 사용 경로
+    - `tests/api/test_query_route.py` — 신규 계약 회귀
 - **(PDF #3) Schema — user ACL + Confluence call 명세 정합**
   - 대기 (BE 확정 필요):
     - user ACL (권한) 관련 column 이 BE 에서 어떻게 전달되는지
@@ -736,8 +753,11 @@ BE 담당자 명세 확정 후 진행.
     precision 임을 확정(인용 강제할수록 환각↑). run_query_with_state + run_evaluation 이원화:
     per-cited(citation precision) 유지 + `unfaithful_*`(전체 top-k=표준 faithfulness) +
     flip 분해(citation_imprecision/true_hallucination) 신설. 회귀 통과.
-  - [ ] **Mac 재평가 + KPI 정의 합의** — 신규 지표 실측(unfaithful_ratio_delivered=표준 환각
-    vs not_supported_ratio_delivered=citation precision) 후 팀과 헤드라인 KPI 합의.
+  - [x] **재평가 실측(020421)** — faithfulness(표준 환각) delivered **0.81%**(1/124, 그 1건도
+    미인용)·answerable 1.91%, citation precision delivered 19.4%(오인용 23 + 진짜환각 1).
+    **"20~32% 환각"은 95%+가 오인용 아티팩트로 확정. 진짜 환각 ≈0, KPI 도전(8%) 대폭 충족.**
+  - [ ] **KPI 정의 합의(요구사항 owner)** — 헤드라인 환각 = faithfulness(0.81%), citation
+    precision(19.4%)은 "출처 정밀도" 보조 지표로 분리. FR-009/010 정의 갱신 승인 대기.
     (프롬프트 텍스트 한계 실증). KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
   - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
   - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
@@ -758,6 +778,88 @@ BE 담당자 명세 확정 후 진행.
 - [ ] Data Ingestion Agent 책임 협의 + document_analyzer 방향 확정
 - [x] feature4-B PDF/CSV 첨부 분할기 (2026-05-22 완료)
 - [ ] (D) Function Calling + (E) 자연어 출처 — Agent 담당자 보고
+
+### feature19: SSE 단계별 status 이벤트 (진행 표시) — P2 ✅ 즉시 착수 가능 (독립)
+
+> **독립 버전 (현재 코드 기준).** feature13 코드 마이그레이션(/ml/query·새 SSE 형식)이나
+> BE 합의를 **선행 의존성으로 두지 않는다.** 현재 라우트(`POST /api/v1/rag/query`, 이벤트
+> token/sources/verification/meta/done)에 진행 표시용 `status` 이벤트를 *추가*만 한다.
+> feature13 코드 마이그레이션이 나중에 반영되면 status 이벤트 data 형식(엔드포인트·필드)을
+> 그때 함께 정렬한다 — 본 feature 착수에는 영향 없음.
+
+- **배경**: 프론트가 답변 토큰 전/중 진행 표시(연결→검색→재순위→답변→검증…)를 요청.
+  현재 SSE에는 진행 상태 push가 없다 → `status` 이벤트 추가.
+- **작업 목표**: SSE에 신규 `status` 이벤트를 추가해 RAG 라이프사이클 단계 진입 시 진행 상태를 push.
+- **담당 영역**: RAG Pipeline (`app/api/routes.py`), 문서(`docs/api-spec.md`). 프론트 렌더는 FE 담당.
+- **브랜치**: `feat/#?/sse-status-event`
+
+#### status 이벤트 형식
+
+- `event: status` / `data: {"phase": "...", "message": "..."}` (JSON 문자열).
+- 송신 위치: 기존 `token`/`sources`/`verification`/`meta`/`done` 이벤트와 함께, 각 phase 진입 시 1회.
+- phase 목록은 FE 제시안(connecting … done/error)을 현재 코드 실제 위치에 매핑한다:
+
+  | phase | message(예) | 현재 코드 위치 (송신 가능 시점) |
+  |---|---|---|
+  | `connecting` | 연결 중이에요 | `query_route` 진입 / `_streaming_event_stream` 첫 yield |
+  | `acl_filtering` | 접근 권한을 확인하고 있어요 | `extract_principal` + `build_acl_filter` (query_route) |
+  | `checking_history` | 이전 대화를 확인하고 있어요 | `manage_history` 노드 |
+  | `routing_query` | 질문 의도를 파악하고 있어요 | `router` 노드 (`manage_router`) |
+  | `searching` | 관련 문서를 검색하고 있어요 | `hybrid_search` 노드 |
+  | `reranking` | 검색 결과를 추려내고 있어요 | `rerank` 노드 (`cross_encoder_rerank`) |
+  | `answering` | 답변을 준비하고 있어요 | `stream_openai_answer` 호출 직전 (프롬프트 구성) |
+  | `streaming` | 답변을 작성하고 있어요 | 첫 `token` chunk 송신 시점 (token 루프 진입) |
+  | `verifying` | 답변 근거를 검증하고 있어요 | `verify_pipeline_node` (1+2단계) |
+  | `formatting` | 답변을 정리하고 있어요 | `format_response` → sources/verification/meta 송신 직전 |
+  | `done` | 완료 | 스트림 정상 종료 (기존 `done` 이벤트와 정합 — 아래 결정 참고) |
+  | `error` | 오류가 발생했어요 | 처리 실패 시 (아래 결정 참고) |
+
+  - 검색 0건(RETRIEVAL_EMPTY) 분기는 `reranking`/`answering`/`streaming`을 건너뛰고
+    `formatting`으로 직행한다(표준 응답). `verifying`은 검증 결과 유무에 따라 생략 가능.
+
+- **결정 필요(소): `done`/`error` phase 처리** — 기존에 `done` SSE 이벤트가 이미 존재하고,
+  비-streaming 경로엔 `error` 이벤트가 없다(HTTP 에러 JSON). 택1:
+  - (가) `done`/`error`는 기존 `done` 이벤트 + HTTP 에러로 표현하고, `status`는 진행 phase
+    (connecting~formatting)만 송신. (최소 변경, 권장)
+  - (나) `status:{phase:done}` / `status:{phase:error, message}`도 명시 송신해 FE가 단일
+    `status` 스트림만 구독하도록. (스트리밍 중 발생 오류는 status error로 표면화)
+
+#### 구현 (RAG 영역)
+
+- **수정 대상**: `app/api/routes.py` — `_streaming_event_stream`(streaming 경로) +
+  `_event_stream`/`_sse_payload`(비-streaming 경로에도 동일 phase 적용 여부 결정).
+  `docs/api-spec.md`(status 절 추가). `tests/api/test_query_route.py`(회귀).
+- **수정하지 않을 파일**: `app/pipeline/query_graph.py`(그래프 구조 유지),
+  `app/schemas/*`, vendoring agent 패키지(무수정), 다른 팀원 담당 영역.
+- **기술 제약 / 방식 결정** — phase는 송신 위치에 따라 난이도가 둘로 나뉜다:
+  - **즉시 가능(라우트에서 직접 yield)**: `connecting`/`acl_filtering`(graph invoke 전),
+    `answering`/`streaming`/`verifying`/`formatting`(graph invoke 후 라우트가 직접 수행).
+    → `_streaming_event_stream`에 status yield만 추가하면 됨.
+  - **그래프 내부 4단계가 관건**: `checking_history`/`routing_query`/`searching`/`reranking`은
+    현재 `streaming_graph.invoke(state)` 단일 블로킹 호출 안에서 실행돼 사이에 끼울 수 없음. 택1:
+    - (A) `streaming_graph.astream(state, stream_mode="updates")`로 전환 → 노드 완료 update를
+      phase로 변환(노드명 manage_history/router/hybrid_search/rerank → phase 매핑).
+    - (B) invoke를 노드 단위로 분할 호출하고 각 노드 전후로 phase를 yield.
+  - 절충안: 그래프 내부 4단계는 한 번에 `searching` 1개만 송신하고(invoke 전), 라우트 단계는
+    세분화 — FE가 4단계 분리 표시가 꼭 필요한지에 따라 결정.
+- **예상 영향 범위**: 기존 5개 이벤트(이름·순서·형식) 무변경, status는 *추가*라 status를 무시하는
+  기존 클라이언트도 정상 동작. CLAUDE.md상 SSE 이벤트 추가는 사전 협의·문서 동반.
+- **테스트 방법**: streaming 경로에서 phase가 token 이전/중 순서대로 송신되는지 회귀,
+  검색 0건 시 phase 단축(reranking~streaming 생략) 회귀, 기존 5개 이벤트 무회귀,
+  status 무시 시 token 누적·sources/verification/meta/done 정상.
+- **완료 기준**: 회귀 테스트 통과 / `./scripts/verify.sh` 통과 / `docs/api-spec.md` status 절 추가 /
+  FE에 phase 목록·형식 핸드오프 / working-log + commit.
+- **문서 수정 필요 여부**: 필요 — `docs/api-spec.md`(status 이벤트 절).
+
+작업 항목:
+
+- [ ] (방식 결정) 그래프 내부 4단계 세분화 여부 + astream(A) vs 노드 분할(B) vs 절충
+- [ ] (결정) `done`/`error` phase 송신 방식 (가/나)
+- [ ] `app/api/routes.py` — 라우트 직접 phase(connecting/acl_filtering/answering/streaming/
+  verifying/formatting) status yield + 회귀
+- [ ] `app/api/routes.py` — 그래프 내부 phase(checking_history/routing_query/searching/
+  reranking) 송신 (방식 결정 후)
+- [ ] `docs/api-spec.md` status 이벤트 절 추가
 
 ---
 
