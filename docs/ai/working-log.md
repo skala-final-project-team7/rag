@@ -19,6 +19,28 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 
 ---
 
+## 2026-05-26 — ingestion↔rag 공유 계약 합의 (ADR 0003)
+
+- 브랜치: (문서 전용) `docs/#NN/ingestion-rag-shared-contracts` 제안
+- 변경 사항: ingestion·rag 두 레포의 공유 계약 미해결(TBD)을 식별·결정하고 ADR로 동결. 본 레포에는
+  결정 결과를 동일 ADR로 기록하고 관련 문서를 정합 갱신.
+  - **신규** `docs/adr/0003-ingestion-rag-shared-contracts.md` (ingestion 레포와 **바이트 동일** 복제).
+  - 항목 1 ACL 모델: **(A) `space_key` 합성 확정**(ADR 0002 prefix 전제). rag `app/query/acl.py:
+    build_acl_filter`가 owning seam — 런타임 무변. `docs/db-schema.md` §1.4·`docs/atlassian-api.md`
+    ACL 절을 "미해결"→"PoC 결정(A)"로 갱신.
+  - 항목 2 payload/embedding_cache/chunk_id: **owning source = rag**, 변경 시 양 레포 동시 갱신 +
+    재색인 절차 동결. 현재 공유 자산은 `sync.py`(ingestion additive `run_delta_sync`) 외 바이트 동일.
+  - 항목 3 `IngestionStage`에 `CRAWL` 추가: **결정안만 기록, 승인 필요**(enum은 양 레포 공유 —
+    미갱신 읽기 측 `ValueError` 위험, 동시 배포 필요). 코드/enum 미변경. `db-schema.md` §2.3 노트 추가.
+  - 항목 4 soft_delete: **PoC는 hard delete 유지**. 도입 규약(payload `is_deleted` + 검색 `must_not`
+    + 재색인)만 기록, **승인 필요**. rag 검색에 현재 soft-delete 필터 없음(grep 확인) — 코드 미변경.
+  - 항목 5 공유 자산 전략: **복사 유지**, 분리는 분기 비용 증가 시 재검토.
+  - 합의 불필요: `access_token`/`cloudId` 전달(Auth/BFF), JWT 발급·서명, 관리자 대시보드 데이터.
+- 수정 파일: `docs/adr/0003-*.md`(신규), `docs/db-schema.md`(§1.4 ACL·§2.3 stage 노트),
+  `docs/atlassian-api.md`(ACL 절), 본 `working-log.md`. **런타임 코드·공유 자산 미변경.**
+- 실행 명령 / 테스트 결과: 문서 전용 변경 — 코드/테스트 무영향. `git diff`로 docs/ 한정 확인.
+- 남은 TODO: 항목 3·4는 사람 승인 후 별도 change-set(양 레포 동시). 자세한 영향·규약은 ADR 0003.
+
 ## 2026-05-15 — RAG 저장소 골격 구성
 
 - 브랜치: `feat/#1/rag-pipeline-skeleton`
