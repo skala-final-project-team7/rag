@@ -773,8 +773,10 @@ BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). PDF #2(API Spe
     faithfulness 0.81%, 측정 이원화, Golden Set, 부수 fix. §4 결론에서 잔여 튜닝을 "후속 이관"으로 정리.
   - 잔여(아래는 v0.3.0 보고서 §4가 명시적으로 owner/타 팀에 **이관·보류**한 항목 — 본 담당자
     능동 코드작업 사실상 종료):
-    - [ ] **KPI 정의 합의(요구사항 owner)** — 헤드라인 환각 = faithfulness(0.81%), citation
-      precision(19.4%)은 "출처 정밀도" 보조 지표로 분리. owner 승인 대기(사람 게이트).
+    - [x] **KPI 정의 확정 (2026-05-26)** — 헤드라인 환각 = 표준 faithfulness(delivered 0.81%,
+      RAGAS/TruLens 정의), citation precision(19.4%)은 "출처 정밀도" 보조 지표로 분리. 이원 측정
+      유지. `docs/rag-pipeline-design.md §10` KPI 표에 측정 방식 명시. 외부 기획서 FR-009/010
+      문구 갱신은 권고(설계서·527 v0.3.0 §4 근거).
     - [~] Pool 가중치 그리드 서치 — 도구(`--pool-weights`) ○, **미실행**(eval override 전부 null).
       회귀 baseline(Golden Set) 확보됨. 첨부 P@3는 인덱싱 fix로 이미 12→50% 달성, Pool은 보류.
     - [~] 정책절차 Precision — 라우터 의도 오분류 fix(25→100%)로 일부 개선. 추가 개선은 보류.
@@ -892,15 +894,17 @@ BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). PDF #2(API Spe
 
 ---
 
-## 완료 현황 (2026-05-22 갱신)
+## 완료 현황 (2026-05-26 갱신)
 
 - **본 담당자 (Pipeline + Storage) 영역 진척도**: **~100%** (운영성·관측성·streaming
   + Rate Limit fallback + 운영 라이브 smoke + LLM 커스텀 메트릭 + 평가 인프라 완성)
 - **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
   Mode B 시연 검증 + Milestone D feature12 + feature13 PDF #2(/ml/query 마이그레이션) +
   feature14 + feature15 + feature16 + feature17a + feature17b + feature19 SSE status 이벤트)**
-- **feature17c**: 엔지니어링·튜닝(17c-1~26) + KPI 달성 완료(Precision@3 80% / faithfulness
-  환각 0.81%) + 527 v0.3.0 docx 산출. 잔여는 인적/보류 항목만 — KPI 정의 owner 합의,
-  Pool 가중치 그리드 서치(도구 ○ / 미실행, 보류), 정책절차 Precision 개선, 생성기 prompt(Agent 이관).
-- **잔여 (Milestone D)**: feature13 PDF #3(BE ACL 컬럼) / feature17c 잔여(위) / feature18
+- **feature17c**: 엔지니어링·튜닝(17c-1~26) + KPI 달성·확정 완료(Precision@3 80% /
+  헤드라인 환각=faithfulness 0.81% 확정, 측정 방식 설계서 §10 명시) + 527 v0.3.0 docx 산출.
+  잔여는 전부 타 팀/Agent/인프라 이관·보류 항목 — Pool 가중치 그리드 서치(도구 ○ / 미실행,
+  보류), 정책절차 Precision 추가 개선(보류), 생성기 prompt(Agent 이관), non-streaming P95(인프라 이관).
+  → **본 담당자 능동 작업 종료(실질 완료).**
+- **잔여 (Milestone D)**: feature13 PDF #3(BE ACL 컬럼, 외부 협의) / feature17c 이관·보류분(위) / feature18
 - **외부 협의 대기**: feature13 PDF #3 (BE 명세), feature18(Data Agent / Agent 담당자 영역)
