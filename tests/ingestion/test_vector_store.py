@@ -92,6 +92,12 @@ def test_build_point_payload_injects_version_number() -> None:
     assert build_point_payload(_page_chunk(), version_number=1)["version_number"] == 1
 
 
+def test_build_point_payload_defaults_is_deleted_false() -> None:
+    # soft-delete 플래그(ADR 0003 항목 4)는 신규/재색인 upsert 에서 항상 False.
+    # 삭제 확정은 store.soft_delete_by_* 가 True 로 set_payload 한다.
+    assert build_point_payload(_page_chunk(), version_number=1)["is_deleted"] is False
+
+
 def test_build_point_payload_page_chunk_has_null_attachment_fields() -> None:
     payload = build_point_payload(_page_chunk(), version_number=1)
     assert payload["source_type"] == "page"
