@@ -618,13 +618,17 @@ BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). PDF #2(API Spe
   (scripts/run_evaluation.py) + LLM 커스텀 메트릭 4종 (llm_fallback_total /
   verification_status_total / answer_generation_latency_seconds /
   intent_classification_total) + 회귀 7건 (다음 commit)
-- [-] **feature17b** — 인프라 + bootstrap 라벨링 완료. Golden Set 추출 미완.
+- [x] **feature17b** — 완료 (2026-05-26 정리: 평가셋 50건 + Golden Set 자동 추출 실행 확인).
   - [x] scripts/backfill_chunk_ids.py (Qdrant scroll 로 expected_chunk_ids 자동 채움)
   - [x] pyproject.toml evaluation extras (evaluate / rouge-score / bert-score)
   - [x] scripts/run_evaluation.py --rouge-l / --bert-score 옵션 + helper
   - [x] Evaluation Set 50건 라벨링 — 시드 10건 (human) + Claude bootstrap 40건
-    (의도 비율 35:30:20:15 + 첨부 활용 8건). 사용자 검수 후 backfill + 평가.
-  - [ ] Golden Set 자동 추출 (3 조건 AND 필터) — 평가 실행 후
+    (의도 비율 35:30:20:15 + 첨부 활용 8건). 사용자 검수 후 backfill + 평가 완료
+    (`samples/evaluation_set.json` 50건).
+  - [x] Golden Set 자동 추출 (3 조건 AND 필터) — 실행 완료. `scripts/extract_golden_set.py`
+    + 산출물 `reports/golden_set_*.json` (최신 `golden_set_20260520_035803.json`, 50건 중
+    4건 추출 / top1≥80 + verification PASS + feedback 통과). 추출 기준이 엄격해 골든셋이
+    작은 점은 후속에서 기준 재조정 여지(필요 시).
 - [-] **feature17c** — 튜닝 (Pool 가중치 그리드 서치 / 생성기 prompt /
   Cross-Encoder 임계값) — 라우터 prompt 튜닝은 2026-05-19 fix
   (app/query/routing_transport.py) 로 사실상 달성 (정확도 4/4=100%)
@@ -764,13 +768,18 @@ BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). PDF #2(API Spe
   - [x] **재평가 실측(020421)** — faithfulness(표준 환각) delivered **0.81%**(1/124, 그 1건도
     미인용)·answerable 1.91%, citation precision delivered 19.4%(오인용 23 + 진짜환각 1).
     **"20~32% 환각"은 95%+가 오인용 아티팩트로 확정. 진짜 환각 ≈0, KPI 도전(8%) 대폭 충족.**
-  - [ ] **KPI 정의 합의(요구사항 owner)** — 헤드라인 환각 = faithfulness(0.81%), citation
-    precision(19.4%)은 "출처 정밀도" 보조 지표로 분리. FR-009/010 정의 갱신 승인 대기.
-    (프롬프트 텍스트 한계 실증). KPI 공식 숫자(전체/answerable/delivered) 팀 확정.
-  - [ ] 527 v0.3.0 docx — Precision KPI 충족 반영(사용자 결정 대기).
-  - [ ] Pool 가중치 그리드 서치 — 첨부 인덱싱 fix 재평가 후 결정 (사용자 보류)
-  - [ ] 정책절차 Precision 50% 개선
-  - [ ] 생성기 prompt 튜닝 (환각 37%) — Agent 경계, 별도 세션/이관
+  - [x] **527 v0.3.0 docx 완료** — `구현_결과_보고서_527_RAG검색품질_성능최적화_리포트_v0.3.0.docx`
+    (rag 폴더 외부 보관). 최신 평가(`evaluation_20260522_020421`) 반영 — Precision@3 80%,
+    faithfulness 0.81%, 측정 이원화, Golden Set, 부수 fix. §4 결론에서 잔여 튜닝을 "후속 이관"으로 정리.
+  - 잔여(아래는 v0.3.0 보고서 §4가 명시적으로 owner/타 팀에 **이관·보류**한 항목 — 본 담당자
+    능동 코드작업 사실상 종료):
+    - [ ] **KPI 정의 합의(요구사항 owner)** — 헤드라인 환각 = faithfulness(0.81%), citation
+      precision(19.4%)은 "출처 정밀도" 보조 지표로 분리. owner 승인 대기(사람 게이트).
+    - [~] Pool 가중치 그리드 서치 — 도구(`--pool-weights`) ○, **미실행**(eval override 전부 null).
+      회귀 baseline(Golden Set) 확보됨. 첨부 P@3는 인덱싱 fix로 이미 12→50% 달성, Pool은 보류.
+    - [~] 정책절차 Precision — 라우터 의도 오분류 fix(25→100%)로 일부 개선. 추가 개선은 보류.
+    - [~] 생성기 prompt 튜닝(인용 교정) — 프롬프트·스키마·FC 3종 실패 실증·미채택, Agent 이관.
+    - [~] non-streaming P95 — streaming/GPU reranker, BFF·인프라 영역 이관.
 
 ### feature18: 외부 의존 / 부가 — P3
 
@@ -888,9 +897,10 @@ BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). PDF #2(API Spe
 - **본 담당자 (Pipeline + Storage) 영역 진척도**: **~100%** (운영성·관측성·streaming
   + Rate Limit fallback + 운영 라이브 smoke + LLM 커스텀 메트릭 + 평가 인프라 완성)
 - **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
-  Mode B 시연 검증 + Milestone D feature12 + feature14 + feature15 + feature16 + feature17a
-  + feature19 SSE status 이벤트)**
-- **잔여 (Milestone D)**: feature13 / feature17b / feature17c / feature18
-- **즉시 진행 가능 (외부 협의 불필요)**: feature17b (단, 50건 라벨링 인적 자원 필요) /
-  feature17c (평가 결과 기반) / feature18(부분)
-- **외부 협의 대기**: feature13 (BE 명세), feature18(Data Agent / Agent 담당자 영역)
+  Mode B 시연 검증 + Milestone D feature12 + feature13 PDF #2(/ml/query 마이그레이션) +
+  feature14 + feature15 + feature16 + feature17a + feature17b + feature19 SSE status 이벤트)**
+- **feature17c**: 엔지니어링·튜닝(17c-1~26) + KPI 달성 완료(Precision@3 80% / faithfulness
+  환각 0.81%) + 527 v0.3.0 docx 산출. 잔여는 인적/보류 항목만 — KPI 정의 owner 합의,
+  Pool 가중치 그리드 서치(도구 ○ / 미실행, 보류), 정책절차 Precision 개선, 생성기 prompt(Agent 이관).
+- **잔여 (Milestone D)**: feature13 PDF #3(BE ACL 컬럼) / feature17c 잔여(위) / feature18
+- **외부 협의 대기**: feature13 PDF #3 (BE 명세), feature18(Data Agent / Agent 담당자 영역)
