@@ -13,7 +13,7 @@ import pytest
 from app.config import Settings
 from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import index_chunks
-from app.query.acl import ACLViolationError
+from app.query.acl import ACLViolationError, build_acl_filter
 from app.query.search_node import hybrid_search
 from app.schemas.chunk import Chunk, ChunkMetadata
 from app.schemas.enums import SourceType
@@ -39,6 +39,7 @@ def _chunk(
     chunk_index: int = 0,
     text: str = "alpha",
     allowed_groups: list[str] | None = None,
+    allowed_users: list[str] | None = None,
     doc_type: str = "operation",
 ) -> Chunk:
     metadata = ChunkMetadata(
@@ -52,7 +53,7 @@ def _chunk(
         doc_type=doc_type,
         space_key="CLOUD",
         allowed_groups=allowed_groups or ["space:CLOUD"],
-        allowed_users=[],
+        allowed_users=allowed_users or [],
         webui_link="/display/CLOUD/eks",
         last_modified=datetime.fromisoformat("2026-04-22T08:15:00+09:00"),
         source_type=SourceType.PAGE,
@@ -207,6 +208,50 @@ def test_hybrid_search_filters_out_other_groups(
     state = _make_state(query="alpha", acl_filter=_acl_for_cloud())
     result = hybrid_search(state, dense_embedder=dense, sparse_embedder=sparse, store=s)
     assert {c.metadata.chunk_id for c in result.candidates} == {"a" * 40}
+
+
+def test_hybrid_search_enforces_per_user_isolation(
+    dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    # 끝-끝 증명: build_acl_filter 가 만든 실제 운영 ACL 필터가 hybrid_search 노드를 통과해
+    # 같은 스페이스 안에서도 페이지(allowed_users) 단위로 사용자를 격리한다. 검색 측 코드
+    # 변경 없이 per-user 권한이 동작함을 보장한다(db-schema §1.4 대안 B 회귀 가드).
+    s = QdrantPoolStore.in_memory(_settings(), dense_dimension=8)
+    s.bootstrap_collections()
+    chunks = [
+        _chunk(
+            chunk_id="a" * 40,
+            page_id="PAGE-ALICE",
+            text="alpha",
+            allowed_groups=["space:CLOUD"],
+            allowed_users=["alice"],
+        ),
+        _chunk(
+            chunk_id="b" * 40,
+            chunk_index=1,
+            page_id="PAGE-BOB",
+            text="alpha",
+            allowed_groups=["space:CLOUD"],
+            allowed_users=["bob"],
+        ),
+    ]
+    index_chunks(
+        chunks,
+        version_by_page_id={"PAGE-ALICE": 1, "PAGE-BOB": 1},
+        dense_embedder=dense,
+        sparse_embedder=sparse,
+        store=s,
+        cache=FakeEmbeddingCache(),
+    )
+
+    # alice 는 space:CLOUD 그룹 없이 user_id 로만 매칭 → 자신 페이지만 후보로 올라온다.
+    alice_state = _make_state(query="alpha", acl_filter=build_acl_filter("alice", []))
+    alice_result = hybrid_search(alice_state, dense_embedder=dense, sparse_embedder=sparse, store=s)
+    assert {c.metadata.chunk_id for c in alice_result.candidates} == {"a" * 40}
+
+    bob_state = _make_state(query="alpha", acl_filter=build_acl_filter("bob", []))
+    bob_result = hybrid_search(bob_state, dense_embedder=dense, sparse_embedder=sparse, store=s)
+    assert {c.metadata.chunk_id for c in bob_result.candidates} == {"b" * 40}
 
 
 # --- 빈 결과 ---

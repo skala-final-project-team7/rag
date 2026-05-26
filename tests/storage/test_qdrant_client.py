@@ -30,6 +30,7 @@ from app.ingestion.vector_store import (  # noqa: E402
     POOL_NAMES,
     TITLE_POOL,
 )
+from app.query.acl import build_acl_filter  # noqa: E402
 from app.schemas.chunk import Chunk, ChunkMetadata  # noqa: E402
 from app.schemas.enums import SourceType  # noqa: E402
 from app.storage.qdrant_client import (  # noqa: E402
@@ -60,6 +61,7 @@ def _chunk(
     chunk_id: str,
     page_id: str = "CONF-PAGE-1",
     allowed_groups: list[str] | None = None,
+    allowed_users: list[str] | None = None,
     doc_type: str = "operation",
     attachment_id: str | None = None,
     chunk_index: int = 0,
@@ -76,7 +78,7 @@ def _chunk(
         doc_type=doc_type,
         space_key="CLOUD",
         allowed_groups=allowed_groups or ["space:CLOUD"],
-        allowed_users=[],
+        allowed_users=allowed_users or [],
         webui_link="/display/CLOUD/eks",
         last_modified=_last_modified(),
         source_type=SourceType.PAGE if attachment_id is None else SourceType.ATTACHMENT,
@@ -283,6 +285,119 @@ def test_search_with_unmatched_acl_returns_empty(
     [q_vec] = dense.encode_passages(["text"])
     hits = store.search(TITLE_POOL, acl_filter=_acl_for(["space:NONEXIST"]), dense_vector=q_vec)
     assert hits == []
+
+
+# --- 검색: per-user ACL (allowed_users) ---
+# db-schema §1.4 ACL 모델은 현재 대안 A(space_key 합성)로 운영되지만, 검색 측 필터
+# (build_acl_filter)는 이미 `allowed_users` 절을 emit 한다. 아래 테스트는 청크 payload 의
+# `allowed_users` 가 채워졌을 때(=대안 B/페이지 단위 권한) 검색 계층이 추가 코드 변경
+# 없이 사용자 단위 권한을 강제함을 :memory: Qdrant 로 증명한다. 합성 seam
+# (_synthesize_acl/synthesize_space_acl)이 allowed_users 를 채우기만 하면 per-user 권한이
+# 즉시 동작함을 보장하는 회귀 가드.
+
+
+def test_search_grants_access_via_allowed_users_only(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    # 사용자가 청크의 그룹(space:CLOUD)을 갖지 않아도 allowed_users 에 포함되면 접근 가능.
+    chunk = _chunk(
+        chunk_id="a" * 40,
+        allowed_groups=["space:CLOUD"],
+        allowed_users=["alice"],
+        text="alpha",
+    )
+    [d_vec] = dense.encode_passages([chunk.text])
+    [s_vec] = sparse.encode_passages([chunk.text])
+    store.upsert_chunk(TITLE_POOL, chunk, version_number=1, dense_vector=d_vec, sparse_vector=s_vec)
+
+    [q_vec] = dense.encode_passages(["alpha"])
+    # 그룹은 비어 있고(allowed_groups 매칭 없음) user_id 로만 매칭되는 실제 운영 필터.
+    acl_filter = build_acl_filter("alice", [])
+    hits = store.search(TITLE_POOL, acl_filter=acl_filter, dense_vector=q_vec)
+    assert {hit.chunk_id for hit in hits} == {"a" * 40}, (
+        "그룹이 없어도 allowed_users 에 포함된 사용자는 접근 가능해야 한다"
+    )
+
+
+def test_search_per_user_isolation_within_same_space(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    # 같은 스페이스(space:CLOUD) 안에서도 페이지 단위로 사용자가 분리되는지 — 핵심 증명.
+    # 두 청크는 동일 텍스트라 벡터 점수는 동일, ACL 만이 결과를 가른다.
+    alice_chunk = _chunk(
+        chunk_id="a" * 40,
+        page_id="PAGE-ALICE",
+        allowed_groups=["space:CLOUD"],
+        allowed_users=["alice"],
+        text="alpha",
+    )
+    bob_chunk = _chunk(
+        chunk_id="b" * 40,
+        page_id="PAGE-BOB",
+        allowed_groups=["space:CLOUD"],
+        allowed_users=["bob"],
+        text="alpha",
+    )
+    items = [
+        (chunk, 1, dense.encode_passages([chunk.text])[0], sparse.encode_passages([chunk.text])[0])
+        for chunk in (alice_chunk, bob_chunk)
+    ]
+    store.upsert_chunks_batch(TITLE_POOL, items)
+
+    [q_vec] = dense.encode_passages(["alpha"])
+    # 두 사용자 모두 space:CLOUD 그룹은 없고 user_id 로만 매칭된다 → 페이지 단위 격리.
+    alice_hits = store.search(
+        TITLE_POOL, acl_filter=build_acl_filter("alice", []), dense_vector=q_vec
+    )
+    bob_hits = store.search(TITLE_POOL, acl_filter=build_acl_filter("bob", []), dense_vector=q_vec)
+    assert {hit.chunk_id for hit in alice_hits} == {"a" * 40}, "alice 는 자신 페이지만 본다"
+    assert {hit.chunk_id for hit in bob_hits} == {"b" * 40}, "bob 는 자신 페이지만 본다"
+
+
+def test_search_excludes_user_absent_from_groups_and_users(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    # allowed_users 도입이 ACL 을 약화시키지 않음 — 그룹·사용자 어디에도 없으면 0건.
+    chunk = _chunk(
+        chunk_id="a" * 40,
+        allowed_groups=["space:CLOUD"],
+        allowed_users=["alice"],
+        text="alpha",
+    )
+    [d_vec] = dense.encode_passages([chunk.text])
+    [s_vec] = sparse.encode_passages([chunk.text])
+    store.upsert_chunk(TITLE_POOL, chunk, version_number=1, dense_vector=d_vec, sparse_vector=s_vec)
+
+    [q_vec] = dense.encode_passages(["alpha"])
+    # carol 은 다른 스페이스 그룹만 갖고 allowed_users 에도 없다 → 접근 차단.
+    acl_filter = build_acl_filter("carol", ["space:OTHER"])
+    hits = store.search(TITLE_POOL, acl_filter=acl_filter, dense_vector=q_vec)
+    assert hits == [], "그룹·allowed_users 어디에도 없는 사용자는 접근 불가"
+
+
+def test_search_group_path_still_grants_when_user_has_space_group(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    # OR 의미 보존 — 그룹 경로(대안 A)는 allowed_users 와 무관하게 그대로 동작.
+    alice_chunk = _chunk(
+        chunk_id="a" * 40, allowed_groups=["space:CLOUD"], allowed_users=["alice"], text="alpha"
+    )
+    bob_chunk = _chunk(
+        chunk_id="b" * 40, allowed_groups=["space:CLOUD"], allowed_users=["bob"], text="alpha"
+    )
+    items = [
+        (chunk, 1, dense.encode_passages([chunk.text])[0], sparse.encode_passages([chunk.text])[0])
+        for chunk in (alice_chunk, bob_chunk)
+    ]
+    store.upsert_chunks_batch(TITLE_POOL, items)
+
+    [q_vec] = dense.encode_passages(["alpha"])
+    # space:CLOUD 그룹 보유자는 user_id 와 무관하게 두 청크 모두 본다(그룹 경로 OR).
+    acl_filter = build_acl_filter("dave", ["space:CLOUD"])
+    hits = store.search(TITLE_POOL, acl_filter=acl_filter, dense_vector=q_vec)
+    assert {hit.chunk_id for hit in hits} == {"a" * 40, "b" * 40}, (
+        "space 그룹 보유자는 그룹 경로로 두 청크 모두 접근 (OR 의미 유지)"
+    )
 
 
 # --- 검색: dense / sparse / 분기 ---
