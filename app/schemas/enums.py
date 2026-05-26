@@ -67,6 +67,19 @@ class VerificationStatus(StrEnum):
     NOT_SUPPORTED = "NOT_SUPPORTED"
 
 
+class VerificationResult(StrEnum):
+    """답변 전체의 집계 검증 결과 — SSE ``verification`` 이벤트 ``verificationResult``.
+
+    문장별 ``VerificationStatus`` 를 BE 통합 스펙(``api-spec-BE-adjust.md`` §1-1)에 맞춰
+    단일 값으로 집계한 결과다. ``PARTIALLY_SUPPORTED`` 는 문장 단위에는 없고 집계에만
+    존재한다(``docs/api-spec.md`` "verification" 집계 규칙).
+    """
+
+    SUPPORTED = "SUPPORTED"
+    PARTIALLY_SUPPORTED = "PARTIALLY_SUPPORTED"
+    NOT_SUPPORTED = "NOT_SUPPORTED"
+
+
 class IngestionStage(StrEnum):
     """Ingestion 처리 단계 — ingestion_jobs.stage (db-schema.md §2.3)."""
 

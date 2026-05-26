@@ -7024,3 +7024,56 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   - Mac/3.11 환경에서 `./scripts/test.sh`·`./scripts/verify.sh` 전체 pytest 실행 확인 후 커밋·push.
   - feature13 코드 마이그레이션(/ml/query·새 SSE 형식) 반영 시 status `data`(엔드포인트·필드)
     정렬 + FE에 phase 목록·형식 핸드오프.
+
+## 2026-05-26 — feature13 (PDF #2): /ml/query 코드 마이그레이션
+
+- 목표: BE 통합 스펙(`api-spec-BE-adjust.md` §2-1)의 목표 계약을 코드에 반영. 결정 2건 —
+  **(1) 엔드포인트 `/ml/query` 완전 전환**(기존 `/api/v1/rag/query` 제거), **(2) spaceKey
+  passthrough**(RagState 보관만, 검색 필터 반영은 후속).
+- 수정 파일:
+  - `app/api/routes.py` — 엔드포인트 `/ml/query`. `QueryRequest` 재정의: question / userId /
+    groups / spaceKey / conversationId / history[{role,content}] / accessToken? / cloudId? /
+    stream (camelCase alias + `populate_by_name`). `extract_principal(jwt)` 호출 제거 →
+    userId/groups 직접 사용. SSE: `_token_event`(`{"content"}`) / sources `{"sources":[...]}`
+    래핑 / verification 집계(`VerificationSummary`) / done `{}` / `meta` 송신 제거 / 오류는
+    `_error_event`(SSE `error`)로 전달(HTTP 에러 JSON 대신). streaming/비-streaming 양 경로
+    예외를 SSE error로 흡수. feature19 status·feature15 Rate Limit fallback 흐름은 유지.
+  - `app/schemas/response.py` — `Source`에 page_id/space_id/space_name + `to_bff_payload`
+    (relevanceScore=score/100, updatedAt KST(+09:00), 필드 rename). `VerificationSummary`
+    + `from_sentences`(NOT_SUPPORTED>0.5→NOT_SUPPORTED / ≥1→PARTIALLY_SUPPORTED / else
+    SUPPORTED, 0건→NOT_SUPPORTED·0.0) + `to_bff_payload`. `feedback_enabled`는 내부 유지.
+  - `app/schemas/enums.py` — `VerificationResult` 집계 enum 신설(문장별 `VerificationStatus`
+    무변경). `app/schemas/rag_state.py` — `space_key` 필드. `app/api/errors.py` —
+    `ML_SERVER_ERROR`. `app/schemas/__init__.py`·`app/(api/)__init__.py` 독스트링/re-export 정합.
+  - 테스트: `tests/api/test_query_route.py` 신규 계약으로 재작성(엔드포인트·body·token JSON·
+    sources 래핑·verification 집계·done `{}`·meta 제거·UNAUTHORIZED JWT 테스트 삭제).
+    `tests/schemas/test_response.py` — `to_bff_payload`/`from_sentences` 단위 테스트 7건 추가.
+  - 문서: `docs/api-spec.md` 변경이력에 "코드 마이그레이션 완료" 추가. `docs/ai/current-plan.md`
+    feature13 PDF #2 체크 + 헤더 갱신.
+- 범위 밖: `accessToken`/`cloudId`(3단계 — 수신만), `extract_principal`(acl.py 테스트 유틸로
+  보존, 라우트만 사용 중단), spaceKey 검색 필터 반영, PDF #3(ACL 컬럼 — BE 대기).
+- 실행 명령: `ruff check`(변경 파일) All checks passed / `py_compile` 전 파일 통과. pytest는
+  본 샌드박스가 Python 3.10(StrEnum 3.11+ 미지원)이라 in-process 실행 제약 — Mac/3.11에서
+  `./scripts/test.sh`·`./scripts/verify.sh` 실행 확인 후 커밋·push (feature19 세션과 동일 제약).
+- 수정하지 않은 파일: `app/pipeline/*`(그래프 구조), `app/query/acl.py`(build_acl_filter 정합
+  유지), vendoring agent 패키지.
+- 남은 TODO: Mac 전체 pytest/verify 통과 확인 → 커밋·push. feature19 status `data` 는 현재
+  코드가 이미 /ml/query 이벤트와 정합(엔드포인트 전환 완료).
+
+### 2026-05-26 추가 — api-spec v2.2.0 대조 정합
+
+사용자가 최신 `api-spec.md`(v2.2.0, LINA 전체 스펙)를 전달. 초기 마이그레이션이 따랐던
+`api-spec-BE-adjust`(05-21)와 3건 차이 확인 후 정합:
+
+- **`meta` 이벤트 유지** — v2.2.0 §1-1 은 meta 를 "현재 구현 호환용"으로 유지(FE 가
+  `meta.title` 로 대화 제목 갱신)하고 제거는 *예정* 단계. 초기 마이그레이션이 한발 앞서
+  제거한 것을 되돌림. `_sse_payload` 에 meta 재추가(intent/used_llm/feedback_enabled/
+  latency_ms). `title` 은 ML 생성기가 만들지 않아 생략(스펙 optional). 시퀀스 5종 복귀.
+- **sources `updatedAt` → `sourceUpdatedAt`** — v2.2.0 §1-1/§1-2 필드명 정합
+  (`Source.to_bff_payload`).
+- **`accessToken`/`cloudId` 제거** — v2.2.0 에서 `/ml/query` 는 라이브 Confluence 호출이
+  없어 토큰 불필요, 수집(`/ml/ingest`)으로 이관. `QueryRequest` 에서 두 필드 제거.
+- 테스트(`test_query_route.py` 이벤트 시퀀스·sources 필드, `test_response.py` sourceUpdatedAt)
+  + docs/api-spec.md 동반 정합. ruff/py_compile 통과. (pytest 는 Mac/3.11 에서 확인)
+- **남은 정합 TODO**: `docs/sse-frontend-contract.md` 는 구 라우트(`/api/v1/rag/query`,
+  평문 token) 기준이라 마이그레이션 후 stale — FE 핸드오프 갱신 또는 v2.2.0 으로 대체 결정 필요.

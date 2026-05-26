@@ -15,7 +15,7 @@ docs/db-schema.md, docs/api-spec.md.
     │   └── chunker/     Adaptive Chunker (본문 6유형 + 첨부 3유형)
     ├── query/           Query 파이프라인 (ACL → 히스토리 → 라우터 → 검색 → 생성 → 검증 → 포맷)
     ├── pipeline/        LangGraph 그래프 조립 (Ingestion / Query 그래프)
-    └── api/             FastAPI 앱 및 라우트 (POST /api/v1/rag/query, SSE)
+    └── api/             FastAPI 앱 및 라우트 (POST /ml/query, SSE)
 
 구현은 docs/ai/current-plan.md의 Plan 확정 후 feature 단위로 진행한다 (루트 CLAUDE.md: Plan 우선).
 """

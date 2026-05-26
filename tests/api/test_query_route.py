@@ -1,12 +1,20 @@
-"""POST /api/v1/rag/query — httpx ASGITransport 통합 테스트.
+"""POST /ml/query — httpx ASGITransport 통합 테스트.
 
-본 테스트는 FastAPI 라우트가 (1) SSE 이벤트 5종 시퀀스를 정확히 송신하고, (2) JWT
-추출 실패 / 표준 분기 응답 / 예외 매핑을 api-spec.md 정합으로 처리하는지를 in-process
-httpx 클라이언트로 검증한다. 외부 컨테이너·모델 없이 동작 — :memory: Qdrant + Fake
-everything + samples 자동 인덱싱 기본값을 활용한다.
+본 테스트는 FastAPI 라우트가 (1) SSE 이벤트 5종 시퀀스(token/sources/verification/meta/done)를
+정확히 송신하고, (2) 표준 분기 응답 / 예외 → SSE error 이벤트 매핑을 api-spec.md(BE 통합
+스펙 /ml/query) 정합으로 처리하는지를 in-process httpx 클라이언트로 검증한다. 외부
+컨테이너·모델 없이 동작 — :memory: Qdrant + Fake everything + samples 자동 인덱싱 기본값을
+활용한다.
+
+feature13 마이그레이션 정합 (api-spec v2.2.0):
+  - 엔드포인트 ``/ml/query`` (구 ``/api/v1/rag/query`` 대체).
+  - 요청 본문 ``question``/``userId``/``groups``/``spaceKey``/``conversationId``/``history``
+    (구 ``query``/``jwt`` 대체 — JWT 미수신, userId/groups 직접 전달).
+  - SSE: ``token``=``{"content": ...}``, ``sources``=``{"sources": [...]}``(sourceUpdatedAt),
+    ``verification``=집계 ``{"confidenceScore", "verificationResult"}``, ``meta``(현재 구현
+    호환용 — title 생략), ``done``=``{}``.
 """
 
-import base64
 import json
 import warnings
 from datetime import datetime
@@ -31,19 +39,33 @@ from app.storage.qdrant_client import QdrantPoolStore
 warnings.filterwarnings("ignore", message="Payload indexes have no effect.*")
 
 
-# --- JWT 헬퍼 (서명 미검증 — 본 파이프라인은 클레임 추출만 한다) ---
+# --- 요청 본문 / SSE 파싱 헬퍼 ---
 
 
-def _make_jwt(sub: str = "taesung", groups: list[str] | None = None) -> str:
-    """base64url JWT 페이로드만 채운 stub. 서명은 BFF 책임이므로 임의 문자열로 둔다."""
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode("ascii")
-    payload_dict = {"sub": sub, "groups": groups or ["space:CLOUD"]}
-    payload = (
-        base64.urlsafe_b64encode(json.dumps(payload_dict).encode("utf-8"))
-        .rstrip(b"=")
-        .decode("ascii")
-    )
-    return f"{header}.{payload}.signature"
+def _body(
+    *,
+    question: str = "alpha",
+    user_id: str = "taesung",
+    groups: list[str] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """``POST /ml/query`` 요청 본문(BE 통합 스펙)을 만든다.
+
+    JWT 미수신 — BFF가 추출한 ``userId``/``groups``를 직접 전달한다. 기본 groups 는
+    인덱싱된 청크의 ``allowed_groups``(``space:CLOUD``)와 일치시켜 ACL 통과시킨다.
+    """
+    payload: dict[str, Any] = {
+        "question": question,
+        "userId": user_id,
+        "groups": groups if groups is not None else ["space:CLOUD"],
+    }
+    payload.update(extra)
+    return payload
+
+
+def _content(token_data: str) -> str:
+    """token 이벤트 data(``{"content": ...}`` JSON) → content 문자열."""
+    return json.loads(token_data)["content"]
 
 
 # --- 테스트용 그래프 픽스처 (lifespan 우회 + 작은 인메모리 데이터) ---
@@ -156,9 +178,8 @@ def _parse_sse(body: str) -> list[tuple[str, str]]:
 @pytest.mark.asyncio
 async def test_query_route_emits_full_sse_sequence(populated_graph: Any) -> None:
     """정상 흐름: token → sources → verification → meta → done 5개 이벤트 시퀀스."""
-    body = {"query": "alpha", "jwt": _make_jwt()}
     async with _client(populated_graph) as client:
-        resp = await client.post("/api/v1/rag/query", json=body)
+        resp = await client.post("/ml/query", json=_body())
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
 
@@ -166,17 +187,42 @@ async def test_query_route_emits_full_sse_sequence(populated_graph: Any) -> None
     event_names = [name for name, _ in events]
     assert event_names == ["token", "sources", "verification", "meta", "done"]
 
-    # sources 페이로드는 JSON 배열 — api-spec.md 정합.
-    sources = json.loads(dict(events)["sources"])
-    assert isinstance(sources, list)
-    assert all(0 <= source["score"] <= 100 for source in sources)
+    # token 페이로드는 {"content": ...} JSON.
+    assert isinstance(_content(dict(events)["token"]), str)
 
-    # meta 페이로드 — intent / used_llm / feedback_enabled / latency_ms.
+    # sources 페이로드는 {"sources": [...]} 래핑 — relevanceScore 0~1.
+    sources = json.loads(dict(events)["sources"])["sources"]
+    assert isinstance(sources, list)
+    assert all(0 <= source["relevanceScore"] <= 1 for source in sources)
+    # BE sources 항목 필드(api-spec v2.2.0 정합 — sourceUpdatedAt).
+    for source in sources:
+        assert {
+            "title",
+            "pageId",
+            "spaceId",
+            "spaceName",
+            "url",
+            "sourceUpdatedAt",
+        } <= source.keys()
+
+    # verification 페이로드는 집계 {"confidenceScore", "verificationResult"}.
+    verification = json.loads(dict(events)["verification"])
+    assert 0 <= verification["confidenceScore"] <= 1
+    assert verification["verificationResult"] in {
+        "SUPPORTED",
+        "PARTIALLY_SUPPORTED",
+        "NOT_SUPPORTED",
+    }
+
+    # meta 페이로드 — 현재 구현 호환용(intent/used_llm/feedback_enabled/latency_ms).
     meta = json.loads(dict(events)["meta"])
     assert meta["intent"] == "운영가이드"
     assert meta["used_llm"] == "gpt-4o"
     assert isinstance(meta["feedback_enabled"], bool)
     assert meta["latency_ms"] >= 0
+
+    # done 은 빈 객체 {} (messageId 는 BFF 주입).
+    assert json.loads(dict(events)["done"]) == {}
 
 
 # --- RETRIEVAL_EMPTY 표준 분기 ---
@@ -187,43 +233,15 @@ async def test_query_route_retrieval_empty_returns_standard_message(
     empty_graph: Any,
 ) -> None:
     """청크 0건이면 200 SSE 정상 응답으로 표준 메시지를 송신한다 (api-spec.md 분기)."""
-    body = {"query": "anything", "jwt": _make_jwt()}
     async with _client(empty_graph) as client:
-        resp = await client.post("/api/v1/rag/query", json=body)
+        resp = await client.post("/ml/query", json=_body(question="anything"))
     assert resp.status_code == 200
     events = dict(_parse_sse(resp.text))
-    assert "권한 범위" in events["token"]
-    assert json.loads(events["sources"]) == []
-    meta = json.loads(events["meta"])
-    assert meta["feedback_enabled"] is False
-
-
-# --- UNAUTHORIZED (JWT 추출 실패) ---
-
-
-@pytest.mark.asyncio
-async def test_query_route_invalid_jwt_returns_401(populated_graph: Any) -> None:
-    """JWT 형식이 깨지면 401 UNAUTHORIZED Error Response (api-spec.md)."""
-    body = {"query": "q", "jwt": "not-a-jwt"}
-    async with _client(populated_graph) as client:
-        resp = await client.post("/api/v1/rag/query", json=body)
-    assert resp.status_code == 401
-    payload = resp.json()
-    assert payload["success"] is False
-    assert payload["error"]["code"] == "UNAUTHORIZED"
-
-
-@pytest.mark.asyncio
-async def test_query_route_missing_sub_returns_401(populated_graph: Any) -> None:
-    """sub 클레임이 없으면 401 UNAUTHORIZED."""
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode("ascii")
-    payload_b = base64.urlsafe_b64encode(b'{"groups":["space:CLOUD"]}').rstrip(b"=").decode("ascii")
-    jwt = f"{header}.{payload_b}.sig"
-    body = {"query": "q", "jwt": jwt}
-    async with _client(populated_graph) as client:
-        resp = await client.post("/api/v1/rag/query", json=body)
-    assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "UNAUTHORIZED"
+    assert "권한 범위" in _content(events["token"])
+    assert json.loads(events["sources"])["sources"] == []
+    # 검증 문장 0건 → 집계 NOT_SUPPORTED / confidence 0.0 (저신뢰 신호).
+    verification = json.loads(events["verification"])
+    assert verification["verificationResult"] == "NOT_SUPPORTED"
 
 
 # --- 요청 본문 검증 ---
@@ -233,9 +251,9 @@ async def test_query_route_missing_sub_returns_401(populated_graph: Any) -> None
 async def test_query_route_missing_required_fields_returns_422(
     populated_graph: Any,
 ) -> None:
-    """query 필드 누락 → FastAPI 기본 422 (Pydantic 검증)."""
+    """question 필드 누락 → FastAPI 기본 422 (Pydantic 검증)."""
     async with _client(populated_graph) as client:
-        resp = await client.post("/api/v1/rag/query", json={"jwt": _make_jwt()})
+        resp = await client.post("/ml/query", json={"userId": "taesung"})
     assert resp.status_code == 422
 
 
@@ -246,14 +264,13 @@ async def test_query_route_missing_required_fields_returns_422(
 async def test_query_route_acl_mismatch_yields_empty_retrieval(
     populated_graph: Any,
 ) -> None:
-    """JWT groups가 인덱싱된 청크의 allowed_groups와 일치하지 않으면 표준 메시지."""
-    body = {"query": "alpha", "jwt": _make_jwt(groups=["space:OTHER"])}
+    """groups가 인덱싱된 청크의 allowed_groups와 일치하지 않으면 표준 메시지."""
     async with _client(populated_graph) as client:
-        resp = await client.post("/api/v1/rag/query", json=body)
+        resp = await client.post("/ml/query", json=_body(groups=["space:OTHER"]))
     assert resp.status_code == 200
     events = dict(_parse_sse(resp.text))
-    assert "권한 범위" in events["token"]
-    assert json.loads(events["sources"]) == []
+    assert "권한 범위" in _content(events["token"])
+    assert json.loads(events["sources"])["sources"] == []
 
 
 # --- feature14: SSE token streaming (stream=True) 분기 ---
@@ -267,11 +284,10 @@ async def test_query_route_stream_true_falls_back_when_no_generator_provider(
 
     `_should_fallback_to_non_streaming` 회귀 — app.state.deps 가 미설정 / generator
     _provider None / settings.openai_api_key 빈 SecretStr 중 하나라도 해당하면
-    stream=True 가 무시되고 기존 run_query 흐름으로 5 이벤트 송신.
+    stream=True 가 무시되고 기존 run_query 흐름으로 4 이벤트 송신.
     """
-    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
     async with _client(populated_graph) as client:
-        resp = await client.post("/api/v1/rag/query", json=body)
+        resp = await client.post("/ml/query", json=_body(stream=True))
     assert resp.status_code == 200
     events = _parse_sse(resp.text)
     # fallback 흐름은 기존 5 이벤트 시퀀스 그대로 — token 1회 + 후행 4종.
@@ -433,7 +449,8 @@ async def test_query_route_stream_true_rate_limit_falls_back_to_fallback_model(
 
     stream_openai_answer 첫 호출 (primary_model=gpt-4o) 에서 RateLimitError raise,
     두 번째 호출 (fallback_model=gpt-4o-mini) 에서 정상 token chunk yield → 라우트가
-    정상 SSE 응답 송신 + meta.used_llm = gpt-4o-mini 노출.
+    정상 SSE 응답 송신. used_llm 다운그레이드는 내부 메트릭으로만 관측되므로(meta 제거)
+    fallback 호출 자체(call_count==2 + model 인자)로 검증한다.
     """
     # openai.RateLimitError 생성 — sentinel response/body 만 채우고 status_code=429.
     from openai import RateLimitError
@@ -475,9 +492,8 @@ async def test_query_route_stream_true_rate_limit_falls_back_to_fallback_model(
         monkeypatch=monkeypatch,
         stream_callable=_stream_with_rate_limit_then_success,
     )
-    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
     async with client as c:
-        resp = await c.post("/api/v1/rag/query", json=body)
+        resp = await c.post("/ml/query", json=_body(stream=True))
     assert resp.status_code == 200
 
     events = _parse_sse(resp.text)
@@ -486,11 +502,8 @@ async def test_query_route_stream_true_rate_limit_falls_back_to_fallback_model(
     token_payloads = [data for name, data in events if name == "token"]
     # (부분) + (빈 clear) + 정상 + [#1] = 4 회 token (또는 차단 분기 추가 1회). 최소 3회.
     assert len(token_payloads) >= 3
-    # 빈 clear token 이 송신됐다 — UI 가 부분 답변을 덮어쓸 수 있도록.
-    assert "" in token_payloads
-    # meta.used_llm 이 fallback_model (gpt-4o-mini) 로 노출 — 다운그레이드 인지.
-    meta = json.loads(dict(events)["meta"])
-    assert meta["used_llm"] == "gpt-4o-mini"
+    # 빈 clear token 이 송신됐다 (content="") — UI 가 부분 답변을 덮어쓸 수 있도록.
+    assert "" in [_content(data) for data in token_payloads]
 
 
 @pytest.mark.asyncio
@@ -509,9 +522,8 @@ async def test_query_route_stream_true_emits_multiple_token_chunks(
         monkeypatch=monkeypatch,
         streaming_tokens=streaming_tokens,
     )
-    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
     async with client as c:
-        resp = await c.post("/api/v1/rag/query", json=body)
+        resp = await c.post("/ml/query", json=_body(stream=True))
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
 
@@ -519,17 +531,13 @@ async def test_query_route_stream_true_emits_multiple_token_chunks(
     # token 이벤트는 streaming_tokens 갯수 이상 (검증 차단 분기에서 1회 더 송신 가능).
     token_count = sum(1 for name, _ in events if name == "token")
     assert token_count >= len(streaming_tokens)
-    # token 데이터 누적은 streaming_tokens 의 순서를 보존한다.
-    token_payloads = [data for name, data in events if name == "token"]
-    assert token_payloads[: len(streaming_tokens)] == streaming_tokens
+    # token content 누적은 streaming_tokens 의 순서를 보존한다.
+    token_contents = [_content(data) for name, data in events if name == "token"]
+    assert token_contents[: len(streaming_tokens)] == streaming_tokens
     # 후행 이벤트 시퀀스 정합 — sources / verification / meta / done.
-    # feature19 — status 이벤트가 추가됐으므로 token/status 를 제외하고 단언한다
-    # (기존 5개 이벤트의 이름·순서·형식 무회귀 확인).
+    # feature19 — status 이벤트가 추가됐으므로 token/status 를 제외하고 단언한다.
     trailing_names = [name for name, _ in events if name not in ("token", "status")]
     assert trailing_names == ["sources", "verification", "meta", "done"]
-    # meta payload — used_llm 이 generator_config.model 정합 (gpt-4o → GPT_4O).
-    meta = json.loads(dict(events)["meta"])
-    assert meta["used_llm"] == "gpt-4o"
 
 
 # --- feature19: SSE 진행 status 이벤트 ---
@@ -560,9 +568,8 @@ async def test_query_route_stream_status_phases_in_order(
         monkeypatch=monkeypatch,
         streaming_tokens=streaming_tokens,
     )
-    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
     async with client as c:
-        resp = await c.post("/api/v1/rag/query", json=body)
+        resp = await c.post("/ml/query", json=_body(stream=True))
     assert resp.status_code == 200
 
     events = _parse_sse(resp.text)
@@ -597,9 +604,8 @@ async def test_query_route_stream_status_ordering_relative_to_token_and_trailing
         monkeypatch=monkeypatch,
         streaming_tokens=streaming_tokens,
     )
-    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
     async with client as c:
-        resp = await c.post("/api/v1/rag/query", json=body)
+        resp = await c.post("/ml/query", json=_body(stream=True))
     assert resp.status_code == 200
 
     events = _parse_sse(resp.text)
@@ -631,9 +637,8 @@ async def test_query_route_stream_status_phases_shortened_on_empty_retrieval(
         streaming_tokens=["답변"],
         indexed=False,
     )
-    body = {"query": "anything", "jwt": _make_jwt(), "stream": True}
     async with client as c:
-        resp = await c.post("/api/v1/rag/query", json=body)
+        resp = await c.post("/ml/query", json=_body(question="anything", stream=True))
     assert resp.status_code == 200
 
     events = _parse_sse(resp.text)
@@ -644,27 +649,26 @@ async def test_query_route_stream_status_phases_shortened_on_empty_retrieval(
     assert "answering" not in phases
     assert "streaming" not in phases
     assert "verifying" not in phases
-    # 표준 RETRIEVAL_EMPTY 메시지 + 기존 5개 이벤트는 그대로 송신된다.
+    # 표준 RETRIEVAL_EMPTY 메시지 + 후행 이벤트는 그대로 송신된다.
     by_name = dict(events)
-    assert "권한 범위" in by_name["token"]
-    assert json.loads(by_name["sources"]) == []
+    assert "권한 범위" in _content(by_name["token"])
+    assert json.loads(by_name["sources"])["sources"] == []
 
 
 @pytest.mark.asyncio
-async def test_query_route_stream_existing_five_events_unchanged_with_status(
+async def test_query_route_stream_core_events_unchanged_with_status(
     populated_graph: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """기존 5개 이벤트(token/sources/verification/meta/done) 무회귀 — status 를 무시하면
-    token 누적·후행 이벤트가 feature19 이전과 동일하다(feature19)."""
+    """핵심 이벤트(token/sources/verification/meta/done) 무회귀 — status 를 무시하면
+    token 누적·후행 이벤트가 feature19 status 추가 전과 동일하다(feature19)."""
     streaming_tokens = ["답변", "시작", "[#1]"]
     client = _streaming_client(
         populated_graph,
         monkeypatch=monkeypatch,
         streaming_tokens=streaming_tokens,
     )
-    body = {"query": "alpha", "jwt": _make_jwt(), "stream": True}
     async with client as c:
-        resp = await c.post("/api/v1/rag/query", json=body)
+        resp = await c.post("/ml/query", json=_body(stream=True))
     assert resp.status_code == 200
 
     events = _parse_sse(resp.text)
@@ -674,8 +678,8 @@ async def test_query_route_stream_existing_five_events_unchanged_with_status(
     # token 다중 + 후행 4종 — status 추가 전과 동일한 5개 이벤트 종류·순서.
     assert non_status_names[: len(streaming_tokens)] == ["token"] * len(streaming_tokens)
     assert non_status_names[-4:] == ["sources", "verification", "meta", "done"]
-    # token 누적은 streaming_tokens 순서를 보존한다.
-    token_payloads = [data for name, data in non_status if name == "token"]
-    assert token_payloads[: len(streaming_tokens)] == streaming_tokens
-    # done 은 빈 data.
-    assert non_status[-1] == ("done", "")
+    # token content 누적은 streaming_tokens 순서를 보존한다.
+    token_contents = [_content(data) for name, data in non_status if name == "token"]
+    assert token_contents[: len(streaming_tokens)] == streaming_tokens
+    # done 은 빈 객체 {}.
+    assert non_status[-1] == ("done", "{}")
