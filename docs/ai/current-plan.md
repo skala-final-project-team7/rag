@@ -28,8 +28,8 @@
 
 ### 미정 (TBD) — 기록 후 후속 단계에서 해소
 
-- [~] **PoC 샘플 데이터의 ACL 출처** — `JsonFixtureSourceAdapter`는 PoC 임시 방편으로 `space_key` 기반 ACL을 합성한다(`allowed_groups = ["space:{space_key}"]`, `_synthesize_acl`). 실제 ACL 연동(Confluence content restrictions 또는 별도 mock 주입) 방식은 여전히 미정 — `AtlassianSourceAdapter` 구현 시 또는 백엔드 협의 후 `_synthesize_acl`만 교체
-- [ ] **`access_token`/`cloudid` 전달 경로** — Authorization Server(Spring) → ML 파이프라인 전달 방식(요청 헤더 / 내부 호출) 미정. `AtlassianSourceAdapter` 착수 전 백엔드와 확정. RAG 코어 코드(feature1·2 일부·3·4 등)는 이 결정과 무관하게 선행 진행
+- [x] **PoC ACL 모델 — 결정됨 (ADR 0003 항목 1)**: (A) `space_key` 합성 확정(ADR 0002 `space:` prefix). `JsonFixtureSourceAdapter._synthesize_acl`(`allowed_groups = ["space:{space_key}"]`)과 ingestion `synthesize_space_acl`, rag `build_acl_filter`(검색 seam)가 정합. (B) content restrictions 도입은 보류(명세 외, 별도 ADR) — 도입 시 `build_acl_filter`/`_synthesize_acl`만 교체 + 재색인. `docs/adr/0003-ingestion-rag-shared-contracts.md` 참조
+- [x] **`access_token`/`cloudid` 전달 경로 — ingestion↔rag 합의 불필요(Auth/BFF 소관, ADR 0003)**: Authorization Server(Spring)→BFF→ML 전달 방식은 두 ML 레포 간 결정 대상이 아니다. RAG 코어 코드는 이 결정과 무관하게 선행 진행(rag는 JWT 발급/검증 없이 추출만)
 - [ ] **PageObject 계약 동결** — `attachments[]` 등 스펙 동결 (`docs/rag-pipeline-design.md` §7.1)
 
 ---
