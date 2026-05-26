@@ -19,6 +19,26 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 
 ---
 
+## 2026-05-26 — ADR 0003 항목 4 적용: soft_delete 도입 (승인됨)
+
+- 브랜치: `feat/#NN/soft-delete` 제안
+- 변경 사항: ADR 0003 항목 4(승인 필요 항목)를 사용자 승인 후 적용. payload soft-delete 플래그 +
+  검색 제외 필터를 공유 계약에 도입.
+  - `app/ingestion/vector_store.py`(공유): `build_point_payload`에 `is_deleted: False` 추가.
+  - `app/storage/qdrant_client.py`(공유): `is_deleted` BOOL payload 인덱스, 검색 결합 필터에
+    `must_not(is_deleted=true)`, `soft_delete_by_page_id`/`soft_delete_by_attachment_id`
+    (`set_payload`) 추가. hard delete 보존. ingestion에 바이트 동일 미러.
+  - `tests/storage/test_qdrant_client.py`: soft_delete 검색 제외 + Point 보존(count 불변), 첨부
+    soft_delete, 미삭제 청크 정상 검색 테스트 추가.
+  - `tests/ingestion/test_vector_store.py`: `is_deleted` 기본 False 단언.
+  - `docs/db-schema.md` §1.2(is_deleted 행)·§1.3(bool 인덱스), `docs/adr/0003` 항목 4 "적용됨".
+- 영향: rag 검색이 이제 `is_deleted=true` Point를 항상 제외(legacy 필드 부재는 미삭제 통과). **양
+  레포 동시 배포** 필요. 기존 인덱스는 재색인/백필 시 `is_deleted` 채움.
+- 실행 명령 / 테스트 결과: 샌드박스(3.10) pytest 불가 → ruff+py_compile 통과 + 공유 자산 바이트
+  동일 확인. `./scripts/verify.sh`는 Mac(3.11)에서 수행 필요(특히 `:memory:` Qdrant soft_delete 검색).
+- 남은 TODO: 삭제 트리거(Delta Sync/Trash/Webhook → `soft_delete_by_*`) 실배선은 Sync Worker 운영
+  wiring 후속. ADR 0003 항목 3·4 적용 완료로 승인 대기 항목 없음.
+
 ## 2026-05-26 — ADR 0003 항목 3 적용: IngestionStage.CRAWL 추가 (승인됨)
 
 - 브랜치: `feat/#NN/ingestion-stage-crawl` 제안

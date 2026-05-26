@@ -446,6 +446,67 @@ def test_delete_by_attachment_id_removes_matching(
     assert {hit.chunk_id for hit in hits} == {"a" * 40}
 
 
+# --- Soft delete (ADR 0003 항목 4) ---
+
+
+def test_soft_delete_by_page_id_excludes_from_search_but_keeps_point(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    keep = _chunk(chunk_id="a" * 40, page_id="P1", chunk_index=0, text="alpha")
+    drop = _chunk(chunk_id="b" * 40, page_id="P2", chunk_index=1, text="alpha")
+    items = [
+        (chunk, 1, dense.encode_passages([chunk.text])[0], sparse.encode_passages([chunk.text])[0])
+        for chunk in (keep, drop)
+    ]
+    store.upsert_chunks_batch(CONTENT_POOL, items)
+
+    store.soft_delete_by_page_id("P2")
+
+    [q_vec] = dense.encode_passages(["alpha"])
+    hits = store.search(CONTENT_POOL, acl_filter=_acl_for(["space:CLOUD"]), dense_vector=q_vec)
+    # soft-deleted(P2) 는 검색에서 제외, P1 만 남는다.
+    assert {hit.chunk_id for hit in hits} == {"a" * 40}
+    # 그러나 Point 자체는 보존된다(hard delete 와 차이) — count 불변.
+    settings = _settings()
+    assert store._client.count(settings.qdrant_content_pool).count == 2
+
+
+def test_soft_delete_by_attachment_id_excludes_only_attachment(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    body = _chunk(chunk_id="a" * 40, page_id="P1", chunk_index=0, text="alpha")
+    attach = _chunk(
+        chunk_id="b" * 40, page_id="P1", attachment_id="ATT-1", chunk_index=1, text="alpha"
+    )
+    items = [
+        (chunk, 1, dense.encode_passages([chunk.text])[0], sparse.encode_passages([chunk.text])[0])
+        for chunk in (body, attach)
+    ]
+    store.upsert_chunks_batch(CONTENT_POOL, items)
+
+    store.soft_delete_by_attachment_id("ATT-1")
+
+    [q_vec] = dense.encode_passages(["alpha"])
+    hits = store.search(CONTENT_POOL, acl_filter=_acl_for(["space:CLOUD"]), dense_vector=q_vec)
+    assert {hit.chunk_id for hit in hits} == {"a" * 40}
+
+
+def test_not_deleted_chunks_remain_searchable(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    # is_deleted=False(기본) 청크는 must_not 제외에 걸리지 않고 정상 검색된다.
+    chunk = _chunk(chunk_id="a" * 40, text="alpha")
+    [d_vec] = dense.encode_passages([chunk.text])
+    [s_vec] = sparse.encode_passages([chunk.text])
+    store.upsert_chunk(
+        CONTENT_POOL, chunk, version_number=1, dense_vector=d_vec, sparse_vector=s_vec
+    )
+
+    hits = store.search(CONTENT_POOL, acl_filter=_acl_for(["space:CLOUD"]), dense_vector=d_vec)
+    assert {hit.chunk_id for hit in hits} == {"a" * 40}
+    assert hits[0].payload["is_deleted"] is False
+
+
 # --- 모든 Pool 의 통합 (POOL_NAMES 회귀 보호) ---
 
 
