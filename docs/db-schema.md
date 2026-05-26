@@ -117,7 +117,7 @@ payload 필드로 복원한다.
 |---|---|---|
 | `page_id` | string | 대상 페이지 |
 | `attachment_id` | string \| null | 대상 첨부 (본문 잡은 null) |
-| `stage` | string | `analyze` / `chunk` / `embed` / `upsert` / `sync` (`IngestionStage` enum). 수집(crawl) 단계 값은 현재 enum에 없어 ingestion의 crawl 잡 기록은 보류 중 — `CRAWL` 추가는 **ADR 0003 항목 3**(양 레포 동시 갱신·배포 = 승인 필요)에서 다룬다 |
+| `stage` | string | `crawl` / `analyze` / `chunk` / `embed` / `upsert` / `sync` (`IngestionStage` enum). `crawl` 은 수집 단계로 **ADR 0003 항목 3**으로 추가됨(ingestion↔rag 공유 enum, 양 레포 동시 갱신). ingestion `crawler.run_full_crawl` 가 `jobs` 주입 시 페이지별 CRAWL SUCCESS 를 기록한다 |
 | `status` | string | 정상 또는 예외 코드 (`PARTIAL_PARSE`, `INVALID_ACL`, `ATTACH_ENCRYPTED`, `UNSUPPORTED_ATTACH_TYPE`, `LOW_QUALITY_ATTACH`, `ATTACH_NO_HEADER`, `OVERSIZE_ATOMIC`, `TOKENIZER_FAIL` 등 — `docs/chunking-strategy.md` §8) |
 | `started_at` / `finished_at` | datetime | 처리 구간 |
 | `error` | string \| null | 실패 상세 |
