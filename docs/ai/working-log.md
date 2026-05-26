@@ -19,6 +19,20 @@ RAG Pipeline 작업 이력을 시간순으로 기록한다.
 
 ---
 
+## 2026-05-26 — ADR 0003 항목 3 적용: IngestionStage.CRAWL 추가 (승인됨)
+
+- 브랜치: `feat/#NN/ingestion-stage-crawl` 제안
+- 변경 사항: ADR 0003 항목 3(승인 필요 항목)을 사용자 승인 후 적용. 공유 enum에 수집 단계 추가.
+  - `app/schemas/enums.py`(공유, owning source=rag): `IngestionStage`에 `CRAWL = "crawl"` 추가.
+    ingestion에 바이트 동일 미러.
+  - `tests/schemas/test_enums.py`: `IngestionStage` 멤버 동치 assert에 `crawl` 추가.
+  - `docs/db-schema.md` §2.3 `stage` 설명에 `crawl` 반영, `docs/adr/0003` 항목 3 상태 "적용됨".
+  - rag 검색·payload에는 영향 없음(stage는 ingestion_jobs 기록용). 단 `IngestionStage(value)` 역파싱
+    경로가 있으면 새 값 `"crawl"`을 인식하도록 **양 레포 동시 배포** 필요.
+- 실행 명령 / 테스트 결과: 샌드박스(3.10) pytest 불가 → ruff+py_compile 통과. `./scripts/verify.sh`는
+  Mac(3.11)에서 수행 필요(특히 `tests/schemas/test_enums.py`).
+- 남은 TODO: ADR 0003 항목 4(soft_delete)는 별도 change-set로 진행 — rag 검색 `must_not` 필터 포함.
+
 ## 2026-05-26 — ingestion↔rag 공유 계약 합의 (ADR 0003)
 
 - 브랜치: (문서 전용) `docs/#NN/ingestion-rag-shared-contracts` 제안

@@ -46,7 +46,14 @@ def test_verification_status_values() -> None:
 
 
 def test_ingestion_stage_values() -> None:
-    assert {s.value for s in IngestionStage} == {"analyze", "chunk", "embed", "upsert", "sync"}
+    assert {s.value for s in IngestionStage} == {
+        "crawl",
+        "analyze",
+        "chunk",
+        "embed",
+        "upsert",
+        "sync",
+    }
 
 
 def test_ingestion_status_includes_exception_codes() -> None:
