@@ -143,6 +143,17 @@ Cross-Encoder: `cross-encoder/ms-marco-MiniLM-L-12` · LLM: GPT-4o(생성) / GPT
 | 사용자 만족도 (피드백) | 긍정 60% 이상 | 긍정 80% 이상 |
 | 서비스 가용성 | 95% 이상 | 99% 이상 |
 
+> **환각 비율 측정 방식 (2026-05-26 확정)** — 헤드라인 환각 비율은 **표준 RAG
+> faithfulness** 로 측정한다: 답변 문장이 **검색된 전체 top-k 근거**에 의해 뒷받침되는지를
+> 검증하고, 미근거 문장 비율을 환각률로 본다(RAGAS faithfulness / TruLens groundedness 정의).
+> feature17c-26 전수 실측: **delivered 0.81% / answerable 1.91%** — 목표 15%·이상 8% 모두 충족.
+>
+> 인용한 청크 기준(per-cited)으로 재는 **citation precision(출처 정밀도, delivered 19.4%)** 은
+> "환각"이 아니라 **출처 귀속 정확도** 보조 지표로 분리 보고한다(인용 번호 오기 = 출처 정밀도
+> 문제이지 날조 아님). 평가 스크립트(`run_evaluation.py`)는 두 지표를 모두 산출한다(이원 측정).
+> 외부 기획서 FR-009/FR-010 의 per-cited 정의는 본 측정 방식 정합으로 갱신 권고
+> (산출물 `구현_결과_보고서_527_RAG검색품질_성능최적화_리포트_v0.3.0.docx` §4 근거).
+
 ## 11. PoC 범위 / 향후 확장
 
 PoC 포함: 본문 텍스트 + 첨부 파일(PDF/Word/Excel) 텍스트 색인.
