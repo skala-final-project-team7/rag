@@ -9,11 +9,17 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 > `userId`/`groups`로 ACL 필터를 만들고 `spaceKey`로 검색 범위를 제한한다.
 
 > **변경 이력**
-> - 2026-05-22, feature13 — BE 통합 스펙 반영. 엔드포인트 `/api/v1/rag/query` → `/ml/query`,
->   요청 본문 재정의(JWT 제거 → userId/groups/spaceKey/accessToken/cloudId), SSE 이벤트 형식
->   변경(token=`{content}`, sources 래핑+필드 변경, verification 집계, done=`{}`, error 신규),
->   `meta` 이벤트 제거. **본 문서는 합의된 목표 계약이며, 코드 마이그레이션은 plan feature13의
->   코드 항목에서 별도 진행한다**(현재 구현 엔드포인트는 여전히 `/api/v1/rag/query`).
+> - 2026-05-22, feature13 — BE 통합 스펙 반영(문서). 엔드포인트 `/api/v1/rag/query` → `/ml/query`,
+>   요청 본문 재정의, SSE 이벤트 형식 변경(token=`{content}`, sources 래핑+필드 변경,
+>   verification 집계, done=`{}`, error 신규).
+> - 2026-05-26, feature13 — **코드 마이그레이션 완료.** 위 목표 계약을 `app/api/routes.py`·
+>   `app/schemas/response.py`·`app/schemas/enums.py`·`app/schemas/rag_state.py` 에 반영해
+>   구현 엔드포인트가 `/ml/query` 로 전환됨. `spaceKey` 는 RagState passthrough(검색 필터
+>   반영은 후속). PDF #3(ACL 컬럼 정합)은 BE 확정 대기로 별도.
+> - 2026-05-26, feature13 — **api-spec v2.2.0 대조 정합.** (1) `meta` 이벤트 유지(현재 구현
+>   호환용 — 05-21 BE-adjust 의 'meta 제거'는 아직 *예정* 단계라 되돌림, `title` 은 ML 미생성
+>   으로 생략), (2) sources 필드명 `updatedAt` → `sourceUpdatedAt`, (3) `accessToken`/`cloudId`
+>   는 v2.2.0 에서 `/ml/query` 가 아닌 수집(`/ml/ingest`)으로 이관됨 — 요청 본문에서 제거.
 
 ---
 
@@ -37,8 +43,6 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 | `userId` | string | Y | ACL Pre-filtering 사용자 식별자(BFF가 JWT에서 추출, 2단계 데모는 고정값) |
 | `groups` | string[] | Y | 사용자 그룹 — ACL `should`-OR 필터 |
 | `spaceKey` | string | Y | 검색 대상 Confluence 스페이스. 2단계는 고정값(`lina.demo.fixed-space-key`) |
-| `accessToken` | string | N | (**PoC, 3단계**) Confluence OAuth access token. BFF가 auth-server로부터 수신해 전달 |
-| `cloudId` | string | N | (**PoC, 3단계**) Confluence cloudId |
 
 ```json
 {
@@ -50,29 +54,32 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
   ],
   "userId": "user-001",
   "groups": ["Cloud-Control-Center"],
-  "spaceKey": "CPC",
-  "accessToken": "<Confluence OAuth access_token>",
-  "cloudId": "11111111-2222-3333-4444-555555555555"
+  "spaceKey": "CPC"
 }
 ```
 
-> **보안(PoC 모드 한정, BE 스펙 §2-1)** — `accessToken`은 로그·tracing 본문·RabbitMQ 메시지·
-> 이벤트 페이로드에 미수집(마스킹 또는 본문 제외)한다.
+> **`accessToken`/`cloudId` 미수신 (api-spec v2.2.0, 2026-05-22 변경)** — 권한은 수집 시 Qdrant
+> payload(`allowed_groups`/`allowed_users`)에 ACL로 저장되고 질의 시 `userId`/`groups`로
+> 필터링한다. `/ml/query` 는 라이브 Confluence 호출이 없어 토큰이 불필요하며, 토큰은 수집
+> 단계(`/ml/ingest`)에서만 전달한다. (현재 `QueryRequest` 는 두 필드를 받지 않는다.)
 
 ### SSE 이벤트 순서
 
 1. `token` 이벤트 (n회) — 답변 텍스트 청크
 2. `sources` 이벤트 (1회) — 출처 카드 배열
 3. `verification` 이벤트 (1회) — 답변 신뢰도 검증(집계)
-4. `done` 이벤트 (1회) — 스트림 종료 마커
+4. `meta` 이벤트 (1회) — 현재 구현 호환용 메타데이터(아래 참고)
+5. `done` 이벤트 (1회) — 스트림 종료 마커
 - 오류 시: 위 순서 대신 `error` 이벤트로 전달하고 스트림을 종료한다.
 - 진행 표시용 `status` 이벤트(아래 "진행 status 이벤트")가 위 이벤트들 사이사이에 추가로
-  송신될 수 있다. `status`는 *추가 전용* 이벤트이므로, 이를 무시하는 클라이언트는 위 4종
+  송신될 수 있다. `status`는 *추가 전용* 이벤트이므로, 이를 무시하는 클라이언트는 위 5종
   이벤트만으로 기존과 동일하게 동작한다.
 
-> **`meta` 이벤트 제거** — 이전 `meta`(intent / used_llm / feedback_enabled / latency_ms)는
-> BE 스펙에 없어 응답 계약에서 제외한다. 해당 값은 ML 내부 Prometheus 메트릭으로만 관측한다.
-> 저신뢰(이전 `feedback_enabled=false`) 신호는 `verification.confidenceScore`로 표현한다.
+> **`meta` 이벤트 (현재 구현 호환용, api-spec v2.2.0 §1-1)** — `intent` / `used_llm` /
+> `feedback_enabled` / `latency_ms` (+ optional `title`)를 `done` 직전 1회 송신한다. FE는 현재
+> `title`만 대화 제목 갱신에 사용한다. **본 ML 구현은 `title`을 생성하지 않으므로 생략**한다
+> (스펙상 optional). BE 통합 목표 계약에서는 추후 제거 예정이며, 그때 `intent`/`used_llm`/
+> `latency_ms`는 ML 내부 메트릭으로, 저신뢰 신호는 `verification.confidenceScore`로 대체한다.
 
 #### `token`
 ```
@@ -92,15 +99,15 @@ data: {
       "spaceId": "98310",
       "spaceName": "Cloud Control Center",
       "url": "https://confluence.example.com/pages/12345#anchor",
-      "updatedAt": "2026-04-15T18:30:00+09:00",   // KST(+09:00)
-      "relevanceScore": 0.92                        // 0~1 (Cross-Encoder score/100)
+      "sourceUpdatedAt": "2026-04-15T18:30:00+09:00",   // KST(+09:00)
+      "relevanceScore": 0.92                            // 0~1 (Cross-Encoder score/100)
     }
   ]
 }
 ```
 - 배열은 `{"sources": [...]}`로 래핑된다.
 - `relevanceScore`는 0~1 float(기존 0~100 정수 `score`를 100으로 나눈 값).
-- `updatedAt`은 KST(`+09:00`) 절대 전환(BE 스펙 §시간 표기 정책).
+- `sourceUpdatedAt`은 KST(`+09:00`) 절대 전환(BE 스펙 §시간 표기 정책, api-spec v2.2.0 필드명).
 - **TBD(BE 협의)**: 첨부 출처 전용 필드(`attachment_filename`/`attachment_mime`/`download_url`)는
   현재 BE `sources` 항목 스키마에 미정의 — 첨부 검색 노출 시 BE와 필드 확정 필요.
 
@@ -116,6 +123,16 @@ data: { "confidenceScore": 0.85, "verificationResult": "SUPPORTED" }
   - 전 문장이 `PASS`/`SUPPORTED` → `SUPPORTED`
 - **`confidenceScore`(0~1)**: `(PASS+SUPPORTED 문장 수) / (전체 문장 수)`. 문장 0개면 `0.0`.
   (휴리스틱 — 운영 튜닝 가능. 저신뢰 경고 배지의 기준값으로 FE가 사용)
+
+#### `meta`
+```jsonc
+event: meta
+data: {"intent": "운영가이드", "used_llm": "gpt-4o", "feedback_enabled": true, "latency_ms": 1234}
+```
+- 현재 구현 호환용(api-spec v2.2.0 §1-1). `verification` 직후 `done` 직전 1회 송신.
+- 필드: `intent` / `used_llm` / `feedback_enabled` / `latency_ms`. 스펙상 optional 인 `title`은
+  **본 ML 구현이 생성하지 않아 생략**한다(FE는 `title` 부재 시 대화 제목을 갱신하지 않는다).
+- 추후 BE 통합 목표 계약에서 제거 예정 — 그때 값은 ML 내부 메트릭/`confidenceScore`로 대체.
 
 #### `done`
 ```
@@ -139,7 +156,7 @@ data: {"code": "UPSTREAM_LLM_ERROR", "message": "답변 생성 중 오류가 발
 ### 진행 status 이벤트 (feature19)
 
 답변 토큰 전/중에 RAG 라이프사이클 단계(연결 → 검색 → 답변 → 검증 …) 진입을 프론트에 push하는
-진행 표시용 이벤트다. **기존 `token`/`sources`/`verification`/`done` 이벤트와 별개로 *추가*되며,
+진행 표시용 이벤트다. **기존 `token`/`sources`/`verification`/`meta`/`done` 이벤트와 별개로 *추가*되며,
 이름·순서·형식은 무변경이다.** `status`를 무시하는 클라이언트는 기존과 동일하게 동작한다.
 
 ```

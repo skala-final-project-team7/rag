@@ -38,6 +38,8 @@ class ErrorCode(StrEnum):
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
     UPSTREAM_LLM_ERROR = "UPSTREAM_LLM_ERROR"
     VERIFICATION_BLOCKED = "VERIFICATION_BLOCKED"
+    # feature13 — BE 통합 스펙(api-spec-BE-adjust.md) SSE error 이벤트 코드.
+    ML_SERVER_ERROR = "ML_SERVER_ERROR"
 
 
 class ErrorDetail(BaseModel):

@@ -21,11 +21,17 @@ from app.schemas.enums import (
     Intent,
     LlmModel,
     SourceType,
+    VerificationResult,
     VerificationStatus,
 )
 from app.schemas.page_object import Attachment, PageObject
 from app.schemas.rag_state import HistoryDecision, HistoryTurn, IngestionState, RagState
-from app.schemas.response import QueryResponse, Source, Verification
+from app.schemas.response import (
+    QueryResponse,
+    Source,
+    Verification,
+    VerificationSummary,
+)
 
 __all__ = [
     "Attachment",
@@ -47,6 +53,8 @@ __all__ = [
     "Source",
     "SourceType",
     "Verification",
+    "VerificationResult",
     "VerificationStatus",
+    "VerificationSummary",
     "make_chunk_id",
 ]
