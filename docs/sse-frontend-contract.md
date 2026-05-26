@@ -23,9 +23,9 @@
 
 ---
 
-## 2. SSE 이벤트 순서 (총 5종)
+## 2. SSE 이벤트 순서 (핵심 5종 + 진행 `status`)
 
-항상 아래 순서로 전송된다.
+핵심 5종은 항상 아래 순서로 전송된다.
 
 | # | event | 횟수 | data 형식 | 비고 |
 |---|---|---|---|---|
@@ -37,6 +37,11 @@
 
 > `token`, `done` 의 `data`는 평문. `sources` / `verification` / `meta` 의 `data`는
 > JSON이 문자열로 인코딩되어 있으므로 프론트에서 한 번 더 파싱해야 한다.
+
+추가로, **스트리밍 모드(`stream=true`)** 에서는 진행 표시용 `status` 이벤트(feature19)가
+위 핵심 이벤트들 사이사이에 끼어 들어온다. `status` 는 *추가 전용* 이벤트라, 이를 무시하는
+클라이언트는 핵심 5종만으로 기존과 동일하게 동작한다. PoC 환경(OpenAI 키 없음)에서는
+`stream=true` 여도 비스트리밍으로 fallback 되므로 `status` 가 나오지 않는다(아래 3.6 / 8번 참고).
 
 ---
 
@@ -106,6 +111,26 @@ data:
 
 스트림 종료. 이후 추가 이벤트 없음.
 
+### 3.6 `status` — 진행 표시 (스트리밍 모드 한정)
+
+답변 토큰 전/중에 RAG 라이프사이클 단계 진입을 알리는 진행 표시용 이벤트다. 핵심 5종과
+별개로 *추가* 송신되며, `data` 는 `{"phase": "...", "message": "..."}` JSON 문자열이다
+(`JSON.parse` 필요).
+
+```
+event: status
+data: {"phase": "searching", "message": "관련 문서를 검색하고 있어요"}
+```
+
+정상 흐름 순서: `connecting` → `acl_filtering` → `searching` → `answering` → `streaming` →
+`verifying` → `formatting`. 검색 0건(`RETRIEVAL_EMPTY`) 분기는 `answering`/`streaming`/
+`verifying` 를 건너뛰고 `searching` 다음 `formatting` 으로 직행한다. `done`/`error` 는
+별도 `status` phase 로 만들지 않는다(기존 `done` 이벤트 + 7번 에러 처리로 표현). phase
+목록·메시지·송신 시점의 정본은 `docs/api-spec.md` "진행 status 이벤트" 절이다.
+
+> 그래프 내부 4단계(history/router/search/rerank)는 현재 단일 블로킹 호출이라 절충안으로
+> `searching` 단일 phase 로 통합 송신된다.
+
 ---
 
 ## 4. Enum 값 (프론트 분기용)
@@ -169,9 +194,11 @@ data:
 
 ---
 
-## 8. 참고 — 현재 없는 것
+## 8. 참고
 
-- **진행 상태(progress) `status` 이벤트는 없다.** "검색 중 / 생성 중" 같은 단계 표시용
-  이벤트를 원한다면 신규 추가가 필요하다 (현재 미구현).
-- 상태성 정보는 `verification[].status`, `meta.feedback_enabled`, 에러 `code` 세 군데로
-  나뉘어 있다.
+- **진행 상태(progress) `status` 이벤트는 스트리밍 모드(`stream=true`)에서 구현돼 있다**
+  (feature19, 위 3.6 참고). 다만 PoC 환경(OpenAI 키 없음)에서는 `stream=true` 여도
+  비스트리밍으로 fallback 되어 `status` 가 송신되지 않는다 — 실 스트리밍(OpenAI 키 연동)
+  경로에서만 "검색 중 / 생성 중" 등의 단계가 push 된다.
+- 상태성 정보는 `verification[].status`, `meta.feedback_enabled`, 진행 `status.phase`,
+  에러 `code` 로 나뉘어 있다.
