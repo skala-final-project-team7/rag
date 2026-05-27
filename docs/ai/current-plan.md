@@ -199,13 +199,21 @@
   - 테스트: payload 19필드 매핑·page/attachment 분기·text_preview 200자·version_number
     주입, pool별 텍스트 구성, 멱등성 판정(동일 버전 skip / 캐시 없음 / 버전 불일치)
 
-  **feature5-B: 실제 임베딩·Qdrant·MongoDB 클라이언트 연동**  ⏳ 보류 (무거운 의존성)
+  **feature5-B: 실제 임베딩·Qdrant·MongoDB 클라이언트 연동**  ✅ 완료 (2026-05-18)
   - Dense(`intfloat/multilingual-e5-large`, 1024d)·Sparse(BM25) 실제 임베딩, Qdrant 3 Pool
     Collection 생성·Named Vector upsert, MongoDB `embedding_cache` I/O. e5의 `passage:`
     프리픽스 등 모델별 처리도 여기서.
-  - 착수 조건: 무거운 의존성(`sentence-transformers`/torch·`qdrant-client`·`pymongo`) 방향
-    확정 후 — PoC 단계는 가짜/경량 임베더 + Qdrant `:memory:` 또는 fake로 진행 검토.
-    임베딩·Qdrant·Mongo는 어댑터/클라이언트 계층으로 분리(app/CLAUDE.md §8)
+  - [의존성 방향 — 결정·구현 완료] 무거운 의존성 방향을 다음으로 확정해 구현했다:
+    Dense=`sentence-transformers`(e5-large), Sparse=`fastembed`(`Qdrant/bm25`),
+    Vector Store=`qdrant-client`(`:memory:` PoC / 서버 운영 겸용), Cache·Lookup=`pymongo`.
+    실 모델 import는 `build_real_deps` 본문 lazy 처리라 embedding extra 미설치 환경에서도
+    PoC 경로·모듈 import는 무영향. 임베딩·Qdrant·Mongo는 어댑터/클라이언트 계층으로
+    분리(app/CLAUDE.md §8).
+  - 구현체: `app/ingestion/embedder/{base,dense,sparse}.py`(E5/BM25 어댑터+ABC+Fake, `633d821`),
+    `app/storage/qdrant_client.py`(`QdrantPoolStore`, `2835ccd`),
+    `app/storage/mongo_cache.py`(`MongoEmbeddingCache`)·`chunk_lookup.py`(`MongoChunkTextLookup`).
+    `build_real_deps`/`build_real_ingestion_deps`(`app/api/deps.py`)가 실 어댑터를 부트스트랩.
+    feature17c-4~12 재적재·재평가(`844cd69`, Precision@3 68→80%)로 끝-끝 실 경로 검증됨.
 - **수정하지 않을 파일**: `app/schemas/*`(ChunkMetadata에 version_number 부재 — payload
   빌더가 별도 인자로 받아 해소, 스키마 변경 안 함), `app/llm/*`, 다른 팀원 담당 영역
 - **문서 수정**: feature5-A는 db-schema.md §1.2 payload 스키마를 구현만 — 변경 없음(정합 확인).
@@ -215,7 +223,9 @@
 작업 항목:
 
 - [x] feature5-A: 임베딩 입력·payload·멱등성 순수 로직
-- [ ] feature5-B: 실제 임베딩·Qdrant·MongoDB 클라이언트 연동 (무거운 의존성 방향 확정 후)
+- [x] feature5-B: 실제 임베딩·Qdrant·MongoDB 클라이언트 연동 (2026-05-18, `633d821`/`2835ccd` +
+  `build_real_deps` 배선 + feature17c 실 경로 재평가 검증. 의존성 방향: sentence-transformers /
+  fastembed / qdrant-client / pymongo)
 
 ### feature6: 문서 분석기 + 첨부 분석기 + Ingestion 그래프 — ⚠ 담당 분리
 
@@ -356,13 +366,16 @@
   - 테스트: RRF 점수·순위, Pool 가중 합산, Top-N 선정·동점 정렬, Top-5/Top-3 축소,
     저신뢰 임계, 빈 입력(0건) 처리
 
-  **feature9-B: 검색·재순위화 노드 오케스트레이션**  ⏳ 보류 (feature5·모델 의존)
+  **feature9-B: 검색·재순위화 노드 오케스트레이션**  ✅ 완료 (2026-05-18)
   - 쿼리 임베딩 + Qdrant 3-pool 검색 + Cross-Encoder 추론을 9-A 로직에 연결하는 LangGraph
     노드(`hybrid_search`/`cross_encoder_rerank`, `(state: RagState) -> RagState`).
     `candidates`(Top-20)·`top_chunks`(Top-5)를 RagState에 채운다
-  - 착수 조건: feature5(Dual Embedding + Multi-Pool Vector Store)와 Cross-Encoder 모델
-    확보 후. 임베딩·Qdrant·Cross-Encoder는 어댑터/클라이언트 계층으로 분리(app/CLAUDE.md §8),
-    9-B 착수 시 그 계층 위치를 feature5와 함께 확정
+  - [선행 의존성 — 해소] feature5-B(E5/BM25/Qdrant) 및 Cross-Encoder 어댑터를 함께 확보해
+    착수. 임베딩·Qdrant·Cross-Encoder는 어댑터/클라이언트 계층으로 분리(app/CLAUDE.md §8).
+  - 구현체: `app/query/reranker/{base,cross_encoder}.py`(`CrossEncoderReranker` ABC+Fake+
+    `CrossEncoderRerankerImpl`, `4f2b0f3`), `app/query/search_node.py`(`hybrid_search`,
+    `6e6753e`), `app/query/rerank_node.py`(`cross_encoder_rerank` Top-5+sources, `b080bdd`).
+    `query_graph.py`가 두 노드를 직접 배선(stub 아님). feature17c-4~12 실 경로 재평가로 검증됨.
 - **수정하지 않을 파일**: `app/schemas/*`(RagState가 이미 candidates·top_chunks 보유),
   `app/llm/*`(Agent 인프라), `app/ingestion/*`, 다른 팀원 담당 영역
 - **완료 기준(9-A)**: 순수 함수 단위 테스트 전체 통과 / `verify` 통과 / `working-log.md` 갱신
@@ -370,7 +383,8 @@
 작업 항목:
 
 - [x] feature9-A: 검색·재순위화 핵심 로직 (RRF / Pool 가중 합산 / Top-K 선정 / 저신뢰 분기)
-- [ ] feature9-B: 검색·재순위화 노드 오케스트레이션 (feature5·Cross-Encoder 모델 확보 후)
+- [x] feature9-B: 검색·재순위화 노드 오케스트레이션 (2026-05-18, `4f2b0f3`/`6e6753e`/`b080bdd` —
+  CrossEncoderRerankerImpl + hybrid_search/cross_encoder_rerank 노드 + query_graph 배선)
 
 ### feature10: 답변 생성기 + 답변 검증 — ⚠ 담당 분리
 
@@ -901,6 +915,12 @@ BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). PDF #2(API Spe
 - **완료 (Milestone A·B·C + Agent 통합 3/4 + (B) 운영 transport + (A 인프라) streaming +
   Mode B 시연 검증 + Milestone D feature12 + feature13 PDF #2(/ml/query 마이그레이션) +
   feature14 + feature15 + feature16 + feature17a + feature17b + feature19 SSE status 이벤트)**
+- **실 연동(운영 어댑터) 완료**: feature5-B(E5/BM25/Qdrant/Mongo 클라이언트, `633d821`/`2835ccd`)
+  + feature9-B(CrossEncoderRerankerImpl + hybrid_search/cross_encoder_rerank 노드, `4f2b0f3`/
+  `6e6753e`/`b080bdd`)가 `build_real_deps`로 배선돼 `RAG_USE_REAL_ADAPTERS=true` 운영 경로로
+  동작. feature17c 재적재·재평가(`844cd69`, Precision@3 68→80%)로 끝-끝 검증됨.
+  (※ 위 두 feature 본문 체크박스가 2026-05-27까지 stale `[ ]` 였던 것을 실제 구현·커밋 사실에
+  맞춰 `[x]` 로 정정 — 코드 변경 없음, 문서 정합만.)
 - **feature17c**: 엔지니어링·튜닝(17c-1~26) + KPI 달성·확정 완료(Precision@3 80% /
   헤드라인 환각=faithfulness 0.81% 확정, 측정 방식 설계서 §10 명시) + 527 v0.3.0 docx 산출.
   잔여는 전부 타 팀/Agent/인프라 이관·보류 항목 — Pool 가중치 그리드 서치(도구 ○ / 미실행,

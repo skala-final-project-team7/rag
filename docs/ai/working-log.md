@@ -7133,3 +7133,31 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
   + docs/api-spec.md 동반 정합. ruff/py_compile 통과. (pytest 는 Mac/3.11 에서 확인)
 - **남은 정합 TODO**: `docs/sse-frontend-contract.md` 는 구 라우트(`/api/v1/rag/query`,
   평문 token) 기준이라 마이그레이션 후 stale — FE 핸드오프 갱신 또는 v2.2.0 으로 대체 결정 필요.
+
+## 2026-05-27 — 문서 정합: feature5-B/9-B 실 연동 완료 사실 반영 (stale 체크박스 정정)
+
+- 배경: `current-plan.md` 의 feature5-B(실 임베딩·Qdrant·Mongo 클라이언트)·feature9-B
+  (검색·재순위화 노드 오케스트레이션) 체크박스가 `[ ]` + 상태 `⏳ 보류` 로 남아 있어, 실제
+  구현 상태와 불일치했다. 코드·git 히스토리 확인 결과 두 feature 는 2026-05-18 에 이미
+  구현·커밋·배선 완료되어 있었다:
+  - feature5-B: `app/ingestion/embedder/{base,dense,sparse}.py`(E5/BM25, `633d821`),
+    `app/storage/qdrant_client.py`(`QdrantPoolStore`, `2835ccd`), `mongo_cache.py`
+    (`MongoEmbeddingCache`)·`chunk_lookup.py`(`MongoChunkTextLookup`). `build_real_deps`/
+    `build_real_ingestion_deps`(`app/api/deps.py`) 가 실 어댑터를 부트스트랩.
+  - feature9-B: `app/query/reranker/{base,cross_encoder}.py`(`CrossEncoderRerankerImpl`,
+    `4f2b0f3`), `app/query/search_node.py`(`hybrid_search`, `6e6753e`), `app/query/
+    rerank_node.py`(`cross_encoder_rerank`, `b080bdd`). `query_graph.py` 가 두 노드를 직접
+    배선(stub 아님). 실 경로에 `NotImplementedError`/`TODO`/stub 없음(전수 grep 확인).
+  - 끝-끝 검증 근거: feature17c-4~12(`844cd69`, "검색 품질 개선 — 첨부 인덱싱·풀텍스트
+    recall fix, Precision@3 68→80%")은 실 Qdrant + 실 임베딩 + 실 reranker 가 끝-끝으로
+    돌아야 산출되는 결과 → 사용자 Mac 재적재·재평가로 실 연동이 이미 검증됨.
+- 의존성 방향(당시 TBD → 확정·구현됨, 기록): Dense=sentence-transformers(e5-large) /
+  Sparse=fastembed(Qdrant/bm25) / Vector Store=qdrant-client(:memory: PoC·서버 운영 겸용) /
+  Cache·Lookup=pymongo / Reranker=sentence-transformers CrossEncoder. 실 모델 import 는
+  `build_real_deps` 본문 lazy 처리(embedding extra 미설치 환경 무영향).
+- 변경: `docs/ai/current-plan.md` 만 수정 — feature5-B/9-B 상태 마커(⏳ 보류 → ✅ 완료),
+  착수 조건/선행 의존성 bullet(해소 기록 + 구현체·커밋 참조), 작업 항목 체크박스([ ]→[x]),
+  "완료 현황" 에 "실 연동(운영 어댑터) 완료" 항목 추가. **코드 변경 0 — 문서 정합만.**
+- 검증: ruff check . / ruff format --check . 통과(141 files, 코드 무변경). 전체 pytest 는
+  본 샌드박스가 Python 3.10(StrEnum 3.11+ 미지원)이라 제약 — Mac/3.11 에서 무영향 확인 권장
+  (문서만 변경이라 테스트 영향 없음).
