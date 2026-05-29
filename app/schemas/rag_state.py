@@ -17,7 +17,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.chunk import Chunk
 from app.schemas.enums import IngestionStage, IngestionStatus, Intent, LlmModel
@@ -26,10 +26,22 @@ from app.schemas.response import Source, Verification
 
 
 class HistoryTurn(BaseModel):
-    """멀티턴 대화 1턴."""
+    """멀티턴 대화 1턴.
 
-    role: str  # "user" | "assistant"
+    ``role`` 값은 api-spec v2.2.0 §2-1 / "Enum 값 표기 정책"에 따라 ``USER`` / ``ASSISTANT``
+    (UPPER_SNAKE)다 — 저장(`docs/db-schema.md`)·외부 API 메시지 이력과 동일. BFF 는 UPPER 로
+    전달하지만, 대소문자 무관 입력을 수용하기 위해 검증 단계에서 표준 대문자로 정규화한다
+    (하위 호환 — 구버전이 소문자로 보내도 받는다).
+    """
+
+    role: str  # "USER" | "ASSISTANT" (정규화 후)
     content: str
+
+    @field_validator("role")
+    @classmethod
+    def _normalize_role(cls, value: str) -> str:
+        """role 을 api-spec Enum 정책의 UPPER 표기로 정규화한다(대소문자 무관 수용)."""
+        return value.strip().upper()
 
 
 class HistoryDecision(BaseModel):

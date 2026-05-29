@@ -11,6 +11,10 @@
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature11 통합 Phase 2 — ErrorCode StrEnum +
     ErrorDetail / ErrorResponse Pydantic 모델 + HTTP status 매핑
+  - 2026-05-29, api-spec v2.2.0 정합 — ``ErrorResponse`` 를 공통 Wrapper 의 4필드 봉투
+    (``isSuccess`` / ``code`` / ``errorCode`` / ``message``)로 재정의(구 ``success`` +
+    중첩 ``error`` 형태 제거). 중첩 ``ErrorDetail`` 모델 삭제, ``error_response`` 헬퍼가
+    HTTP ``code`` 를 ``HTTP_STATUS_BY_CODE`` 에서 도출하도록 변경.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+, FastAPI 0.111+
@@ -48,23 +52,27 @@ class ErrorCode(StrEnum):
     ML_CONNECTION_ERROR = "ML_CONNECTION_ERROR"
 
 
-class ErrorDetail(BaseModel):
-    """Error Response 의 ``error`` 필드 — code + message."""
-
-    code: ErrorCode
-    message: str
-
-
 class ErrorResponse(BaseModel):
-    """api-spec.md Error Response 응답 모델.
+    """api-spec v2.2.0 "Common Response Wrapper" 의 에러 봉투 — **4필드 고정**.
+
+    성공 응답과 달리 ``data`` 를 포함하지 않으며 다음 4필드로 고정된다:
+    ``isSuccess``(false) / ``code``(HTTP 정수) / ``errorCode``(``ErrorCode`` enum 문자열) /
+    ``message``.
 
     .. code-block:: json
 
-        { "success": false, "error": { "code": "RETRIEVAL_EMPTY", "message": "..." } }
+        { "isSuccess": false, "code": 404, "errorCode": "RESOURCE_NOT_FOUND", "message": "..." }
+
+    참고: FE↔BFF 외부 API 의 공통 Wrapper 직렬화는 BFF ``common`` 모듈(``ApiResponse`` /
+    ``ErrorResponse``) 책임이며, RAG 파이프라인의 SSE 경로(``/ml/query``)는 Wrapper 미적용
+    (이벤트 스트림, ``error`` 이벤트의 ``errorCode``/``message`` 사용)이다. 본 모델은 비-SSE
+    오류 응답을 동일 봉투 형식으로 맞추기 위한 정의로, 봉투 필드명을 스펙과 일치시킨다.
     """
 
-    success: bool = Field(default=False)
-    error: ErrorDetail
+    isSuccess: bool = Field(default=False)
+    code: int
+    errorCode: ErrorCode
+    message: str
 
 
 # 4xx / 5xx 응답에 매핑되는 HTTP status. RETRIEVAL_EMPTY 등의 정상 분기는 200으로
@@ -76,5 +84,10 @@ HTTP_STATUS_BY_CODE: dict[ErrorCode, int] = {
 
 
 def error_response(code: ErrorCode, message: str) -> ErrorResponse:
-    """Error Response Pydantic 모델을 생성한다 — 라우트 핸들러용 헬퍼."""
-    return ErrorResponse(error=ErrorDetail(code=code, message=message))
+    """Error Response(4필드 봉투) Pydantic 모델을 생성한다 — 라우트 핸들러용 헬퍼.
+
+    HTTP 정수 ``code`` 는 ``HTTP_STATUS_BY_CODE`` 매핑에서 도출하고, 매핑에 없는 코드는
+    500(INTERNAL)으로 둔다. ``errorCode`` 에는 인자로 받은 ``ErrorCode`` 를 그대로 싣는다.
+    """
+    http_code = HTTP_STATUS_BY_CODE.get(code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return ErrorResponse(code=http_code, errorCode=code, message=message)

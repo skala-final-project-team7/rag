@@ -20,6 +20,16 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 >   호환용 — 05-21 BE-adjust 의 'meta 제거'는 아직 *예정* 단계라 되돌림, `title` 은 ML 미생성
 >   으로 생략), (2) sources 필드명 `updatedAt` → `sourceUpdatedAt`, (3) `accessToken`/`cloudId`
 >   는 v2.2.0 에서 `/ml/query` 가 아닌 수집(`/ml/ingest`)으로 이관됨 — 요청 본문에서 제거.
+> - 2026-05-29, **api-spec v2.2.0(문서 버전) 코드 정합 보강.** 업로드된 v2.2.0 대조 후 다음
+>   코드 변경을 반영: (1) 요청 `spaceKey` 를 실제 검색 **하드 스코프**(Qdrant `space_key`
+>   AND, 0건 fallback 에서도 미완화)로 적용 — 기존 RagState passthrough 해소
+>   (`app/query/search_node.py`). (2) 챗 엔드포인트 **항상 스트리밍** — 클라이언트 `stream`
+>   요청 필드 제거(비-스트리밍 모드 미제공), 스트리밍/비-streaming 선택은 서버 내부 PoC
+>   가용성으로만 결정(`app/api/routes.py`). (3) SSE 이벤트 순서 불변식 #2 — 검증 차단 분기의
+>   대체 `token` 을 `verifying` status **이전**에 송신하도록 재배치. (4) SSE 응답 헤더
+>   `Cache-Control: no-cache` 명시. (5) `history[].role` 을 Enum 정책의 UPPER(`USER`/
+>   `ASSISTANT`)로 정규화(`app/schemas/rag_state.py`). (6) `ErrorResponse` 를 공통 Wrapper
+>   4필드 봉투(`isSuccess`/`code`/`errorCode`/`message`)로 재정의(`app/api/errors.py`).
 
 ---
 
@@ -39,7 +49,7 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 |---|---|---|---|
 | `question` | string | Y | 사용자 자연어 질문 |
 | `conversationId` | string | N | 대화 컨텍스트 ID |
-| `history` | array | N | 이전 대화 이력 `[{ "role": "user"\|"assistant", "content": "..." }]`. BFF가 DB에서 조회해 전달(멀티턴) |
+| `history` | array | N | 이전 대화 이력 `[{ "role": "USER"\|"ASSISTANT", "content": "..." }]`. BFF가 DB에서 조회해 전달(멀티턴). `role` 값은 Enum 정책의 UPPER(`USER`/`ASSISTANT`) |
 | `userId` | string | Y | ACL Pre-filtering 사용자 식별자(BFF가 JWT에서 추출, 2단계 데모는 고정값) |
 | `groups` | string[] | Y | 사용자 그룹 — ACL `should`-OR 필터 |
 | `spaceKey` | string | Y | 검색 대상 Confluence 스페이스. 2단계는 고정값(`lina.demo.fixed-space-key`) |
@@ -49,8 +59,8 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
   "question": "지난번 S3 버킷 권한 오류 때 어떻게 해결했어?",
   "conversationId": "conv-uuid-001",
   "history": [
-    { "role": "user", "content": "S3 관련 장애 이력 알려줘" },
-    { "role": "assistant", "content": "최근 S3 관련 장애는 3건이 있었습니다..." }
+    { "role": "USER", "content": "S3 관련 장애 이력 알려줘" },
+    { "role": "ASSISTANT", "content": "최근 S3 관련 장애는 3건이 있었습니다..." }
   ],
   "userId": "user-001",
   "groups": ["Cloud-Control-Center"],
@@ -71,6 +81,10 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 4. `meta` 이벤트 (1회) — 현재 구현 호환용 메타데이터(아래 참고)
 5. `done` 이벤트 (1회) — 스트림 종료 마커
 - 오류 시: 위 순서 대신 `error` 이벤트로 전달하고 스트림을 종료한다.
+- **순서 불변식 (v2.2.0 §1-1 #2)**: 모든 `token` 은 `verifying` phase **이전에 연속** 송신되며
+  이후에는 `token` 이 오지 않는다. 본문 종료 후 `sources` → `verification` → `meta` → `done`
+  순으로 각 최대 1회. 검증 차단으로 답변이 대체되는 경우에도 대체 `token` 은 `verifying`
+  status 이전에 송신한다(`app/api/routes.py` 스트리밍 경로).
 - 진행 표시용 `status` 이벤트(아래 "진행 status 이벤트")가 위 이벤트들 사이사이에 추가로
   송신될 수 있다. `status`는 *추가 전용* 이벤트이므로, 이를 무시하는 클라이언트는 위 5종
   이벤트만으로 기존과 동일하게 동작한다.
@@ -145,13 +159,16 @@ data: {}
 #### `error`
 ```
 event: error
-data: {"code": "UPSTREAM_LLM_ERROR", "message": "답변 생성 중 오류가 발생했습니다"}
+data: {"errorCode": "ML_SERVER_ERROR", "message": "답변 생성 중 오류가 발생했습니다"}
 ```
 - 오류는 HTTP 에러 응답이 아니라 **SSE `error` 이벤트**로 전달하고 스트림을 종료한다.
-- `code`: `UNAUTHORIZED` | `RETRIEVAL_EMPTY` | `LOW_CONFIDENCE` | `UPSTREAM_LLM_ERROR` |
-  `VERIFICATION_BLOCKED` | `ML_SERVER_ERROR`.
-- 단, `RETRIEVAL_EMPTY` / `LOW_CONFIDENCE` / `VERIFICATION_BLOCKED`는 아래 "표준 분기 응답"처럼
-  정상 200 SSE 흐름 내부에서 처리하는 것을 우선한다(`error` 이벤트는 본격 오류에만 사용).
+- `data`는 `{"errorCode": string, "message": string}` (api-spec v2.2.0 §1-1). 필드명은
+  `errorCode`다 — 공통 Wrapper 의 정수 `code`와 혼동 금지(SSE 에는 HTTP 정수 code 가 없다).
+- `errorCode`: `ML_SERVER_ERROR`(ML 5xx·내부 처리 오류) | `ML_TIMEOUT`(응답/스트림 타임아웃,
+  `lina.rag.sse-timeout-ms`) | `ML_CONNECTION_ERROR`(연결 실패·스트림 중단). 구현은
+  `app/api/routes.py` `_classify_ml_error` 가 상류 예외를 이 3종으로 분류한다.
+- `RETRIEVAL_EMPTY` / `LOW_CONFIDENCE` / `VERIFICATION_BLOCKED`는 `error` 이벤트가 아니라 아래
+  "표준 분기 응답"처럼 정상 200 SSE 흐름 내부에서 처리한다(`error` 는 본격 오류에만 사용).
 
 ### 진행 status 이벤트 (feature19)
 
@@ -167,9 +184,10 @@ data: {"phase": "searching", "message": "관련 문서를 검색하고 있어요
 - `data`는 JSON 객체 `{"phase": "<phase>", "message": "<한국어 진행 메시지>"}` (다른 JSON
   이벤트와 동일하게 `ensure_ascii=False` 직렬화).
 - 각 phase는 해당 단계 진입 시 1회 송신된다.
-- **streaming 모드(`stream=true`, 운영 경로)에만 적용**된다. 비-streaming 경로는 그래프를 단일
-  블로킹 호출로 실행한 뒤 모든 이벤트를 한꺼번에 flush해 phase가 동시에 발사되므로(진행 표시
-  가치 없음) 송신하지 않는다.
+- **운영 streaming 경로(OpenAI 가용)에만 적용**된다. 챗 엔드포인트는 항상 스트리밍이지만
+  (클라이언트 `stream` 필드 없음), PoC 환경(OpenAI 키/generator_provider 없음)은 그래프를 단일
+  블로킹 호출로 실행한 뒤 모든 이벤트를 한꺼번에 flush 하므로(phase 동시 발사 — 진행 표시 가치
+  없음) `status` 를 송신하지 않는다.
 
 | phase | message(예) | 송신 시점 |
 |---|---|---|

@@ -21,12 +21,11 @@ RAG 파이프라인을 BFF에 노출하는 HTTP 계층. API 계약은 docs/api-s
 - deps.py    build_poc_deps + build_real_deps    [feature11 통합 Phase 2 + 후속]
 """
 
-from app.api.errors import ErrorCode, ErrorDetail, ErrorResponse, error_response
+from app.api.errors import ErrorCode, ErrorResponse, error_response
 from app.api.main import app, create_app
 
 __all__ = [
     "ErrorCode",
-    "ErrorDetail",
     "ErrorResponse",
     "app",
     "create_app",

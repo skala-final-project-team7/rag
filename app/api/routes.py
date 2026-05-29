@@ -90,16 +90,12 @@ class QueryRequest(BaseModel):
     history: list[HistoryTurn] = Field(
         default_factory=list, description="이전 대화 이력 [{role, content}] (BFF가 DB에서 조회)"
     )
-    stream: bool = Field(
-        default=True,
-        description=(
-            "SSE 토큰 스트리밍 모드. api-spec v2.2.0 §1-1/§2-1 정합으로 이 경로는 '항상 "
-            "스트리밍'이 기본이며 기본값은 True 다(스펙 §1-1 line170 — 비-스트리밍 모드 미제공). "
-            "False 면 답변 전체를 1회 token 이벤트로 송신한다(하위 호환용). "
-            "PoC 환경(OpenAI 키/generator_provider 없음)에서는 True 라도 자동 "
-            "비-streaming fallback."
-        ),
-    )
+    # api-spec v2.2.0 §1-1 — 챗 엔드포인트는 **항상 SSE 스트리밍**이며 비-스트리밍 모드
+    # (``stream=false``)는 제공하지 않는다. 따라서 클라이언트가 제어하는 ``stream`` 요청
+    # 필드를 두지 않는다(extra=ignore 이므로 구버전 BFF 가 보내도 무시된다). 스트리밍/비-
+    # 스트리밍 선택은 오직 서버 내부 PoC 가용성(``_should_fallback_to_non_streaming``)으로만
+    # 결정한다 — OpenAI 키/generator_provider 가 없는 PoC 환경은 자동으로 비-streaming 으로
+    # 처리하되, 외부로는 동일한 SSE 이벤트 계약을 노출한다.
 
 
 def get_graph(request: Request) -> Any:
@@ -453,14 +449,15 @@ async def _streaming_event_stream_inner(
     rerank_state.answer = answer
     rerank_state.used_llm = _resolve_used_llm(used_model)
 
-    # feature19 status — verifying. verify_pipeline_node(1+2단계) 호출 직전.
-    yield _status_event("verifying")
     # 검증 1+2단계 — verify_pipeline_node 에 deps 의 verify_llm_evaluator 주입.
+    # api-spec v2.2.0 §1-1 이벤트 순서 불변식 #2 — 모든 ``token`` 은 ``verifying`` phase
+    # 이전에 와야 한다(verifying 이후 token 금지). 따라서 검증/포맷팅으로 답변이 차단·대체될
+    # 수 있는지 먼저 판정한 뒤, 대체 token 을 verifying status 송신보다 앞서 내보낸다.
+    # status 는 진행 표시용이라 실제 검증 연산 직후에 보내도 무방하다(검색 4단계도 단일
+    # ``searching`` phase 로 묶어 송신하는 것과 동일한 절충).
     verify_pipeline_node(rerank_state, llm_evaluator=deps.verify_llm_evaluator)
 
     elapsed_ms = (time.perf_counter_ns() - started) // 1_000_000
-    # feature19 status — formatting. format_response → sources/verification 송신 직전.
-    yield _status_event("formatting")
     response = format_response(
         answer=rerank_state.answer,
         sources=rerank_state.sources,
@@ -471,12 +468,15 @@ async def _streaming_event_stream_inner(
     )
     # meta.title — 스트리밍된 실제 답변을 맥락으로 제목 생성. api-spec §1-1 Required: N.
     response.title = _resolve_title(request, question=state.query, answer=answer)
-    # token 이벤트는 이미 송신했으므로 sources / verification / done 만 송신.
-    # 답변이 차단 분기(BLOCKED_ANSWER_MESSAGE) 인 경우 본 라우트는 이미 원본 토큰을
-    # 전송한 뒤이므로, 차단 안내를 별도 'token' 이벤트로 1회 더 송신해 UI 가 답변을
-    # 차단 메시지로 덮어쓰도록 한다.
+    # 답변이 차단 분기(BLOCKED_ANSWER_MESSAGE)로 대체된 경우, UI 가 이미 송신된 원본
+    # 토큰을 차단 메시지로 덮어쓰도록 'token' 이벤트를 1회 더 송신한다. 불변식 #2 준수를
+    # 위해 verifying/formatting status 보다 **먼저** 보낸다.
     if response.answer != answer:
         yield _token_event(response.answer)
+    # feature19 status — verifying → formatting (검증은 위에서 이미 수행, status 는 표시용).
+    yield _status_event("verifying")
+    yield _status_event("formatting")
+    # token 이벤트는 이미 송신했으므로 sources / verification / done 만 송신.
     for event in _sse_payload(response)[1:]:
         yield event
 
@@ -488,9 +488,10 @@ async def query_route(payload: QueryRequest, request: Request, graph: GraphDep) 
     docs/api-spec.md "POST /ml/query" 정합:
       1. BFF가 전달한 ``userId``/``groups`` 로 ``build_acl_filter`` (Qdrant should-OR).
       2. ``RagState`` 구성(question/userId/groups/spaceKey/conversationId/history) 후
-         stream 분기:
-         - stream=False 또는 PoC fallback: ``run_query`` → token/sources/verification/done.
-         - stream=True (운영): ``_streaming_event_stream`` 으로 token 다중 송신.
+         항상 SSE 스트리밍으로 응답한다(api-spec v2.2.0 §1-1 — 비-스트리밍 모드 미제공):
+         - 운영(OpenAI 가용): ``_streaming_event_stream`` 으로 token 다중 송신.
+         - PoC(OpenAI 키/generator_provider 없음): 내부적으로 ``run_query`` 비-streaming
+           흐름으로 자동 fallback(외부 SSE 이벤트 계약은 동일).
       3. 오류는 SSE ``error`` 이벤트로 전달하고 스트림을 종료한다.
     """
     state = RagState(
@@ -503,13 +504,20 @@ async def query_route(payload: QueryRequest, request: Request, graph: GraphDep) 
         acl_filter=build_acl_filter(payload.user_id, payload.groups),
     )
 
-    # stream=True 라도 PoC 환경 (OpenAI 키 / generator_provider 없음) 이면
-    # 비-streaming 흐름으로 자동 fallback — BFF/테스트 호환성 유지.
-    if payload.stream and not _should_fallback_to_non_streaming(request):
-        return EventSourceResponse(_streaming_event_stream(request=request, state=state))
+    # api-spec v2.2.0 §1-1 — 항상 SSE 스트리밍. 단, PoC 환경(OpenAI 키 / generator_provider
+    # 없음)이면 서버 내부적으로 비-streaming 흐름으로 자동 fallback 한다(외부 SSE 이벤트
+    # 계약은 동일). SSE 응답 헤더는 스펙 §1-1 "연결·타임아웃" 정합 — Cache-Control: no-cache
+    # (sse-starlette 기본 no-store 를 명시 override) + X-Accel-Buffering: no(프록시 버퍼링 비활성).
+    sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    if not _should_fallback_to_non_streaming(request):
+        return EventSourceResponse(
+            _streaming_event_stream(request=request, state=state),
+            headers=sse_headers,
+        )
 
     return EventSourceResponse(
-        _non_streaming_event_stream(request=request, state=state, graph=graph)
+        _non_streaming_event_stream(request=request, state=state, graph=graph),
+        headers=sse_headers,
     )
 
 
