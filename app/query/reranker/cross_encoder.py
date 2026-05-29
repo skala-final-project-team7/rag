@@ -43,7 +43,7 @@ class CrossEncoderRerankerImpl(CrossEncoderReranker):
     CPU 에서 대형 모델은 응답 지연 KPI 를 위반할 수 있으니 device(mps/cuda) 가속 권장.
 
     Args:
-        model_name: 모델 이름. 기본값은 ms-marco-MiniLM-L-12.
+        model_name: 모델 이름. 기본값은 cross-encoder/ms-marco-MiniLM-L-12-v2.
         device: torch 장치(``"cpu"`` / ``"cuda"`` / ``"mps"`` 등). ``None`` 이면
             sentence-transformers가 자동 선택.
         batch_size: 추론 시 배치 크기. ms-marco-MiniLM-L-12 기준 32가 권장
@@ -60,7 +60,7 @@ class CrossEncoderRerankerImpl(CrossEncoderReranker):
 
     def __init__(
         self,
-        model_name: str = "cross-encoder/ms-marco-MiniLM-L-12",
+        model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
         *,
         device: str | None = None,
         batch_size: int = 32,
