@@ -151,3 +151,6 @@ class QueryResponse(BaseModel):
     sources: list[Source] = Field(default_factory=list)
     verification: list[Verification] = Field(default_factory=list)
     feedback_enabled: bool = True
+    # api-spec v2.2.0 §1-1 meta 이벤트 ``title`` (Required: N) — LLM 이 생성한 현재 대화
+    # 제목. 라우트가 답변 산출 후 titler 로 채운다. None 이면 meta 에서 생략한다(optional).
+    title: str | None = None

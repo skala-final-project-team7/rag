@@ -38,8 +38,14 @@ class ErrorCode(StrEnum):
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
     UPSTREAM_LLM_ERROR = "UPSTREAM_LLM_ERROR"
     VERIFICATION_BLOCKED = "VERIFICATION_BLOCKED"
-    # feature13 — BE 통합 스펙(api-spec-BE-adjust.md) SSE error 이벤트 코드.
+    # api-spec v2.2.0 §1-1 "error 이벤트 / 에러 코드" 정본 3종. SSE ``error`` 이벤트의
+    # ``errorCode`` 는 반드시 이 세 값 중 하나여야 한다(BFF 가 그대로 중계 — §2-1).
+    #   ML_SERVER_ERROR     — ML 서버 5xx·내부 처리 오류
+    #   ML_TIMEOUT          — ML 응답/스트림 타임아웃 (lina.rag.sse-timeout-ms)
+    #   ML_CONNECTION_ERROR — ML 연결 실패·스트림 중단
     ML_SERVER_ERROR = "ML_SERVER_ERROR"
+    ML_TIMEOUT = "ML_TIMEOUT"
+    ML_CONNECTION_ERROR = "ML_CONNECTION_ERROR"
 
 
 class ErrorDetail(BaseModel):

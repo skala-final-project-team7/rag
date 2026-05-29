@@ -11,8 +11,9 @@ feature13 마이그레이션 정합 (api-spec v2.2.0):
   - 요청 본문 ``question``/``userId``/``groups``/``spaceKey``/``conversationId``/``history``
     (구 ``query``/``jwt`` 대체 — JWT 미수신, userId/groups 직접 전달).
   - SSE: ``token``=``{"content": ...}``, ``sources``=``{"sources": [...]}``(sourceUpdatedAt),
-    ``verification``=집계 ``{"confidenceScore", "verificationResult"}``, ``meta``(현재 구현
-    호환용 — title 생략), ``done``=``{}``.
+    ``verification``=집계 ``{"confidenceScore", "verificationResult"}``(검색 0건이면 생략),
+    ``meta``(현재 구현 호환용 — intent/used_llm/feedback_enabled/latency_ms + title),
+    ``done``=``{}``.
 """
 
 import json
@@ -153,6 +154,15 @@ async def test_healthz_returns_ok(populated_graph: Any) -> None:
     assert resp.json() == {"status": "ok"}
 
 
+@pytest.mark.asyncio
+async def test_ml_rag_health_returns_up(populated_graph: Any) -> None:
+    """api-spec v2.2.0 §2-4-1 — GET /ml/rag/health → {"status": "UP"}."""
+    async with _client(populated_graph) as client:
+        resp = await client.get("/ml/rag/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "UP"}
+
+
 # --- 정상 흐름 ---
 
 
@@ -214,12 +224,15 @@ async def test_query_route_emits_full_sse_sequence(populated_graph: Any) -> None
         "NOT_SUPPORTED",
     }
 
-    # meta 페이로드 — 현재 구현 호환용(intent/used_llm/feedback_enabled/latency_ms).
+    # meta 페이로드 — 현재 구현 호환용(intent/used_llm/feedback_enabled/latency_ms + title).
     meta = json.loads(dict(events)["meta"])
     assert meta["intent"] == "운영가이드"
     assert meta["used_llm"] == "gpt-4o"
     assert isinstance(meta["feedback_enabled"], bool)
     assert meta["latency_ms"] >= 0
+    # api-spec §1-1 meta.title — 답변 산출 후 채워진다(PoC 는 질문 기반 fallback).
+    assert isinstance(meta["title"], str)
+    assert meta["title"]
 
     # done 은 빈 객체 {} (messageId 는 BFF 주입).
     assert json.loads(dict(events)["done"]) == {}
@@ -239,9 +252,10 @@ async def test_query_route_retrieval_empty_returns_standard_message(
     events = dict(_parse_sse(resp.text))
     assert "권한 범위" in _content(events["token"])
     assert json.loads(events["sources"])["sources"] == []
-    # 검증 문장 0건 → 집계 NOT_SUPPORTED / confidence 0.0 (저신뢰 신호).
-    verification = json.loads(events["verification"])
-    assert verification["verificationResult"] == "NOT_SUPPORTED"
+    # api-spec §1-1 "0건 처리" — 검색 0건이면 verification 이벤트는 생략된다(검증 근거 없음).
+    assert "verification" not in events
+    # meta.title 은 0건에도 채워진다(질문 기반 fallback).
+    assert json.loads(events["meta"]).get("title")
 
 
 # --- 요청 본문 검증 ---
@@ -361,6 +375,10 @@ def _streaming_client(
             yield StreamingTokenChunk(text=token)
 
     monkeypatch.setattr(routes_module, "stream_openai_answer", _fake_stream_openai_answer)
+    # meta.title 생성도 네트워크 없이 — titler 를 fake 로 monkeypatch(테스트 결정론).
+    monkeypatch.setattr(
+        routes_module, "generate_conversation_title", lambda **_kw: "테스트 제목"
+    )
 
     # settings.openai_api_key 가 빈 SecretStr 이면 fallback. 채워 둔다.
     from pydantic import SecretStr
@@ -426,6 +444,10 @@ def _streaming_client_with_stream_callable(
     streaming_graph = build_query_graph_for_streaming(deps)
 
     monkeypatch.setattr(routes_module, "stream_openai_answer", stream_callable)
+    # meta.title 생성도 네트워크 없이 — titler 를 fake 로 monkeypatch(테스트 결정론).
+    monkeypatch.setattr(
+        routes_module, "generate_conversation_title", lambda **_kw: "테스트 제목"
+    )
 
     from pydantic import SecretStr
 

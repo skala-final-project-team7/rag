@@ -57,6 +57,7 @@ from app.pipeline.query_graph import run_query
 from app.query.acl import ACLViolationError, build_acl_filter
 from app.query.formatter import format_response
 from app.query.openai_streaming import stream_openai_answer
+from app.query.titler import fallback_title, generate_conversation_title
 from app.schemas.enums import Intent, LlmModel
 from app.schemas.rag_state import HistoryTurn, RagState
 from app.schemas.response import QueryResponse, VerificationSummary
@@ -90,10 +91,13 @@ class QueryRequest(BaseModel):
         default_factory=list, description="이전 대화 이력 [{role, content}] (BFF가 DB에서 조회)"
     )
     stream: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "True 면 SSE 토큰 스트리밍 모드. False 면 답변 전체를 1회 token 이벤트로 송신. "
-            "PoC 환경(OpenAI 키 없음)에서는 True 라도 자동 비-streaming fallback."
+            "SSE 토큰 스트리밍 모드. api-spec v2.2.0 §1-1/§2-1 정합으로 이 경로는 '항상 "
+            "스트리밍'이 기본이며 기본값은 True 다(스펙 §1-1 line170 — 비-스트리밍 모드 미제공). "
+            "False 면 답변 전체를 1회 token 이벤트로 송신한다(하위 호환용). "
+            "PoC 환경(OpenAI 키/generator_provider 없음)에서는 True 라도 자동 "
+            "비-streaming fallback."
         ),
     )
 
@@ -117,63 +121,124 @@ def _token_event(text: str) -> dict[str, str]:
 
 
 def _error_event(code: ErrorCode, message: str) -> dict[str, str]:
-    """SSE ``error`` 이벤트. data 는 ``{"code", "message"}`` JSON (api-spec.md)."""
-    payload = {"code": code.value, "message": message}
+    """SSE ``error`` 이벤트. data 는 ``{"errorCode", "message"}`` JSON (api-spec v2.2.0 §1-1).
+
+    필드명은 ``errorCode`` 다 — 공통 Wrapper 의 정수 ``code`` 와 혼동 금지(SSE 에는 HTTP
+    정수 code 가 없다). 값은 ``ErrorCode`` 의 ML_* 3종(ML_SERVER_ERROR / ML_TIMEOUT /
+    ML_CONNECTION_ERROR) 중 하나이며 BFF 가 그대로 FE 로 중계한다(§2-1).
+    """
+    payload = {"errorCode": code.value, "message": message}
     return {"event": "error", "data": json.dumps(payload, ensure_ascii=False)}
+
+
+def _classify_ml_error(exc: Exception) -> ErrorCode:
+    """상류 예외를 api-spec §1-1 SSE 에러 코드(ML_* 3종) 로 분류한다.
+
+    openai 패키지를 import 하지 않고 예외 타입/클래스명으로 판별한다 — PoC(openai
+    미설치) 환경에서도 동작. ``APITimeoutError`` 는 이름에 "Timeout", ``APIConnectionError``
+    는 "Connection" 을 포함하므로 표준 ``TimeoutError`` / ``ConnectionError`` 와 함께 잡힌다.
+
+    Returns:
+        ML_TIMEOUT(타임아웃) / ML_CONNECTION_ERROR(연결 실패) / ML_SERVER_ERROR(그 외 내부 오류).
+    """
+    name = type(exc).__name__
+    if isinstance(exc, TimeoutError) or "Timeout" in name:
+        return ErrorCode.ML_TIMEOUT
+    if isinstance(exc, ConnectionError) or "Connection" in name:
+        return ErrorCode.ML_CONNECTION_ERROR
+    return ErrorCode.ML_SERVER_ERROR
 
 
 def _sse_payload(response: QueryResponse) -> list[dict[str, str]]:
     """QueryResponse → SSE 이벤트 시퀀스 (api-spec.md "SSE 이벤트 순서").
 
-    이벤트 5종 (api-spec v2.2.0 §1-1 정합):
+    이벤트 순서 (api-spec v2.2.0 §1-1 정합):
         1. ``token`` — 답변 텍스트. data=``{"content": ...}``. 비-streaming은 1회(전체 답변).
-        2. ``sources`` — 출처 카드 배열. data=``{"sources": [...]}``.
-        3. ``verification`` — 집계 검증 결과. data=``{"confidenceScore", "verificationResult"}``.
-        4. ``meta`` — 현재 구현 호환용 메타데이터(intent/used_llm/feedback_enabled/latency_ms).
-           ``title`` 은 ML 이 생성하지 않으므로 생략(스펙상 optional). 추후 제거 예정.
+        2. ``sources`` — 출처 카드 배열. data=``{"sources": [...]}``. 0건이면 빈 배열 1회.
+        3. ``verification`` — 집계 검증 결과 ``{"confidenceScore", "verificationResult"}``.
+           **검색 0건(RETRIEVAL_EMPTY)이면 생략한다**(스펙 §1-1 "0건 처리" — 검증할 근거 없음).
+           0건은 검증 단계를 수행하지 않아 ``verification`` 목록이 비므로 이를 신호로 쓴다.
+        4. ``meta`` — 현재 구현 호환용 메타데이터(intent/used_llm/feedback_enabled/latency_ms
+           + title). ``title`` 은 None 이면 생략(스펙상 optional, Required: N). 추후 제거 예정.
         5. ``done`` — 종료 마커. data=``{}`` (messageId는 BFF가 주입).
     """
     sources_payload = {"sources": [source.to_bff_payload() for source in response.sources]}
-    verification_payload = VerificationSummary.from_sentences(
-        response.verification
-    ).to_bff_payload()
-    meta_payload = {
+    meta_payload: dict[str, Any] = {
         "intent": response.intent.value,
         "used_llm": response.used_llm.value,
         "feedback_enabled": response.feedback_enabled,
         "latency_ms": response.latency_ms,
     }
-    return [
+    # title(Required: N) — 생성된 경우에만 포함하고 스펙 예시 순서대로 맨 뒤에 둔다.
+    if response.title:
+        meta_payload["title"] = response.title
+    events: list[dict[str, str]] = [
         _token_event(response.answer),
         {"event": "sources", "data": json.dumps(sources_payload, ensure_ascii=False)},
-        {
-            "event": "verification",
-            "data": json.dumps(verification_payload, ensure_ascii=False),
-        },
-        {"event": "meta", "data": json.dumps(meta_payload, ensure_ascii=False)},
-        {"event": "done", "data": json.dumps({})},
     ]
+    # 검색 0건(RETRIEVAL_EMPTY)에서는 검증을 수행하지 않아 verification 목록이 비며,
+    # 이때 verification 이벤트를 생략한다(스펙 §1-1 "0건 처리" — 검증할 근거 없음).
+    # 검증 문장이 하나라도 있으면 집계해 1회 송신한다.
+    if response.verification:
+        verification_payload = VerificationSummary.from_sentences(
+            response.verification
+        ).to_bff_payload()
+        events.append(
+            {
+                "event": "verification",
+                "data": json.dumps(verification_payload, ensure_ascii=False),
+            }
+        )
+    events.append({"event": "meta", "data": json.dumps(meta_payload, ensure_ascii=False)})
+    events.append({"event": "done", "data": json.dumps({})})
+    return events
+
+
+def _resolve_title(request: Request, *, question: str, answer: str) -> str:
+    """meta.title 로 쓸 대화 제목을 만든다 (api-spec v2.2.0 §1-1, Required: N).
+
+    실 LLM 이 가용하면(PoC fallback 조건이 아니면) GPT-4o-mini(보조 모델)로 생성하고,
+    그렇지 않거나 호출이 실패하면 질문 앞부분에서 결정론적 fallback 제목을 만든다.
+    ``generate_conversation_title`` 은 모듈 전역으로 참조하므로 테스트에서 monkeypatch
+    할 수 있다. 어떤 경우에도 예외를 밖으로 내보내지 않는다(제목 실패가 답변 스트림을
+    깨뜨리면 안 됨 — title 은 optional).
+    """
+    if _should_fallback_to_non_streaming(request):
+        return fallback_title(question)
+    settings = request.app.state.settings
+    try:
+        return generate_conversation_title(
+            question=question,
+            answer=answer,
+            api_key=settings.openai_api_key.get_secret_value(),
+            model=settings.llm_aux_model,
+        )
+    except Exception:  # noqa: BLE001 — 제목 생성 실패는 fallback 으로 흡수(스트림 보호).
+        _LOGGER.warning("title generation failed; using fallback", exc_info=True)
+        return fallback_title(question)
 
 
 async def _non_streaming_event_stream(
-    *, state: RagState, graph: Any
+    *, request: Request, state: RagState, graph: Any
 ) -> AsyncIterator[dict[str, str]]:
-    """비-streaming SSE 흐름 — run_query 실행 후 4종 이벤트 송신.
+    """비-streaming SSE 흐름 — run_query 실행 후 token/sources/(verification)/meta/done 송신.
 
     그래프/상류 예외는 HTTP 에러가 아니라 SSE ``error`` 이벤트로 전달하고 종료한다
-    (api-spec.md 오류 처리 정합).
+    (api-spec v2.2.0 §1-1 오류 처리 정합 — errorCode 는 ML_* 3종으로 분류).
     """
     try:
         response = run_query(state, graph=graph)
     except ACLViolationError as exc:
         # 시스템 단 안전망 — build_acl_filter는 항상 유효 필터를 만들므로 정상 흐름에선
         # 도달하지 않지만, 그래프 내부 버그/우회 시 ACL 위반이 표면화되어야 한다.
-        yield _error_event(ErrorCode.UPSTREAM_LLM_ERROR, f"ACL 시스템 오류: {exc}")
+        yield _error_event(ErrorCode.ML_SERVER_ERROR, f"ACL 시스템 오류: {exc}")
         return
     except Exception as exc:  # noqa: BLE001 — 상류 LLM/네트워크 예외 광범위 캐치 (PoC)
         _LOGGER.exception("non-streaming query failed")
-        yield _error_event(ErrorCode.UPSTREAM_LLM_ERROR, str(exc))
+        yield _error_event(_classify_ml_error(exc), str(exc))
         return
+    # meta.title — 답변 산출 후 제목 생성(실패 시 fallback). api-spec §1-1 Required: N.
+    response.title = _resolve_title(request, question=state.query, answer=response.answer or "")
     for event in _sse_payload(response):
         yield event
 
@@ -249,7 +314,7 @@ async def _streaming_event_stream(
             yield event
     except Exception as exc:  # noqa: BLE001 — 상류 LLM/네트워크 예외 광범위 캐치 (PoC)
         _LOGGER.exception("streaming query failed")
-        yield _error_event(ErrorCode.UPSTREAM_LLM_ERROR, str(exc))
+        yield _error_event(_classify_ml_error(exc), str(exc))
 
 
 async def _streaming_event_stream_inner(
@@ -297,6 +362,10 @@ async def _streaming_event_stream_inner(
             intent=intent,
             used_llm=used_llm,
             latency_ms=int(elapsed_ms),
+        )
+        # meta.title — 0건 분기도 제목을 채운다(질문 기반). api-spec §1-1 Required: N.
+        response.title = _resolve_title(
+            request, question=state.query, answer=response.answer or ""
         )
         for event in _sse_payload(response):
             yield event
@@ -400,6 +469,8 @@ async def _streaming_event_stream_inner(
         used_llm=rerank_state.used_llm,
         latency_ms=int(elapsed_ms),
     )
+    # meta.title — 스트리밍된 실제 답변을 맥락으로 제목 생성. api-spec §1-1 Required: N.
+    response.title = _resolve_title(request, question=state.query, answer=answer)
     # token 이벤트는 이미 송신했으므로 sources / verification / done 만 송신.
     # 답변이 차단 분기(BLOCKED_ANSWER_MESSAGE) 인 경우 본 라우트는 이미 원본 토큰을
     # 전송한 뒤이므로, 차단 안내를 별도 'token' 이벤트로 1회 더 송신해 UI 가 답변을
@@ -437,4 +508,17 @@ async def query_route(payload: QueryRequest, request: Request, graph: GraphDep) 
     if payload.stream and not _should_fallback_to_non_streaming(request):
         return EventSourceResponse(_streaming_event_stream(request=request, state=state))
 
-    return EventSourceResponse(_non_streaming_event_stream(state=state, graph=graph))
+    return EventSourceResponse(
+        _non_streaming_event_stream(request=request, state=state, graph=graph)
+    )
+
+
+@router.get("/ml/rag/health")
+async def rag_health() -> dict[str, str]:
+    """RAG Pipeline 헬스체크 (api-spec v2.2.0 §2-4-1).
+
+    BFF 가 RAG Pipeline 서버(질의/응답 생성)가 정상 응답 가능한지 확인하는 용도.
+    내부 의존성(Vector DB / LLM 등) 상세 상태는 보고하지 않고, 서버가 요청을 받아
+    응답할 수 있는 상태인지만 ``{"status": "UP"}`` 로 알린다(§2-4 공통 규칙).
+    """
+    return {"status": "UP"}
