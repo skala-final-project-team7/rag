@@ -312,6 +312,16 @@ async def _streaming_event_stream_inner(
     fallback_model = generator_config.fallback_model
     temperature = generator_config.temperature
     timeout_seconds = generator_config.timeout_seconds
+    # 답변 생성 입력 질의 — 비-streaming generator(manage_generator)와 동일하게 히스토리
+    # 관리자가 만든 contextualized_question 을 우선 사용하고, 없으면 원문 query 로 fallback.
+    # 후속 질문에서 스트리밍/비-streaming 답변이 같은 질의로 생성되도록 정합한다
+    # (generator.py `_build_generation_input_payload` 의 contextualized_query 와 동일 규칙).
+    answer_query = (
+        rerank_state.history_decision.contextualized_question
+        if rerank_state.history_decision is not None
+        and rerank_state.history_decision.contextualized_question
+        else state.query
+    )
 
     # lazy import — openai 없는 환경 (PoC) 에서도 모듈 로드 가능. 본 분기는 운영
     # 모드에서만 도달.
@@ -331,7 +341,7 @@ async def _streaming_event_stream_inner(
             model=primary_model,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
-            query=state.query,
+            query=answer_query,
             top_chunks=rerank_state.top_chunks,
         ):
             if not streaming_status_sent:
@@ -361,7 +371,7 @@ async def _streaming_event_stream_inner(
             model=fallback_model,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
-            query=state.query,
+            query=answer_query,
             top_chunks=rerank_state.top_chunks,
         ):
             if not streaming_status_sent:
