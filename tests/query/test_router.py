@@ -164,6 +164,34 @@ def test_history_decision_preserved_context_is_forwarded() -> None:
     assert result.intent is Intent.INCIDENT_RESPONSE
 
 
+def test_followup_contextualized_question_drives_routing_query() -> None:
+    # 후속 질문: 히스토리 관리자가 만든 contextualized_question 이 라우터의 검색·rewrite·의도
+    # 분류 기준 query 로 전달돼 검색에 맥락이 반영되는지, original_question 은 원문 그대로
+    # 보존되는지 회귀 보호.
+    decision = HistoryDecision(
+        decision="follow_up",
+        contextualized_question="IAM 정책 변경은 언제 발생했나요?",
+        preserved_context={"summary": "", "entities": [], "turn_refs": []},
+        reset_required=False,
+        confidence=0.9,
+        reason="follow_up 판정",
+    )
+    provider = _fake("operations_guide")
+    state = _state(query="그건 언제야?", history_decision=decision)
+    result = manage_router(state, provider=provider)
+
+    assert provider.requests, "라우터가 agent provider 를 호출해야 한다."
+    forwarded = provider.requests[0]
+    # 검색·rewrite·의도 분류 기준 query = contextualized_question.
+    assert forwarded.query == "IAM 정책 변경은 언제 발생했나요?"
+    # original_question 은 사용자 원문 발화를 보존.
+    assert forwarded.routing_input["original_question"] == "그건 언제야?"
+    # rewritten_queries(검색 입력)도 contextualized 기준으로 생성된다(원문 단편 아님).
+    assert any("IAM 정책 변경" in q for q in result.rewritten_queries)
+    # 원문 state.query 는 비파괴(불변).
+    assert state.query == "그건 언제야?"
+
+
 def test_state_query_is_not_mutated() -> None:
     state = _state()
     original_query = state.query

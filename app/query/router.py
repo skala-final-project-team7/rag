@@ -165,12 +165,18 @@ def _build_routing_input_payload(state: RagState) -> dict[str, Any]:
     """RagState 를 query-routing-agent 의 routing input dict 로 변환한다.
 
     History Manager 단계의 산출물(``state.history_decision``) 이 있으면 그 값을 그대로
-    전달하고, 없으면 ``new_topic`` 안전 기본값. ``original_question`` 은 history
-    contextualized_question 이 있으면 원문 ``state.query`` 를, 없으면 동일하게 사용한다.
+    전달하고, 없으면 ``new_topic`` 안전 기본값을 쓴다.
+
+    ``query`` 는 의도 분류·query rewrite(→검색 임베딩)의 기준이 되는 질의다. 히스토리
+    관리자가 만든 ``contextualized_question`` 이 있으면 그것을(없으면 원문 ``state.query``)
+    사용해, 후속 질문("그건 언제야?" 등)이 직전 맥락을 반영한 self-contained 질의로
+    검색·재작성되도록 한다. ``original_question`` 은 사용자가 입력한 원문(``state.query``)을
+    그대로 보존해 LLM 의도 프롬프트와 로그에서 원 발화를 구분할 수 있게 한다.
     """
     history_decision_label = HistoryDecisionLabel.NEW_TOPIC.value
     preserved_context: dict[str, Any] = {"summary": "", "entities": [], "turn_refs": []}
     reset_required = False
+    contextualized_query = state.query
     if state.history_decision is not None:
         history_decision_label = _normalize_history_decision_value(state.history_decision.decision)
         if state.history_decision.preserved_context:
@@ -178,12 +184,15 @@ def _build_routing_input_payload(state: RagState) -> dict[str, Any]:
                 state.history_decision.preserved_context
             )
         reset_required = bool(state.history_decision.reset_required)
+        # 후속 질문이면 contextualized_question 을 검색·rewrite 기준 query 로 사용(없으면 원문).
+        if state.history_decision.contextualized_question:
+            contextualized_query = state.history_decision.contextualized_question
 
     return {
         "conversation_id": state.conversation_id or "",
         "user_id": state.user_id,
         "original_question": state.query,
-        "query": state.query,
+        "query": contextualized_query,
         "history_decision": history_decision_label,
         "preserved_context": preserved_context,
         "reset_required": reset_required,
