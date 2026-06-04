@@ -23,9 +23,9 @@ from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder  #
 from app.pipeline.ingestion_graph import (  # noqa: E402
     IngestionGraphDeps,
     build_ingestion_graph,
+    manage_document_analyzer,
     run_ingestion,
 )
-from app.pipeline.stubs import document_analyzer_stub  # noqa: E402
 from app.schemas.chunk import Chunk, ChunkMetadata  # noqa: E402
 from app.schemas.enums import (  # noqa: E402
     AttachmentType,
@@ -155,8 +155,8 @@ def deps() -> IngestionGraphDeps:
 # --- IngestionGraphDeps 기본값 회귀 ---
 
 
-def test_deps_default_document_analyzer_is_stub() -> None:
-    """document_analyzer_node 기본값이 stub (Agent 코드 전달 시 교체 지점)."""
+def test_deps_default_document_analyzer_is_real_adapter() -> None:
+    """document_analyzer_node 기본값이 실 어댑터(manage_document_analyzer) — Agent 통합 4/4."""
     settings = _settings()
     store = QdrantPoolStore.in_memory(settings, dense_dimension=8)
     store.bootstrap_collections()
@@ -168,7 +168,7 @@ def test_deps_default_document_analyzer_is_stub() -> None:
         chunk_lookup=FakeChunkTextLookup(),
         jobs=FakeIngestionJobsRepository(),
     )
-    assert deps.document_analyzer_node is document_analyzer_stub
+    assert deps.document_analyzer_node is manage_document_analyzer
 
 
 # --- 본문만 (첨부 없음) ---
@@ -312,7 +312,7 @@ def test_final_state_carries_doc_type_and_chunks(deps: IngestionGraphDeps) -> No
 
     final = run_ingestion(state, graph=build_ingestion_graph(deps))
 
-    assert final.doc_type is not None  # stub 이 "operation" 채움
+    assert final.doc_type == "operation"  # 기본 Fake 분류기 → operation (직전 stub 동작 정합)
     assert final.chunks  # 본문 청크가 있어야 함
     assert final.page.page_id == "P1"  # 입력 페이지 보존
 

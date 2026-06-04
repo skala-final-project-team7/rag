@@ -7,25 +7,27 @@ app.ingestion / app.query 의 단계별 노드를 LangGraph StateGraph로 연결
 - query_graph.py      Query 그래프 (ACL → 히스토리 → 라우터 → 검색·재순위화 → 생성 → 검증 → 포맷)
                       히스토리 관리자의 needs_search=false 시 검색 단계 스킵 분기 포함
 - ingestion_graph.py  Ingestion 그래프 (analyze → chunk → embed_upsert + jobs 기록)
-                      Agent 노드(문서 분석기)는 stub, chunk_attachment는 deps 주입
+                      문서 분석기[Agent]는 manage_document_analyzer 어댑터(PoC=Fake)
 - nodes.py            Pipeline 노드 래퍼 (empty_retrieval / verify_pipeline / after_search_branch)
 - stubs.py            Agent stub 4종 (router / generator / verify_llm_evaluator / document_analyzer)
-                      — 교체 지점
+                      — Agent 통합 4/4 완료, 모두 실 어댑터로 교체됨 (stub 은 회귀 보호용 보존)
 
 구현 상태:
 - query_graph.py      QueryGraphDeps / build_query_graph / run_query — feature11 통합 (Phase 1).
                       FastAPI SSE 라우트(Phase 2) 완료. Agent 노드는 stubs.py로 교체 가능.
-- ingestion_graph.py  IngestionGraphDeps / build_ingestion_graph / run_ingestion
-                      [feature6 Phase 4] — 본 담당자 영역의 마지막 단위.
+- ingestion_graph.py  IngestionGraphDeps / build_ingestion_graph / run_ingestion /
+                      manage_document_analyzer [feature6 Phase 4 + Agent 통합 4/4]
 - nodes.py            empty_retrieval_node / verify_pipeline_node / after_search_branch
                       [feature11 통합]
 - stubs.py            router_stub / generator_stub / verify_llm_evaluator_stub /
-                      document_analyzer_stub [feature11 + feature6 Phase 4]
+                      document_analyzer_stub [feature11 + feature6 Phase 4] — 4종 모두
+                      실 어댑터로 교체 완료, 회귀 보호용 보존
 """
 
 from app.pipeline.ingestion_graph import (
     IngestionGraphDeps,
     build_ingestion_graph,
+    manage_document_analyzer,
     run_ingestion,
 )
 from app.pipeline.nodes import (
@@ -52,6 +54,7 @@ __all__ = [
     "document_analyzer_stub",
     "empty_retrieval_node",
     "generator_stub",
+    "manage_document_analyzer",
     "router_stub",
     "run_ingestion",
     "run_query",

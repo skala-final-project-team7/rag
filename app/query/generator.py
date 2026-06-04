@@ -28,38 +28,36 @@
     Limit fallback 발생 시 inc) + ``answer_generation_latency_seconds`` (답변
     생성 단계 latency observe). 설계서 §6.4 KPI 환각 비율 / P95 관측 지점
     정합. logging.warning 은 그대로 보존 (운영 로그 + 메트릭 이중화).
+  - 2026-06-04, 문서 정합 — (A)SSE 토큰 스트리밍 / (B)운영 OpenAI HTTP transport /
+    (C)Rate Limit fallback 이 이후 세션에 구현 완료됨을 반영(하단 "구현 현황").
+    (D)(E)는 agent 패키지 담당으로 이관 유지.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, Pydantic 2.7+
   - NOTE: answer_generation_agent 는 ai-agent 저장소에서 vendoring 한 별도 패키지
           이며 무수정 보존한다. 본 어댑터만 RAG 컨벤션을 따른다. LLM provider
-          기본값은 FakeAnswerLLMProvider (PoC·테스트). agent 의
-          OpenAIAnswerLLMProvider 는 transport callable 주입을 요구하므로 운영
-          모드에서도 본 세션은 fake provider 자동 wiring (사용자 결정 — Plan v2 B).
+          기본값(provider=None)은 FakeAnswerLLMProvider (PoC·테스트)이며, 운영
+          (build_real_deps)은 OpenAIAnswerLLMProvider 에 app/query/openai_transport.py
+          의 build_openai_chat_transport 를 주입해 GPT-4o 를 직접 호출한다.
 
-[본 세션 미구현 — 다음 단계 이관 (rag-pipeline-design.md §4.6 정합)]
-  - (A) SSE 토큰 스트리밍 (설계서 §4.6.4)
-        agent MVP 는 streaming_supported=False. AnswerGenerationService.generate
-        은 전체 답변을 동기 반환한다. 본 어댑터도 1회 호출·1회 반환. SSE 라우트
-        (app/api/routes.py)는 token 이벤트를 1회만 송신 (전체 답변) — 직전
-        세션 동작 그대로 유지. 다음 단계: agent streaming API 추가 OR 본 저장소
-        에 OpenAI Streaming → AnswerLLMResult chunk 어댑터 transport 추가 →
-        SSE 라우트 multi-token 송신 확장.
-  - (B) 운영 OpenAI HTTP transport (설계서 §4.6.3 GPT-4o 운영 호출)
-        agent OpenAIAnswerLLMProvider 는 transport=None 시 ProviderConfiguration
-        Error 를 던진다. 본 세션은 build_real_deps 도 PoC 와 동일하게 fake 자동
-        wiring. 다음 단계: Agent 담당자가 transport 제공 OR 본 저장소가
-        openai 클라이언트(이미 의존성) 기반 transport callable 작성 후 주입.
-  - (C) Rate Limit Fallback — GPT-4o-mini 다운그레이드 (설계서 §4.6.5)
-        agent 에 select_generation_model(use_fallback=True) 인터페이스만 있음.
-        본 세션은 LLM 실패 시 안전 fallback (stub-like)만 수행. 다음 단계: B
-        도입 후 retry orchestrator 추가 + verification.note 기록.
-  - (D) Function Calling 스키마 강제 (설계서 §4.6.1)
-        agent 는 prompt instruction 으로 JSON schema 요청. OpenAI tools= 미설정.
-        Agent 담당자 영역 — 본 저장소가 수정하지 않음.
+[구현 현황 — rag-pipeline-design.md §4.6 정합]
+  - (A) SSE 토큰 스트리밍 (설계서 §4.6.4) — ✅ 구현(feature14). 운영 경로는
+        app/query/openai_streaming.py 의 stream_openai_answer 로 token chunk 를
+        다중 송신한다. PoC(OpenAI 키/generator_provider 없음)는 전체 답변 1회
+        송신으로 자동 fallback.
+  - (B) 운영 OpenAI HTTP transport (설계서 §4.6.3 GPT-4o 운영 호출) — ✅ 구현.
+        build_real_deps 가 OpenAIAnswerLLMProvider 에 app/query/openai_transport.py
+        의 build_openai_chat_transport(동기 HTTP transport)를 주입한다.
+  - (C) Rate Limit Fallback — GPT-4o-mini 다운그레이드 (설계서 §4.6.5) — ✅ 구현
+        (feature15). AnswerProviderError(error_type='rate_limit_error') 캐치 후
+        generate(use_fallback_model=True) 로 1회 재시도하고 llm_fallback_total
+        메트릭을 inc 한다.
+  - (D) Function Calling 스키마 강제 (설계서 §4.6.1) — 이관(Agent 담당자 영역).
+        agent 는 prompt instruction 으로 JSON schema 요청, OpenAI tools= 미설정.
+        본 저장소가 수정하지 않음.
   - (E) 자연어 출처 인용 패턴 — "[스페이스명]…" / "첨부 파일 [filename]에 따르면…"
-        (설계서 §4.6.1 v0.2.2 신설). agent prompt template 에 미반영. Agent
-        담당자 영역 — 본 저장소가 수정하지 않음.
+        (설계서 §4.6.1 v0.2.2 신설) — 이관(Agent 담당자 영역). agent prompt
+        template 에 미반영. 본 저장소가 수정하지 않음.
 --------------------------------------------------
 """
 

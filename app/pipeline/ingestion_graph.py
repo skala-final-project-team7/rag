@@ -4,16 +4,20 @@
 작성자 : 최태성
 작성목적 : feature6 Phase 4 — 표준 PageObject 를 받아 본문 + 첨부 청크를 적재까지 가는
           단일 페이지 Ingestion LangGraph. 설계서 §3.1 Big Picture 정합으로 analyze →
-          chunk → embed_upsert 3 stage 를 한 위치에서 wiring 한다. Agent 노드(문서
-          분석기)는 stub 으로 두고, 각 단계 종료 시 `IngestionJobsRepository.record`
-          로 db-schema §2.3 ingestion_jobs 에 기록한다 (`docs/rag-pipeline-design.md`
-          §3, `docs/db-schema.md` §2.3, `app/CLAUDE.md` §2).
+          chunk → embed_upsert 3 stage 를 한 위치에서 wiring 한다. 문서 분석기 [Agent]
+          노드는 manage_document_analyzer 어댑터(PoC=Fake)로 wiring 하고, 각 단계 종료 시
+          `IngestionJobsRepository.record` 로 db-schema §2.3 ingestion_jobs 에 기록한다
+          (`docs/rag-pipeline-design.md` §3, `docs/db-schema.md` §2.3, `app/CLAUDE.md` §2).
 작성일 : 2026-05-18
 변경사항 내역 (날짜, 변경목적, 변경내용 순)
   - 2026-05-18, 최초 작성, feature6 Phase 4 — IngestionGraphDeps + build_ingestion_graph
     + run_ingestion + 3 노드 (analyze_document / chunk_documents / embed_upsert).
     chunk_attachment 는 deps 에 callable 로 주입 가능 (파일 시스템 의존성 회피).
     PDF/CSV (feature4-B 대기) 의 ValueError 는 catch 후 잡 기록 + 본문은 정상 진행.
+  - 2026-06-04, Agent 통합 4/4 — 문서 분석기 stub → 실 어댑터(manage_document_analyzer)로
+    기본값 교체. app/ingestion/document_analyzer.py(featureI-4b 백포트) + space_doc_type_cache
+    를 wiring. PoC 는 결정론 Fake 분류기(OPERATION), 운영은 build_real_ingestion_deps 가
+    OpenAI 분류기 + MySQL 캐시 주입. document_analyzer_stub 은 stubs.py 에 회귀 보호용 보존.
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, LangGraph 0.2.x
@@ -35,11 +39,15 @@ from langgraph.graph import END, StateGraph
 
 from app.ingestion.attachment_analyzer import analyze_attachment
 from app.ingestion.chunker import chunk_attachment, chunk_page
+from app.ingestion.document_analyzer import (
+    DocTypeClassification,
+    DocumentAnalyzer,
+    FakeDocTypeClassifier,
+)
 from app.ingestion.embedder.base import DenseEmbedder, SparseEmbedder
 from app.ingestion.indexer import index_chunks
-from app.pipeline.stubs import document_analyzer_stub
 from app.schemas.chunk import Chunk
-from app.schemas.enums import IngestionStage, IngestionStatus
+from app.schemas.enums import DocType, IngestionStage, IngestionStatus
 from app.schemas.page_object import Attachment, PageObject
 from app.schemas.rag_state import IngestionState
 from app.storage.chunk_lookup import ChunkTextLookup, FakeChunkTextLookup
@@ -50,6 +58,7 @@ from app.storage.jobs import (
 )
 from app.storage.mongo_cache import EmbeddingCache
 from app.storage.qdrant_client import QdrantPoolStore
+from app.storage.space_doc_type_cache import FakeSpaceDocTypeCache
 
 # 노드 시그니처 — (IngestionState) -> IngestionState.
 IngestionNode = Callable[[IngestionState], IngestionState]
@@ -57,14 +66,50 @@ IngestionNode = Callable[[IngestionState], IngestionState]
 # chunk_attachment 시그니처 — 파일 시스템 의존성을 갖는 함수라 deps 주입으로 테스트 가능.
 ChunkAttachmentFn = Callable[..., list[Chunk]]
 
+# 문서 분석기 [Agent] PoC 기본 분류 — LLM 미설정 시 결정론 OPERATION (직전 stub 동작 정합).
+_DEFAULT_FAKE_CLASSIFICATION = DocTypeClassification(dominant=DocType.OPERATION, confidence=1.0)
+
+
+def manage_document_analyzer(
+    state: IngestionState,
+    *,
+    analyzer: DocumentAnalyzer | None = None,
+) -> IngestionState:
+    """문서 분석기 노드 [Agent 통합 4/4] — 스페이스 doc_type 을 ``state.doc_type`` 에 담는다.
+
+    ``app/ingestion/document_analyzer.py`` 의 ``DocumentAnalyzer`` (캐시 우선 → 분류 →
+    캐싱 → 폴백)를 in-process 로 호출한다. ``analyzer`` 미주입(PoC·테스트)이면 결정론
+    Fake 분류기(OPERATION@1.0) + in-memory 캐시로 구성해 직전 stub 과 동일하게
+    doc_type="operation" 을 채우되, 실 ``DocumentAnalyzer`` 코드 경로(캐시·폴백)를 그대로
+    탄다. 운영은 ``build_real_ingestion_deps`` 가 OpenAIDocTypeClassifier +
+    MySQLSpaceDocTypeCache 로 조립한 analyzer 를 functools.partial 로 주입한다
+    (router/generator/verifier 와 동일 패턴).
+
+    Args:
+        state: Ingestion 그래프 상태. ``page`` 만 채워져 진입한다.
+        analyzer: 스페이스 doc_type 판별기. None 이면 결정론 Fake 분석기를 쓴다.
+
+    Returns:
+        ``doc_type`` 이 채워진 상태. ``IngestionState.doc_type`` 은 본문 doc_type 자리
+        이므로 본 노드는 본문에만 적용된다(첨부의 attachment_type 은 ``analyze_attachment``
+        가 결정).
+    """
+    resolver = analyzer or DocumentAnalyzer(
+        classifier=FakeDocTypeClassifier(result=_DEFAULT_FAKE_CLASSIFICATION),
+        cache=FakeSpaceDocTypeCache(),
+    )
+    state.doc_type = resolver.resolve_doc_type(state.page).value
+    return state
+
 
 @dataclass(slots=True)
 class IngestionGraphDeps:
     """Ingestion 그래프 의존성 묶음 — 그래프 빌더가 노드에 wiring 한다.
 
-    Pipeline / Storage 의존성(Phase 1·2·3 모듈)은 모두 호출자가 주입한다. Agent 노드
-    (문서 분석기)는 stub 기본값. Agent 코드 전달 시 ``document_analyzer_node`` 만
-    교체하면 그래프는 변경 없이 동작한다.
+    Pipeline / Storage 의존성(Phase 1·2·3 모듈)은 모두 호출자가 주입한다. 문서 분석기
+    [Agent] 노드는 실 어댑터(``manage_document_analyzer``)가 기본값이며, PoC 는 결정론
+    Fake 분류기로 동작한다. 운영은 ``build_real_ingestion_deps`` 가 OpenAI 분류기 +
+    MySQL 캐시를 partial 로 주입한다(``document_analyzer_node`` 만 교체).
     """
 
     # --- Pipeline / Storage 의존성 ---
@@ -75,8 +120,8 @@ class IngestionGraphDeps:
     chunk_lookup: ChunkTextLookup = field(default_factory=FakeChunkTextLookup)
     jobs: IngestionJobsRepository = field(default_factory=FakeIngestionJobsRepository)
 
-    # --- Agent 노드 — 기본값은 stub. 실 Agent 코드 전달 시 교체. ---
-    document_analyzer_node: IngestionNode = field(default=document_analyzer_stub)
+    # --- Agent 노드 — 기본값은 실 어댑터(manage_document_analyzer). PoC=Fake 분류기. ---
+    document_analyzer_node: IngestionNode = field(default=manage_document_analyzer)
 
     # --- chunk_attachment 주입 — 테스트에서 파일 시스템 의존성 회피용. ---
     chunk_attachment_fn: ChunkAttachmentFn = field(default=chunk_attachment)
@@ -296,5 +341,6 @@ __all__ = [
     "IngestionGraphDeps",
     "IngestionNode",
     "build_ingestion_graph",
+    "manage_document_analyzer",
     "run_ingestion",
 ]

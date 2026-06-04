@@ -37,7 +37,9 @@
             * verify_llm_evaluator_stub → ``app/query/verifier_evaluator.py`` 의
               ``manage_verifier_evaluator`` (Agent 통합 3/4 완료, 2026-05-19).
               본 stub 은 회귀 보호용으로 보존.
-            * document_analyzer_stub → Agent 문서 분석기 (Agent 통합 4/4 대기)
+            * document_analyzer_stub → ``app/pipeline/ingestion_graph.py`` 의
+              ``manage_document_analyzer`` (Agent 통합 4/4 완료, 2026-06-04).
+              본 stub 은 회귀 보호용으로 보존.
           본 파일 자체는 Agent 코드를 포함하지 않는다 (담당 영역 분리 — `app/CLAUDE.md`
           "담당 범위를 벗어난 파일은 수정하지 않는다").
 --------------------------------------------------
@@ -151,10 +153,11 @@ def verify_llm_evaluator_stub(
 def document_analyzer_stub(state: IngestionState) -> IngestionState:
     """문서 분석기 [Agent] fake — 설계서 §8 fallback 정합으로 doc_type 기본값 채움.
 
-    실 문서 분석기(`docs/rag-pipeline-design.md` §3.3, Agent 담당자 영역)가 GPT-4o-mini
-    Function Calling 으로 스페이스별 doc_type 을 1회 판별·캐싱하는 자리에, 본 stub 은
-    LLM 실패 / confidence < 0.6 fallback 정합으로 ``doc_type = "operation"`` 을 채운다
-    (chunking-strategy.md §6 + design §8).
+    실 문서 분석기(`docs/rag-pipeline-design.md` §3.3)는 2026-06-04 Agent 통합 4/4 로
+    ``app/pipeline/ingestion_graph.py`` 의 ``manage_document_analyzer`` (DocumentAnalyzer)
+    가 자리에 wiring 되었다. 본 stub 은 회귀 보호용으로 보존하며, LLM 실패 / confidence
+    < 0.6 fallback 정합으로 ``doc_type = "operation"`` 을 채운다 (chunking-strategy.md §6
+    + design §8).
 
     Args:
         state: Ingestion 그래프 상태. ``page`` 만 채워져 진입한다.

@@ -477,8 +477,7 @@ def test_build_poc_ingestion_deps_returns_all_fake_adapters() -> None:
     """PoC ingestion 부트스트랩 — 모든 어댑터가 Fake 인스턴스 (외부 의존성 0)."""
     from app.api.deps import build_poc_ingestion_deps
     from app.ingestion.chunker import chunk_attachment as real_chunk_attachment
-    from app.pipeline.ingestion_graph import IngestionGraphDeps
-    from app.pipeline.stubs import document_analyzer_stub
+    from app.pipeline.ingestion_graph import IngestionGraphDeps, manage_document_analyzer
     from app.storage.chunk_lookup import FakeChunkTextLookup
     from app.storage.jobs import FakeIngestionJobsRepository
     from app.storage.mongo_cache import FakeEmbeddingCache
@@ -491,8 +490,8 @@ def test_build_poc_ingestion_deps_returns_all_fake_adapters() -> None:
     assert isinstance(deps.cache, FakeEmbeddingCache)
     assert isinstance(deps.chunk_lookup, FakeChunkTextLookup)
     assert isinstance(deps.jobs, FakeIngestionJobsRepository)
-    # Agent 노드는 stub 기본값
-    assert deps.document_analyzer_node is document_analyzer_stub
+    # 문서 분석기 노드는 실 어댑터(manage_document_analyzer) 기본값 — Agent 통합 4/4
+    assert deps.document_analyzer_node is manage_document_analyzer
     # chunk_attachment_fn 은 실 함수 default — 운영 시점에 fake 주입 가능
     assert deps.chunk_attachment_fn is real_chunk_attachment
 

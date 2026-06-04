@@ -76,6 +76,7 @@
 --------------------------------------------------
 """
 
+from functools import partial
 from pathlib import Path
 
 from app.adapters.json_fixture import JsonFixtureSourceAdapter
@@ -83,7 +84,7 @@ from app.config import Settings, get_settings
 from app.ingestion.chunker import chunk_attachment, chunk_page
 from app.ingestion.embedder.base import FakeDenseEmbedder, FakeSparseEmbedder
 from app.ingestion.indexer import index_chunks
-from app.pipeline.ingestion_graph import IngestionGraphDeps
+from app.pipeline.ingestion_graph import IngestionGraphDeps, manage_document_analyzer
 from app.pipeline.query_graph import QueryGraphDeps
 from app.query.reranker.base import FakeCrossEncoderReranker
 from app.schemas.chunk import Chunk
@@ -331,7 +332,8 @@ def build_poc_ingestion_deps(settings: Settings | None = None) -> IngestionGraph
         settings: 환경 설정. None 이면 ``get_settings()`` 로 lazy 로드.
 
     Returns:
-        모든 Fake 어댑터가 wiring 된 ``IngestionGraphDeps``. Agent 노드는 stub 기본값.
+        모든 Fake 어댑터가 wiring 된 ``IngestionGraphDeps``. 문서 분석기[Agent] 노드는
+        manage_document_analyzer 기본값(결정론 Fake 분류기 → doc_type="operation").
     """
     # Fake 어댑터들은 함수 본문 내 import — 본 모듈 최상단을 가볍게 유지.
     from app.storage.chunk_lookup import FakeChunkTextLookup
@@ -375,8 +377,9 @@ def build_real_ingestion_deps(settings: Settings | None = None) -> IngestionGrap
         settings: 환경 설정. None 이면 ``get_settings()`` 로 lazy 로드.
 
     Returns:
-        운영 어댑터 6종이 wiring 된 ``IngestionGraphDeps``. Agent 노드(문서 분석기)
-        는 stub 기본값 — Agent 코드 전달 시 ``deps.document_analyzer_node`` 만 교체.
+        운영 어댑터 6종 + 문서 분석기[Agent]가 wiring 된 ``IngestionGraphDeps``. 문서
+        분석기는 OpenAIDocTypeClassifier + MySQLSpaceDocTypeCache 로 조립해
+        ``manage_document_analyzer`` 에 partial 로 주입한다(Agent 통합 4/4 완료).
 
     Raises:
         ImportError: sentence-transformers / fastembed 미설치 시 (embedding extra
@@ -386,17 +389,30 @@ def build_real_ingestion_deps(settings: Settings | None = None) -> IngestionGrap
 
     # 실 어댑터 import 는 모두 lazy — embedding extra 미설치 환경에서도 PoC 경로와
     # 본 모듈 import 는 동작해야 한다 (build_real_deps 정책 정합).
+    from app.ingestion.document_analyzer import DocumentAnalyzer, OpenAIDocTypeClassifier
     from app.ingestion.embedder.dense import E5DenseEmbedder
     from app.ingestion.embedder.sparse import BM25SparseEmbedder
     from app.storage.chunk_lookup import MongoChunkTextLookup
     from app.storage.jobs import MongoIngestionJobsRepository
     from app.storage.mongo_cache import MongoEmbeddingCache
+    from app.storage.space_doc_type_cache import MySQLSpaceDocTypeCache
 
     dense = E5DenseEmbedder(settings.dense_embedding_model)
     sparse = BM25SparseEmbedder()
     # dense_dimension 은 어댑터가 모델 로드 후 보고한 값 (E5-large = 1024).
     store = QdrantPoolStore.from_settings(settings, dense_dimension=dense.dimension)
     store.bootstrap_collections()
+
+    # 문서 분석기 [Agent 통합 4/4] — 운영은 GPT-4o-mini Function Calling 분류기 +
+    # MySQL space_doc_type_cache. manage_document_analyzer 에 partial 로 주입한다
+    # (라우터/생성기/검증기와 동일 패턴 — 그래프·노드 코드는 무변경).
+    document_analyzer = DocumentAnalyzer(
+        classifier=OpenAIDocTypeClassifier(
+            api_key=settings.openai_api_key.get_secret_value(),
+            model=settings.llm_aux_model,
+        ),
+        cache=MySQLSpaceDocTypeCache.from_settings(settings),
+    )
 
     return IngestionGraphDeps(
         dense_embedder=dense,
@@ -405,4 +421,5 @@ def build_real_ingestion_deps(settings: Settings | None = None) -> IngestionGrap
         cache=MongoEmbeddingCache.from_settings(settings),
         chunk_lookup=MongoChunkTextLookup.from_settings(settings),
         jobs=MongoIngestionJobsRepository.from_settings(settings),
+        document_analyzer_node=partial(manage_document_analyzer, analyzer=document_analyzer),
     )
