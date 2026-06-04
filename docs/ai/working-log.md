@@ -7195,3 +7195,27 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
 부재·stream=false 존중). `RagState` 격리 검증(space_key 필드 부재). 전체 pytest·`./scripts/verify.sh`
 는 Mac/3.11. 테스트: `tests/api/test_query_route.py` 에 `stream=false` 비-streaming 강제 회귀 추가,
 docstring 정합. (`spaceKey` 를 보내던 테스트는 없었음 — `_body()` 가 이미 미포함.)
+
+## 2026-06-04 — api-spec v2.4.0 정본 정합 (`/ml/query`: stream 기본 false + role lowercase)
+
+사용자가 LINA API Spec **v2.4.0** 전문(`docs/api-spec.md` 로 교체 반영)을 정본으로 전달. ML
+표면(`/ml/query`)을 v2.4.0 에 정밀 정합했다(spaceKey 제거는 직전 작업에서 완료).
+
+**변경**
+
+- `app/schemas/rag_state.py` — `HistoryTurn._normalize_role` 을 UPPER → **lowercase** 로 변경.
+  v2.4.0 §2-1: `history[].role` 은 `user`/`assistant` lowercase(LLM/OpenAI 산업 표준, Enum 정책의
+  명시적 예외, boundary 변환 없음). vendored 히스토리 관리자도 입력 role 을 내부 소문자화
+  (`history_manager_agent/history/normalization.py:194`)하므로 무영향.
+- `app/api/routes.py` — `QueryRequest.stream` 기본값 True → **False**(§2-1 표 "기본 false, BFF 는
+  항상 true"). 라우트 분기(`payload.stream and not _should_fallback`)는 무변경 — BFF 가 true 를
+  보내면 streaming, 생략/false 면 비-streaming. changelog 보강.
+- `docs/api-spec.md` — 저장소 ML 계약 문서를 **업로드된 LINA API Spec v2.4.0 전문으로 교체**(정본화).
+- `docs/sse-frontend-contract.md` — 요청 표 `stream` 기본값 true → false(BFF 항상 true 주석).
+- 테스트 — `tests/schemas/test_rag_state.py` 에 `HistoryTurn` role lowercase 정규화 회귀 추가,
+  `test_query_route.py` docstring v2.4.0 정합.
+
+**검증**: repo 전체 `ruff check .` + format + py_compile 통과. 실 `QueryRequest` 격리 exec 로 명세
+페이로드(stream=true·role 소문자) 검증 + stream 생략 시 기본 False·UPPER 입력→소문자 정규화 확인.
+전체 pytest·`./scripts/verify.sh` 는 Mac/3.11. 응답측(SSE 7종·sources/verification/meta/done/error)은
+이미 v2.2.0 정합 상태로 v2.4.0 과 차이 없음(재확인).

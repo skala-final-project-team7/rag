@@ -3,7 +3,7 @@
 from app.schemas.chunk import Chunk, ChunkMetadata
 from app.schemas.enums import IngestionStage, Intent
 from app.schemas.page_object import PageObject
-from app.schemas.rag_state import IngestionState, RagState
+from app.schemas.rag_state import HistoryTurn, IngestionState, RagState
 
 _PAGE = PageObject(
     page_id="CONF-PAGE-1",
@@ -27,6 +27,22 @@ def test_rag_state_minimal_input() -> None:
     assert state.candidates == []
     assert state.top_chunks == []
     assert state.answer is None
+
+
+def test_history_turn_role_normalized_to_lowercase() -> None:
+    """api-spec v2.4.0 §2-1 — history[].role 은 lowercase(user/assistant)로 정규화한다.
+
+    명세 예시는 소문자이며 boundary 변환이 없다. 대소문자 무관 입력을 수용하되 표준 소문자로
+    저장한다(멀티턴 히스토리 관리자도 내부적으로 소문자화).
+    """
+    assert HistoryTurn(role="user", content="q").role == "user"
+    assert HistoryTurn(role="assistant", content="a").role == "assistant"
+    # 대소문자 무관 수용 — 대문자/혼합 입력도 소문자로 정규화.
+    assert HistoryTurn(role="USER", content="q").role == "user"
+    assert HistoryTurn(role="Assistant", content="a").role == "assistant"
+    # content 는 보존.
+    turn = HistoryTurn(role="user", content="S3 관련 장애 이력 알려줘")
+    assert turn.content == "S3 관련 장애 이력 알려줘"
 
 
 def test_rag_state_progressive_population() -> None:

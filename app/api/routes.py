@@ -36,9 +36,13 @@
         내부 분기로 처리한다.
   - 2026-06-04, 명세 정합 — 최종 ``/ml/query`` 요청 계약 반영: (1) ``spaceKey`` 요청 필드
     제거(RagState passthrough·search_node 하드 스코프 함께 제거 — 검색 스코프는 라우터
-    추정 ``metadata_filters`` 로만). (2) ``stream`` 요청 필드 재도입(기본 True) — 클라이언트가
-    스트리밍 여부를 제어하고, ``stream=False`` 면 단일 ``token`` 1회 송신. ``accessToken``/
-    ``cloudId`` 는 수신하지 않는다(수집 단계 이관 — 종전과 동일).
+    추정 ``metadata_filters`` 로만). (2) ``stream`` 요청 필드 재도입 — 클라이언트가 스트리밍
+    여부를 제어하고, ``stream=False`` 면 단일 ``token`` 1회 송신. ``accessToken``/``cloudId``
+    는 수신하지 않는다(수집 단계 이관 — 종전과 동일).
+  - 2026-06-04, **api-spec v2.4.0 정본 정합** — 업로드된 LINA API Spec v2.4.0 기준 재정렬:
+    (1) ``stream`` 기본값 True → **False**(§2-1 표 "기본 false, BFF 는 항상 true"). (2)
+    ``history[].role`` 정규화 UPPER → **lowercase**(``user``/``assistant`` — Enum 정책의 명시적
+    예외, boundary 변환 없음 — `app/schemas/rag_state.py`).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+, sse-starlette 2.1+
@@ -92,11 +96,13 @@ class QueryRequest(BaseModel):
     history: list[HistoryTurn] = Field(
         default_factory=list, description="이전 대화 이력 [{role, content}] (BFF가 DB에서 조회)"
     )
-    # 명세 §2-1 — 클라이언트가 SSE 토큰 스트리밍 여부를 제어한다(기본 True). True 면 토큰을
-    # 다중 송신하고, False 면 답변을 단일 ``token`` 이벤트로 1회 송신한다(어느 쪽이든 응답은
-    # SSE). 단, ``stream=True`` 라도 PoC 환경(OpenAI 키/generator_provider 없음)이면 서버가
-    # 내부적으로 비-streaming 으로 자동 fallback 한다(외부 SSE 이벤트 계약은 동일).
-    stream: bool = Field(default=True, description="SSE 토큰 스트리밍 여부(기본 true)")
+    # 명세 v2.4.0 §2-1 — 클라이언트가 SSE 토큰 스트리밍 여부를 제어한다(**기본 False**, BFF 는
+    # 항상 True 로 호출). True 면 토큰을 다중 송신하고, False 면 답변을 단일 ``token`` 이벤트로
+    # 1회 송신한다(어느 쪽이든 응답은 SSE). 단, ``stream=True`` 라도 PoC 환경(OpenAI 키/
+    # generator_provider 없음)이면 서버가 내부적으로 비-streaming 으로 자동 fallback 한다.
+    stream: bool = Field(
+        default=False, description="SSE 토큰 스트리밍 여부(기본 false, BFF는 항상 true)"
+    )
 
 
 def get_graph(request: Request) -> Any:

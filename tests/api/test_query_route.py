@@ -9,8 +9,8 @@
 feature13 마이그레이션 정합 (api-spec v2.2.0):
   - 엔드포인트 ``/ml/query`` (구 ``/api/v1/rag/query`` 대체).
   - 요청 본문 ``question``/``userId``/``groups``/``conversationId``/``history``/``stream``
-    (구 ``query``/``jwt`` 대체 — JWT 미수신, userId/groups 직접 전달). 명세 정합(2026-06-04):
-    ``spaceKey`` 제거, ``stream`` 재도입(기본 True, False 면 비-streaming).
+    (구 ``query``/``jwt`` 대체 — JWT 미수신, userId/groups 직접 전달). 명세 v2.4.0 정합:
+    ``spaceKey`` 제거, ``stream`` 기본 False(BFF는 항상 true), ``history[].role`` lowercase.
   - SSE: ``token``=``{"content": ...}``, ``sources``=``{"sources": [...]}``(sourceUpdatedAt),
     ``verification``=집계 ``{"confidenceScore", "verificationResult"}``(검색 0건이면 생략),
     ``meta``(현재 구현 호환용 — intent/used_llm/feedback_enabled/latency_ms + title),
