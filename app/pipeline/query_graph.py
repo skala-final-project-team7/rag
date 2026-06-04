@@ -25,8 +25,8 @@
     manage_generator 로 변경. LLM provider/Config 주입을 위해 generator_provider/
     generator_config 필드 추가 (router 와 동일 partial 패턴). generator_stub 은
     회귀 보호용으로 보존. SSE 토큰 스트리밍 (설계서 §4.6.4)·운영 OpenAI transport
-    (§4.6.3)·Rate Limit fallback (§4.6.5)은 본 세션 미구현 — generator.py 미구현
-    섹션 + working-log 참조.
+    (§4.6.3)·Rate Limit fallback (§4.6.5)은 본 세션(2/4)에서는 미구현이었고, 이후
+    feature14·build_real_deps 에서 구현 완료 (generator.py [구현 현황] 섹션 참조).
   - 2026-05-19, Agent 통합 3/4 — answer-verification-agent vendoring +
     manage_verifier_evaluator 어댑터 교체. QueryGraphDeps 의 verify_llm_evaluator
     기본값을 verify_llm_evaluator_stub → manage_verifier_evaluator 로 변경.
@@ -50,9 +50,9 @@
   - Python 3.11.x, LangGraph 0.2.x
   - 외부 의존성: dense/sparse 임베더·QdrantPoolStore·Cross-Encoder Reranker는 모두
     호출자가 주입한다 (`functools.partial` 패턴 — `app/CLAUDE.md` §8).
-  - NOTE: 본 모듈은 Agent 노드(라우터·답변 생성기·검증 2단계)를 stub로 둔 채 end-to-end
-          흐름을 검증한다. Agent 코드 전달 시 `QueryGraphDeps.router_node` /
-          `.generator_node` / `.verify_llm_evaluator` 3곳의 기본값만 교체한다.
+  - NOTE: 본 모듈은 Agent 노드(라우터·답변 생성기·검증 2단계)를 실 어댑터로 기본 wiring
+          한다 (manage_router / manage_generator / manage_verifier_evaluator). 회귀
+          보호용 stub 은 stubs.py 에 보존된다.
 --------------------------------------------------
 """
 
@@ -120,8 +120,9 @@ class QueryGraphDeps:
     """Query 그래프 의존성 묶음 — 그래프 빌더가 노드에 wiring한다.
 
     Pipeline 컴포넌트(검색·재순위화·검증 1단계·포맷터)는 본 담당자 영역에서 이미 완료
-    되었으며, Agent 컴포넌트 3종(라우터·답변 생성기·검증 2단계)은 stub 기본값을 둔다.
-    Agent 코드 전달 시 본 dataclass 인자만 교체하면 그래프는 변경 없이 동작한다.
+    되었으며, Agent 컴포넌트 3종(라우터·답변 생성기·검증 2단계)은 실 어댑터(manage_*)가
+    기본값이다(회귀 보호용 stub 은 stubs.py 에 보존). 본 dataclass 인자만 교체하면 그래프
+    변경 없이 다른 구현으로 바꿀 수 있다.
     """
 
     # --- Pipeline / Storage 의존성 ---
@@ -142,9 +143,9 @@ class QueryGraphDeps:
     routing_config: RoutingConfig | None = None
 
     # 답변 생성기 LLM provider / config — None 이면 manage_generator 가
-    # FakeAnswerLLMProvider + 기본 AnswerGenerationConfig 를 사용한다. agent 의
-    # OpenAIAnswerLLMProvider 는 transport 주입을 요구하므로 본 세션은 운영 모드도
-    # PoC 와 동일하게 fake 자동 — Plan v2 §3 B / generator.py 미구현 섹션 참조.
+    # FakeAnswerLLMProvider + 기본 AnswerGenerationConfig 를 사용한다(PoC·테스트).
+    # 운영(build_real_deps)은 OpenAIAnswerLLMProvider + build_openai_chat_transport
+    # 를 본 필드에 주입한다 (app/query/openai_transport.py).
     generator_provider: GeneratorProvider | None = None
     generator_config: GeneratorConfig | None = None
 

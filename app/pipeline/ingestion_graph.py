@@ -13,7 +13,7 @@
   - 2026-05-18, 최초 작성, feature6 Phase 4 — IngestionGraphDeps + build_ingestion_graph
     + run_ingestion + 3 노드 (analyze_document / chunk_documents / embed_upsert).
     chunk_attachment 는 deps 에 callable 로 주입 가능 (파일 시스템 의존성 회피).
-    PDF/CSV (feature4-B 대기) 의 ValueError 는 catch 후 잡 기록 + 본문은 정상 진행.
+    미지원·암호화 첨부의 ValueError 는 catch 후 잡 기록 + 본문은 정상 진행.
   - 2026-06-04, Agent 통합 4/4 — 문서 분석기 stub → 실 어댑터(manage_document_analyzer)로
     기본값 교체. app/ingestion/document_analyzer.py(featureI-4b 백포트) + space_doc_type_cache
     를 wiring. PoC 는 결정론 Fake 분류기(OPERATION), 운영은 build_real_ingestion_deps 가
@@ -268,7 +268,7 @@ def _process_attachment(
         )
         return list(chunks)
     except ValueError as exc:
-        # PDF/CSV (feature4-B 대기) 또는 알 수 없는 attachment_type — 잡 기록 후 본문은 정상.
+        # 미지원·암호화 PDF 등 알 수 없는 attachment_type 의 ValueError — 잡 기록 후 본문은 정상.
         deps.jobs.record(
             IngestionJobRecord(
                 page_id=page.page_id,

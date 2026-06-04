@@ -24,7 +24,7 @@
           가 transport=None 분기에서 OpenAI Chat Completions 를 직접 호출하므로
           본 어댑터는 transport 미주입 OK (answer-generation-agent 와 차이점).
 
-[본 세션 미구현 — 다음 단계 이관 (rag-pipeline-design.md §4.7 정합)]
+[Agent 서브컴포넌트 미사용(설계상)·후속 이관 항목 (rag-pipeline-design.md §4.7 정합)]
   - (A) agent rule-based verifier 사용 — 본 저장소 ``verify_answer_rules`` 와 중복
         이므로 사용하지 않음. 다음 단계: 두 구현의 정합 (같은 의심 판정) 평가
         세션에서 비교.
