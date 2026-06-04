@@ -10,6 +10,7 @@ import json
 import pytest
 
 from app.query.acl import (
+    PUBLIC_ACL_GROUP,
     ACLViolationError,
     Principal,
     PrincipalExtractionError,
@@ -87,24 +88,37 @@ def test_build_acl_filter_has_should_or_structure() -> None:
     should = acl_filter["should"]
     assert isinstance(should, list) and len(should) == 2
     by_key = {clause["key"]: clause["match"]["any"] for clause in should}
-    # allowed_groups 가 사용자 그룹 중 하나와 매칭 OR allowed_users 가 user_id 포함
-    assert by_key["allowed_groups"] == ["cloud-platform", "sre"]
+    # allowed_groups 가 사용자 그룹 중 하나와 매칭 OR allowed_users 가 user_id 포함.
+    # 모든 인증 사용자 public sentinel("*")이 그룹 목록 끝에 항상 주입된다.
+    assert by_key["allowed_groups"] == ["cloud-platform", "sre", PUBLIC_ACL_GROUP]
     assert by_key["allowed_users"] == ["taesung"]
 
 
 def test_build_acl_filter_handles_empty_groups() -> None:
     acl_filter = build_acl_filter("taesung", [])
     by_key = {clause["key"]: clause["match"]["any"] for clause in acl_filter["should"]}
-    # 그룹이 없어도 두 절 모두 유지 — allowed_users 절로만 접근
-    assert by_key["allowed_groups"] == []
+    # 그룹이 없어도 public sentinel 로 public 청크 매칭 + allowed_users 절로 본인 청크 접근
+    assert by_key["allowed_groups"] == [PUBLIC_ACL_GROUP]
     assert by_key["allowed_users"] == ["taesung"]
+
+
+def test_build_acl_filter_always_injects_public_sentinel() -> None:
+    # 인증 사용자라면 그룹 유무와 무관하게 public("*") 청크에 매칭돼야 한다.
+    assert PUBLIC_ACL_GROUP in build_acl_filter("u", [])["should"][0]["match"]["any"]
+    assert PUBLIC_ACL_GROUP in build_acl_filter("u", ["sre"])["should"][0]["match"]["any"]
+
+
+def test_build_acl_filter_does_not_duplicate_sentinel() -> None:
+    # 사용자가 이미 "*" 그룹을 가진 경우 sentinel 을 중복 추가하지 않는다.
+    groups_field = build_acl_filter("u", [PUBLIC_ACL_GROUP])["should"][0]["match"]["any"]
+    assert groups_field.count(PUBLIC_ACL_GROUP) == 1
 
 
 def test_build_acl_filter_does_not_alias_groups() -> None:
     groups = ["sre"]
     acl_filter = build_acl_filter("taesung", groups)
     groups.append("admin")  # 원본 리스트 변경이 필터에 영향을 주면 안 된다
-    assert acl_filter["should"][0]["match"]["any"] == ["sre"]
+    assert acl_filter["should"][0]["match"]["any"] == ["sre", PUBLIC_ACL_GROUP]
 
 
 # --- @enforce_acl ---
