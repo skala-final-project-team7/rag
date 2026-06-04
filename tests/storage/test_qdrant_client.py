@@ -30,7 +30,7 @@ from app.ingestion.vector_store import (  # noqa: E402
     POOL_NAMES,
     TITLE_POOL,
 )
-from app.query.acl import build_acl_filter  # noqa: E402
+from app.query.acl import PUBLIC_ACL_GROUP, build_acl_filter  # noqa: E402
 from app.schemas.chunk import Chunk, ChunkMetadata  # noqa: E402
 from app.schemas.enums import SourceType  # noqa: E402
 from app.storage.qdrant_client import (  # noqa: E402
@@ -397,6 +397,30 @@ def test_search_group_path_still_grants_when_user_has_space_group(
     hits = store.search(TITLE_POOL, acl_filter=acl_filter, dense_vector=q_vec)
     assert {hit.chunk_id for hit in hits} == {"a" * 40, "b" * 40}, (
         "space 그룹 보유자는 그룹 경로로 두 청크 모두 접근 (OR 의미 유지)"
+    )
+
+
+def test_search_public_chunk_visible_to_any_authenticated_user(
+    store: QdrantPoolStore, dense: FakeDenseEmbedder, sparse: FakeSparseEmbedder
+) -> None:
+    # Ingestion allow_authenticated 정책 — restriction 없는 페이지는 allowed_groups 에
+    # PUBLIC_ACL_GROUP("*")을 갖는다. 그룹도 없고 allowed_users 에도 없는 임의 인증 사용자가
+    # build_acl_filter 의 sentinel 주입 덕에 접근 가능해야 한다(공유 계약 끝-끝 증명).
+    chunk = _chunk(
+        chunk_id="a" * 40,
+        allowed_groups=[PUBLIC_ACL_GROUP],
+        allowed_users=[],
+        text="alpha",
+    )
+    [d_vec] = dense.encode_passages([chunk.text])
+    [s_vec] = sparse.encode_passages([chunk.text])
+    store.upsert_chunk(TITLE_POOL, chunk, version_number=1, dense_vector=d_vec, sparse_vector=s_vec)
+
+    [q_vec] = dense.encode_passages(["alpha"])
+    acl_filter = build_acl_filter("nobody-in-particular", [])
+    hits = store.search(TITLE_POOL, acl_filter=acl_filter, dense_vector=q_vec)
+    assert {hit.chunk_id for hit in hits} == {"a" * 40}, (
+        "public('*') 청크는 그룹/allowed_users 무관하게 인증 사용자에게 노출돼야 한다"
     )
 
 

@@ -89,11 +89,20 @@ payload 필드로 복원한다.
 > (`DATA-03` — 사용자가 접근 가능한 Space 목록)만** 존재한다(기획서 §6.2/§6.5도 ACL을 '스페이스
 > 접근 권한'으로 기술, 샘플 데이터에도 ACL 필드 없음). 따라서 PoC는 아래 (A)로 확정한다.
 >
-> - **(A) `space_key` 기반 — 채택.** 수집 시 `allowed_groups`를 `["space:{space_key}"]`로 합성하고
->   (`_synthesize_acl`/`synthesize_space_acl`), 검색 시 `app/query/acl.py:build_acl_filter`가 JWT
->   `groups`(`space:{key}` 형식 — ADR 0002)를 `allowed_groups`에 OR 매칭한다. 입도는 스페이스 단위.
-> - **(B) `allowed_groups`/`allowed_users`(페이지별) — 보류.** Confluence content restrictions API
->   추가 도입 필요(명세 외). 도입 시 `build_acl_filter`/`_synthesize_acl`만 교체 + 재색인, 별도 ADR.
+> - **(A) `space_key` 기반 — PoC 폴백(admin key off).** 수집 시 `allowed_groups`를
+>   `["space:{space_key}"]`로 합성하고(`synthesize_space_acl`), 검색 시
+>   `app/query/acl.py:build_acl_filter`가 JWT `groups`(`space:{key}` 형식 — ADR 0002)를
+>   `allowed_groups`에 OR 매칭한다. 입도는 스페이스 단위.
+> - **(B) `allowed_groups`/`allowed_users`(페이지별) — 채택(admin key on).** Ingestion 이 Admin Key 로
+>   page-level read restriction 을 조회해 `allowed_groups`/`allowed_users`를 산출한다
+>   (`ConfluenceRestrictionAclProvider`, ingestion 레포). restriction 이 비어 있는 페이지는
+>   `atlassian_empty_restriction_policy`(기본 `allow_authenticated`)로 처리한다.
+>
+> **모든 인증 사용자 허용 sentinel (공유 계약 — ADR 0003).** Ingestion 의 `allow_authenticated`
+> 정책은 restriction 없는 페이지의 `allowed_groups`에 sentinel 토큰(`atlassian_public_acl_group`,
+> 기본 `"*"`)을 부여한다. 검색 측 `app/query/acl.py:build_acl_filter`는 **모든 principal**의
+> `allowed_groups` 매칭에 동일 토큰 `PUBLIC_ACL_GROUP`(`"*"`)을 항상 주입한다. 두 토큰은 반드시
+> 일치해야 하며, 한쪽만 바꾸면 public 페이지가 검색에서 사라지거나(미주입) 과다 노출된다.
 >
 > 모델 교체 여지 보존을 위해 Payload는 `space_key` + `allowed_groups` + `allowed_users`를 **모두
 > 인덱싱**한 채로 둔다. 검색 필터 생성은 `app/query/acl.py`에 격리돼 결정에 따라 그 함수만 교체한다.
