@@ -68,9 +68,6 @@ class RagState(BaseModel):
     user_id: str
     conversation_id: str | None = None
     groups: list[str] = Field(default_factory=list)
-    # feature13 — BFF가 전달하는 검색 대상 Confluence 스페이스(2단계는 고정값).
-    # 현재는 passthrough 로 보관만 하며, 검색 메타데이터 필터 반영은 후속 작업으로 보류.
-    space_key: str = ""
     # ACL Pre-filtering (§4.2)
     acl_filter: dict[str, Any] | None = None
     # 멀티턴 히스토리 (§4.3)

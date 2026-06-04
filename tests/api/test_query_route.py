@@ -8,8 +8,9 @@
 
 feature13 마이그레이션 정합 (api-spec v2.2.0):
   - 엔드포인트 ``/ml/query`` (구 ``/api/v1/rag/query`` 대체).
-  - 요청 본문 ``question``/``userId``/``groups``/``spaceKey``/``conversationId``/``history``
-    (구 ``query``/``jwt`` 대체 — JWT 미수신, userId/groups 직접 전달).
+  - 요청 본문 ``question``/``userId``/``groups``/``conversationId``/``history``/``stream``
+    (구 ``query``/``jwt`` 대체 — JWT 미수신, userId/groups 직접 전달). 명세 정합(2026-06-04):
+    ``spaceKey`` 제거, ``stream`` 재도입(기본 True, False 면 비-streaming).
   - SSE: ``token``=``{"content": ...}``, ``sources``=``{"sources": [...]}``(sourceUpdatedAt),
     ``verification``=집계 ``{"confidenceScore", "verificationResult"}``(검색 0건이면 생략),
     ``meta``(현재 구현 호환용 — intent/used_llm/feedback_enabled/latency_ms + title),
@@ -376,9 +377,7 @@ def _streaming_client(
 
     monkeypatch.setattr(routes_module, "stream_openai_answer", _fake_stream_openai_answer)
     # meta.title 생성도 네트워크 없이 — titler 를 fake 로 monkeypatch(테스트 결정론).
-    monkeypatch.setattr(
-        routes_module, "generate_conversation_title", lambda **_kw: "테스트 제목"
-    )
+    monkeypatch.setattr(routes_module, "generate_conversation_title", lambda **_kw: "테스트 제목")
 
     # settings.openai_api_key 가 빈 SecretStr 이면 fallback. 채워 둔다.
     from pydantic import SecretStr
@@ -445,9 +444,7 @@ def _streaming_client_with_stream_callable(
 
     monkeypatch.setattr(routes_module, "stream_openai_answer", stream_callable)
     # meta.title 생성도 네트워크 없이 — titler 를 fake 로 monkeypatch(테스트 결정론).
-    monkeypatch.setattr(
-        routes_module, "generate_conversation_title", lambda **_kw: "테스트 제목"
-    )
+    monkeypatch.setattr(routes_module, "generate_conversation_title", lambda **_kw: "테스트 제목")
 
     from pydantic import SecretStr
 
@@ -560,6 +557,31 @@ async def test_query_route_stream_true_emits_multiple_token_chunks(
     # feature19 — status 이벤트가 추가됐으므로 token/status 를 제외하고 단언한다.
     trailing_names = [name for name, _ in events if name not in ("token", "status")]
     assert trailing_names == ["sources", "verification", "meta", "done"]
+
+
+@pytest.mark.asyncio
+async def test_query_route_stream_false_forces_non_streaming(
+    populated_graph: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """명세 정합 — ``stream=false`` 면 OpenAI 가용(streaming 가능) 환경이어도 비-streaming.
+
+    ``_streaming_client`` 는 deps.generator_provider/openai_api_key 를 채워 streaming 분기가
+    가능한 상태를 만든다. 그럼에도 ``stream=False`` 요청은 단일 token(전체 답변) + 후행 4종의
+    비-streaming 5 이벤트 시퀀스로 응답해야 한다(stream 플래그가 서버 가용성보다 우선).
+    """
+    client = _streaming_client(
+        populated_graph,
+        monkeypatch=monkeypatch,
+        streaming_tokens=["답변", "시작", "[#1]"],
+    )
+    async with client as c:
+        resp = await c.post("/ml/query", json=_body(stream=False))
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    event_names = [name for name, _ in events]
+    # 비-streaming — status 이벤트 없음, token 정확히 1회 + 후행 4종.
+    assert "status" not in event_names
+    assert event_names == ["token", "sources", "verification", "meta", "done"]
 
 
 # --- feature19: SSE 진행 status 이벤트 ---
