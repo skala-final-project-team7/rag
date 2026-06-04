@@ -24,7 +24,7 @@
 | `groups` | string[] | Y | `[]` | 사용자 그룹 — ACL `should`-OR 필터 |
 | `conversationId` | string | N | null | 멀티턴 대화 컨텍스트 ID |
 | `history` | array | N | `[]` | 이전 대화 이력 `[{ "role": "user"\|"assistant", "content": "..." }]` (BFF가 DB에서 조회) |
-| `stream` | boolean | N | `true` | true면 토큰 단위 스트리밍, false면 단일 `token` 1회 송신. PoC 환경(OpenAI 키 없음)에서는 true여도 자동으로 비스트리밍 fallback |
+| `stream` | boolean | N | `false` | true면 토큰 단위 스트리밍, false면 단일 `token` 1회 송신. **BFF는 항상 true로 호출**(api-spec v2.4.0 §2-1). PoC 환경(OpenAI 키 없음)에서는 true여도 자동으로 비스트리밍 fallback |
 
 > `accessToken`/`cloudId` 는 `/ml/query` 에 전달하지 않는다(v2.2.0 — 질의 경로는 라이브
 > Confluence 호출이 없어 토큰 불필요, 토큰은 수집 `/ml/ingest` 단계에서만 사용).
