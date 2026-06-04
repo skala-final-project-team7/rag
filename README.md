@@ -43,6 +43,12 @@ cp .env.example .env
 # .env 편집
 ```
 
+> **부팅 필수 extra:** `pip install -e .` (extra 없이) 만으로는 **앱이 기동되지 않는다**.
+> `app.api.main` import 시 chunker 가 PyMuPDF·python-docx·openpyxl·BeautifulSoup4(= `ingestion`
+> extra)를 끌어오기 때문이다. 따라서 **최소 `pip install -e ".[ingestion]"`** 이 필요하다.
+> 무거운 `embedding` extra(torch·sentence-transformers, 약 2.4GB)는 lazy 로딩이라 운영(real)
+> 모드(`RAG_USE_REAL_ADAPTERS=true`)에서만 필요하다.
+
 ### 사전 진단 (Windows)
 
 ```powershell
@@ -84,10 +90,30 @@ python -m examples.demo_data_layer
 
 ---
 
+## 실행 · 통합 계약 (인프라 담당자용)
+
+> 컨테이너화·CI·배포는 인프라에서 담당한다. 통합에 필요한 계약을 아래 한 곳에 모은다.
+
+| 항목 | 값 |
+|---|---|
+| 기동 | `uvicorn app.api.main:app --host 0.0.0.0 --port 8000` |
+| 엔드포인트 | `POST /ml/query` · `GET /ml/rag/health` · `GET /healthz` · `GET /metrics`(Prometheus) |
+| Python | 3.11.x (`>=3.11,<3.12`) |
+| 부팅 필수 설치 | `pip install -e ".[ingestion]"` — **base 설치(`pip install -e .`)만으로는 부팅 불가** |
+| 운영(real) 모드 추가 | `[embedding]`(torch·sentence-transformers 약 2.4GB, lazy). `RAG_USE_REAL_ADAPTERS=true` 일 때만 |
+| 외부 의존 | Qdrant · MongoDB · MySQL · OpenAI |
+| 환경변수 | `.env.example` 참조 — 전 항목 PoC 기본값 有, 시크릿은 `RAG_OPENAI_API_KEY` |
+| env 프리픽스 | `RAG_` — **`ingestion` 레포와 동일 env 네임스페이스를 의도적으로 공유**(같은 Qdrant/Mongo/MySQL 을 가리킴). 두 서비스를 하나의 ConfigMap/`.env` 로 합칠 경우 값이 동일해야 충돌하지 않는다 |
+| 인증 · CORS | 본 앱은 미들웨어 없음 — **BFF 가 담당** |
+| 헬스 체크 성격 | `/healthz`·`/ml/rag/health` 는 **liveness 전용**(항상 `UP`/`ok`, 의존성 끊김은 보고하지 않음) |
+| PoC 토글 | `RAG_USE_REAL_ADAPTERS=false`(기본): 외부 컨테이너·모델 없이 인메모리로 즉시 응답 |
+
+---
+
 ## 외부 서비스 (선택)
 
-RAG 파이프라인은 다음 3종의 저장소를 사용한다. 현재 구현 단계에서는 클라이언트
-호출 코드가 아직 없어 띄우지 않아도 테스트/데모가 통과한다.
+RAG 파이프라인은 다음 3종의 저장소를 사용한다. 기본 PoC 모드(`RAG_USE_REAL_ADAPTERS=false`)는
+인메모리로 동작해 이 3종 없이도 테스트/데모가 통과하며, 운영(real) 모드에서 실제로 접속한다.
 
 - **Qdrant** — Multi-Pool Vector Store (`title_pool` / `content_pool` / `label_pool`)
 - **MongoDB** — `rag_mock.pages` · `rag_mock.attachments` · `ingestion_jobs` · `embedding_cache`
@@ -115,8 +141,8 @@ app/
   ingestion/      청킹·임베딩·벡터 스토어
   query/          ACL · 히스토리 · 검색 · 재순위화 · 검증 · 포맷터
   schemas/        공통 Pydantic 모델 (PageObject, Chunk, RagState 등)
-  api/            FastAPI 진입점 (미구현 — feature11)
-  pipeline/       LangGraph 그래프 조립 (미구현 — feature11)
+  api/            FastAPI 진입점 (`app.api.main:app`, 포트 8000 — POST /ml/query · /healthz · /metrics)
+  pipeline/       LangGraph 그래프 조립 (Query 그래프 — `build_query_graph`)
   llm/            OpenAI 클라이언트 래퍼 (Agent 담당)
   config.py       pydantic-settings 기반 환경 설정
 
