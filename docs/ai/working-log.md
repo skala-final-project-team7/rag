@@ -7161,3 +7161,37 @@ ms-marco 계열은 관련 passage 에 큰 양수 logit(8~11)을 출력하는 특
 - 검증: ruff check . / ruff format --check . 통과(141 files, 코드 무변경). 전체 pytest 는
   본 샌드박스가 Python 3.10(StrEnum 3.11+ 미지원)이라 제약 — Mac/3.11 에서 무영향 확인 권장
   (문서만 변경이라 테스트 영향 없음).
+
+## 2026-06-04 — 명세 정합: `/ml/query` 최종 요청 계약 (spaceKey 제거 + stream 재도입)
+
+확정된 명세(`question`/`userId`/`groups`/`conversationId`/`history[{role,content}]`/`stream`)에
+맞춰 `/ml/query` 요청 계약과 그에 의존하던 파이프라인 구조를 정렬했다.
+
+**변경**
+
+- `app/api/routes.py` — `QueryRequest` 에서 `space_key`(alias `spaceKey`) **제거**, `stream: bool
+  = True` **재도입**. `RagState` 구성에서 `space_key` 인자 제거. `query_route` 의 스트리밍 분기를
+  `if payload.stream and not _should_fallback_to_non_streaming(...)` 로 변경 — 클라이언트 `stream`
+  플래그를 존중하되 PoC(OpenAI 키/generator_provider 없음)는 종전대로 비-streaming 자동 fallback.
+  docstring/changelog 갱신.
+- `app/schemas/rag_state.py` — `RagState.space_key`(feature13 passthrough 필드) **제거**. 문서·청크
+  레벨 `space_key`(ChunkMetadata/Source/payload/ACL/embedding)는 무관하므로 그대로 둔다.
+- `app/query/search_node.py` — 요청 `spaceKey` **하드 스코프 제거**. 검색 metadata filter 는 라우터
+  추정 `metadata_filters`(`_coerce_metadata_filters` 복수형→단수형 정규화) 에서만 온다. 0건 fallback
+  은 metadata filter 를 완전히 완화(None, ACL 유지)하는 feature17c-6 원형 동작으로 복귀.
+- 문서: `docs/api-spec.md`(요청 표·예시·헤더/§1-1 status 정합·변경이력), `docs/sse-frontend-contract.md`
+  (요청 표 — spaceKey 행 제거, stream 기본값 false→true 정정).
+
+**설계 메모**
+
+- `history[].role` 은 명세 예시의 소문자(`user`/`assistant`)를 그대로 수용한다 — `HistoryTurn`
+  validator 가 내부적으로 UPPER 정규화하므로 입력은 대소문자 무관(무변경).
+- `accessToken`/`cloudId` 는 종전과 동일하게 `/ml/query` 에서 미수신(수집 단계 이관).
+- 라우터(`router.py`/`routing_transport.py`)의 `space_keys` metadata filter 는 LLM 질의 이해
+  기반 문서 스코핑이라 요청 필드와 무관 — 유지한다.
+
+**검증**: ruff check .(repo 전체) / ruff format --check / py_compile 통과. 실 `QueryRequest` 클래스
+소스를 격리 exec 해 **명세 페이로드 그대로** 검증(필드 정합·stream=True·history role 정규화·spaceKey
+부재·stream=false 존중). `RagState` 격리 검증(space_key 필드 부재). 전체 pytest·`./scripts/verify.sh`
+는 Mac/3.11. 테스트: `tests/api/test_query_route.py` 에 `stream=false` 비-streaming 강제 회귀 추가,
+docstring 정합. (`spaceKey` 를 보내던 테스트는 없었음 — `_body()` 가 이미 미포함.)

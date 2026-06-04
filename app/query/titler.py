@@ -40,7 +40,7 @@ def _clean_title(raw: str) -> str:
     # 흔한 접두어 제거(대소문자 무관) — "제목:" / "title:".
     for prefix in ("제목:", "제목 :", "title:", "Title:"):
         if text.lower().startswith(prefix.lower()):
-            text = text[len(prefix):].strip()
+            text = text[len(prefix) :].strip()
     if len(text) > _MAX_TITLE_LEN:
         text = text[:_MAX_TITLE_LEN].rstrip()
     return text

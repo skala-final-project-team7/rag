@@ -34,6 +34,11 @@
     (4) 오류는 HTTP 에러 JSON 대신 SSE ``error`` 이벤트로 전달하고 스트림 종료.
         RETRIEVAL_EMPTY/LOW_CONFIDENCE/VERIFICATION_BLOCKED 는 종전대로 200 SSE
         내부 분기로 처리한다.
+  - 2026-06-04, 명세 정합 — 최종 ``/ml/query`` 요청 계약 반영: (1) ``spaceKey`` 요청 필드
+    제거(RagState passthrough·search_node 하드 스코프 함께 제거 — 검색 스코프는 라우터
+    추정 ``metadata_filters`` 로만). (2) ``stream`` 요청 필드 재도입(기본 True) — 클라이언트가
+    스트리밍 여부를 제어하고, ``stream=False`` 면 단일 ``token`` 1회 송신. ``accessToken``/
+    ``cloudId`` 는 수신하지 않는다(수집 단계 이관 — 종전과 동일).
 --------------------------------------------------
 [호환성]
   - Python 3.11.x, FastAPI 0.111+, sse-starlette 2.1+
@@ -70,7 +75,7 @@ router = APIRouter()
 class QueryRequest(BaseModel):
     """``POST /ml/query`` 요청 본문 (docs/api-spec.md, BE 통합 스펙 §2-1).
 
-    BFF 는 camelCase JSON 을 보낸다(``userId``/``spaceKey``/``conversationId`` 등).
+    BFF 는 camelCase JSON 을 보낸다(``userId``/``conversationId`` 등).
     ``populate_by_name=True`` 로 snake_case 필드명 입력도 허용한다(테스트 편의).
     """
 
@@ -81,21 +86,17 @@ class QueryRequest(BaseModel):
         ..., min_length=1, alias="userId", description="ACL Pre-filtering 사용자 식별자"
     )
     groups: list[str] = Field(default_factory=list, description="사용자 그룹 — ACL should-OR 필터")
-    space_key: str = Field(
-        default="", alias="spaceKey", description="검색 대상 Confluence 스페이스(2단계 고정값)"
-    )
     conversation_id: str | None = Field(
         default=None, alias="conversationId", description="대화 컨텍스트 ID"
     )
     history: list[HistoryTurn] = Field(
         default_factory=list, description="이전 대화 이력 [{role, content}] (BFF가 DB에서 조회)"
     )
-    # api-spec v2.2.0 §1-1 — 챗 엔드포인트는 **항상 SSE 스트리밍**이며 비-스트리밍 모드
-    # (``stream=false``)는 제공하지 않는다. 따라서 클라이언트가 제어하는 ``stream`` 요청
-    # 필드를 두지 않는다(extra=ignore 이므로 구버전 BFF 가 보내도 무시된다). 스트리밍/비-
-    # 스트리밍 선택은 오직 서버 내부 PoC 가용성(``_should_fallback_to_non_streaming``)으로만
-    # 결정한다 — OpenAI 키/generator_provider 가 없는 PoC 환경은 자동으로 비-streaming 으로
-    # 처리하되, 외부로는 동일한 SSE 이벤트 계약을 노출한다.
+    # 명세 §2-1 — 클라이언트가 SSE 토큰 스트리밍 여부를 제어한다(기본 True). True 면 토큰을
+    # 다중 송신하고, False 면 답변을 단일 ``token`` 이벤트로 1회 송신한다(어느 쪽이든 응답은
+    # SSE). 단, ``stream=True`` 라도 PoC 환경(OpenAI 키/generator_provider 없음)이면 서버가
+    # 내부적으로 비-streaming 으로 자동 fallback 한다(외부 SSE 이벤트 계약은 동일).
+    stream: bool = Field(default=True, description="SSE 토큰 스트리밍 여부(기본 true)")
 
 
 def get_graph(request: Request) -> Any:
@@ -360,9 +361,7 @@ async def _streaming_event_stream_inner(
             latency_ms=int(elapsed_ms),
         )
         # meta.title — 0건 분기도 제목을 채운다(질문 기반). api-spec §1-1 Required: N.
-        response.title = _resolve_title(
-            request, question=state.query, answer=response.answer or ""
-        )
+        response.title = _resolve_title(request, question=state.query, answer=response.answer or "")
         for event in _sse_payload(response):
             yield event
         return
@@ -487,11 +486,11 @@ async def query_route(payload: QueryRequest, request: Request, graph: GraphDep) 
 
     docs/api-spec.md "POST /ml/query" 정합:
       1. BFF가 전달한 ``userId``/``groups`` 로 ``build_acl_filter`` (Qdrant should-OR).
-      2. ``RagState`` 구성(question/userId/groups/spaceKey/conversationId/history) 후
-         항상 SSE 스트리밍으로 응답한다(api-spec v2.2.0 §1-1 — 비-스트리밍 모드 미제공):
-         - 운영(OpenAI 가용): ``_streaming_event_stream`` 으로 token 다중 송신.
-         - PoC(OpenAI 키/generator_provider 없음): 내부적으로 ``run_query`` 비-streaming
-           흐름으로 자동 fallback(외부 SSE 이벤트 계약은 동일).
+      2. ``RagState`` 구성(question/userId/groups/conversationId/history) 후 ``stream``
+         요청 필드에 따라 SSE 로 응답한다:
+         - ``stream=True`` + 운영(OpenAI 가용): ``_streaming_event_stream`` 으로 token 다중 송신.
+         - ``stream=False`` 또는 PoC(OpenAI 키/generator_provider 없음): ``run_query``
+           비-streaming 흐름(token 1회). 외부 SSE 이벤트 계약은 동일.
       3. 오류는 SSE ``error`` 이벤트로 전달하고 스트림을 종료한다.
     """
     state = RagState(
@@ -499,7 +498,6 @@ async def query_route(payload: QueryRequest, request: Request, graph: GraphDep) 
         user_id=payload.user_id,
         groups=payload.groups,
         conversation_id=payload.conversation_id,
-        space_key=payload.space_key,
         history=payload.history,
         acl_filter=build_acl_filter(payload.user_id, payload.groups),
     )
@@ -509,7 +507,7 @@ async def query_route(payload: QueryRequest, request: Request, graph: GraphDep) 
     # 계약은 동일). SSE 응답 헤더는 스펙 §1-1 "연결·타임아웃" 정합 — Cache-Control: no-cache
     # (sse-starlette 기본 no-store 를 명시 override) + X-Accel-Buffering: no(프록시 버퍼링 비활성).
     sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-    if not _should_fallback_to_non_streaming(request):
+    if payload.stream and not _should_fallback_to_non_streaming(request):
         return EventSourceResponse(
             _streaming_event_stream(request=request, state=state),
             headers=sse_headers,

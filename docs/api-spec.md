@@ -6,7 +6,8 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 
 > 인증/JWT 발급·Gateway 라우팅·대화/메시지 영속화·피드백·미리보기 등 FE↔BFF 외부 API는
 > BFF/BE 담당 영역이다(`api-spec-BE-adjust.md` §1 참조). 본 파이프라인은 BFF가 전달한
-> `userId`/`groups`로 ACL 필터를 만들고 `spaceKey`로 검색 범위를 제한한다.
+> `userId`/`groups`로 ACL 필터를 만들어 검색 범위를 제한한다(검색 스페이스 스코프는 라우터
+> 추정 `metadata_filters`로 처리하며, 요청 본문에 `spaceKey`는 없다).
 
 > **변경 이력**
 > - 2026-05-22, feature13 — BE 통합 스펙 반영(문서). 엔드포인트 `/api/v1/rag/query` → `/ml/query`,
@@ -30,6 +31,13 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 >   `Cache-Control: no-cache` 명시. (5) `history[].role` 을 Enum 정책의 UPPER(`USER`/
 >   `ASSISTANT`)로 정규화(`app/schemas/rag_state.py`). (6) `ErrorResponse` 를 공통 Wrapper
 >   4필드 봉투(`isSuccess`/`code`/`errorCode`/`message`)로 재정의(`app/api/errors.py`).
+> - 2026-06-04, **명세 정합(최종 요청 계약).** 확정 명세에 맞춰 `/ml/query` 요청 본문을 정렬:
+>   (1) `spaceKey` 요청 필드 **제거** — `QueryRequest`·`RagState` passthrough·`search_node`
+>   하드 스코프를 모두 제거하고, 검색 스페이스 스코프는 라우터 추정 `metadata_filters` 로만
+>   처리(`app/api/routes.py`·`app/schemas/rag_state.py`·`app/query/search_node.py`). (2) `stream`
+>   요청 필드 **재도입**(기본 `true`) — 클라이언트가 스트리밍 여부를 제어하며 `stream=false` 면
+>   단일 `token` 1회 송신. PoC 환경은 `stream=true` 라도 비-streaming 자동 fallback(외부 SSE
+>   계약 동일). (3) `accessToken`/`cloudId` 는 종전대로 미수신(수집 단계 이관).
 
 ---
 
@@ -48,23 +56,23 @@ SSE 이벤트 형식과 정합한다. API 변경 시 이 문서를 함께 수정
 | 필드 | 타입 | 필수 | 설명 |
 |---|---|---|---|
 | `question` | string | Y | 사용자 자연어 질문 |
-| `conversationId` | string | N | 대화 컨텍스트 ID |
-| `history` | array | N | 이전 대화 이력 `[{ "role": "USER"\|"ASSISTANT", "content": "..." }]`. BFF가 DB에서 조회해 전달(멀티턴). `role` 값은 Enum 정책의 UPPER(`USER`/`ASSISTANT`) |
 | `userId` | string | Y | ACL Pre-filtering 사용자 식별자(BFF가 JWT에서 추출, 2단계 데모는 고정값) |
 | `groups` | string[] | Y | 사용자 그룹 — ACL `should`-OR 필터 |
-| `spaceKey` | string | Y | 검색 대상 Confluence 스페이스. 2단계는 고정값(`lina.demo.fixed-space-key`) |
+| `conversationId` | string | N | 대화 컨텍스트 ID |
+| `history` | array | N | 이전 대화 이력 `[{ "role": "user"\|"assistant", "content": "..." }]`. BFF가 DB에서 조회해 전달(멀티턴). `role` 은 대소문자 무관 수용(내부 UPPER 정규화) |
+| `stream` | boolean | N | SSE 토큰 스트리밍 여부(기본 `true`). `false` 면 답변을 단일 `token` 이벤트로 1회 송신한다(응답은 어느 쪽이든 SSE) |
 
 ```json
 {
   "question": "지난번 S3 버킷 권한 오류 때 어떻게 해결했어?",
+  "userId": "user-001",
+  "groups": ["Cloud-Control-Center", "devops-team"],
   "conversationId": "conv-uuid-001",
   "history": [
-    { "role": "USER", "content": "S3 관련 장애 이력 알려줘" },
-    { "role": "ASSISTANT", "content": "최근 S3 관련 장애는 3건이 있었습니다..." }
+    { "role": "user", "content": "S3 관련 장애 이력 알려줘" },
+    { "role": "assistant", "content": "최근 S3 관련 장애는 3건이 있었습니다..." }
   ],
-  "userId": "user-001",
-  "groups": ["Cloud-Control-Center"],
-  "spaceKey": "CPC"
+  "stream": true
 }
 ```
 
@@ -184,10 +192,9 @@ data: {"phase": "searching", "message": "관련 문서를 검색하고 있어요
 - `data`는 JSON 객체 `{"phase": "<phase>", "message": "<한국어 진행 메시지>"}` (다른 JSON
   이벤트와 동일하게 `ensure_ascii=False` 직렬화).
 - 각 phase는 해당 단계 진입 시 1회 송신된다.
-- **운영 streaming 경로(OpenAI 가용)에만 적용**된다. 챗 엔드포인트는 항상 스트리밍이지만
-  (클라이언트 `stream` 필드 없음), PoC 환경(OpenAI 키/generator_provider 없음)은 그래프를 단일
-  블로킹 호출로 실행한 뒤 모든 이벤트를 한꺼번에 flush 하므로(phase 동시 발사 — 진행 표시 가치
-  없음) `status` 를 송신하지 않는다.
+- **운영 streaming 경로(`stream=true` + OpenAI 가용)에만 적용**된다. `stream=false` 이거나
+  PoC 환경(OpenAI 키/generator_provider 없음)은 그래프를 단일 블로킹 호출로 실행한 뒤 모든
+  이벤트를 한꺼번에 flush 하므로(phase 동시 발사 — 진행 표시 가치 없음) `status` 를 송신하지 않는다.
 
 | phase | message(예) | 송신 시점 |
 |---|---|---|
