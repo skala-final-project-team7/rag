@@ -1,5 +1,15 @@
 # LINA RAG Pipeline
 
+![Last commit](https://img.shields.io/github/last-commit/skala-final-project-team7/rag?style=flat-square)
+![Issues](https://img.shields.io/github/issues/skala-final-project-team7/rag?style=flat-square)
+![PRs](https://img.shields.io/github/issues-pr/skala-final-project-team7/rag?style=flat-square)
+![Top language](https://img.shields.io/github/languages/top/skala-final-project-team7/rag?style=flat-square)
+
+![Python 3.11](https://img.shields.io/badge/Python_3.11-3776AB?style=flat-square&logo=python&logoColor=white)
+![Qdrant](https://img.shields.io/badge/Qdrant-DC244C?style=flat-square&logo=qdrant&logoColor=white)
+![Hugging Face](https://img.shields.io/badge/Hugging_Face-FFD21E?style=flat-square&logo=huggingface&logoColor=black)
+![Cross-Encoder](https://img.shields.io/badge/Cross--Encoder-Reranking-555?style=flat-square)
+
 척척학사(LINA) Confluence 기반 RAG 챗봇 서비스의 RAG 파이프라인.
 
 본 레포는 SKALA Final Project Team 7의 RAG 파이프라인 모듈을 담는다. 답변 생성기·
