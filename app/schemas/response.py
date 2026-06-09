@@ -60,7 +60,7 @@ class Source(BaseModel):
     download_url: str | None = None
 
     def to_bff_payload(self) -> dict[str, Any]:
-        """BE 통합 스펙(``api-spec-BE-adjust.md`` §1-1) sources 항목 형식으로 직렬화.
+        """``docs/api-spec.md`` §1-1 sources 항목 형식으로 직렬화.
 
         - ``relevanceScore``: 내부 score(0~100 정수) ÷ 100 → 0~1 float.
         - ``sourceUpdatedAt``: last_modified 를 KST(+09:00)로 절대 전환한 ISO 8601 문자열.
@@ -92,8 +92,7 @@ class Verification(BaseModel):
 class VerificationSummary(BaseModel):
     """문장별 검증 결과를 단일 값으로 집계한 SSE ``verification`` 이벤트 페이로드.
 
-    BE 통합 스펙(``api-spec-BE-adjust.md`` §1-1) 정합 — ``docs/api-spec.md`` "verification"
-    집계 규칙을 그대로 구현한다.
+    ``docs/api-spec.md`` §1-1 "verification" 집계 규칙을 그대로 구현한다.
     """
 
     confidence_score: float
