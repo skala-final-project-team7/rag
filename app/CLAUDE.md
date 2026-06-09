@@ -6,6 +6,11 @@
 설계 기준 문서: `docs/rag-pipeline-design.md`, `docs/chunking-strategy.md`,
 `docs/db-schema.md`, `docs/api-spec.md`, `docs/architecture.md`.
 
+> `app/schemas`·`app/ingestion/{chunker,embedder,embedding,vector_store,indexer}`·`app/storage`·`app/adapters`는
+> `../ingestion`과 **바이트 동일로 공유하는 자산**이며 본 레포(`rag`)가 owning source다. **한쪽만 수정하지 않는다** —
+> 변경 시 양 레포를 같은 change-set로 동기화한다(루트 `CLAUDE.md` "공유 자산 변경 동기화" +
+> `docs/adr/0003-ingestion-rag-shared-contracts.md`). 정확한 파일 목록·추출 가이드는 공유 표면 매니페스트 참조.
+
 > Codex를 사용하는 팀원은 이 파일을 `app/AGENTS.md`로 복사하거나 심볼릭 링크로 연결해 사용한다.
 
 ---
