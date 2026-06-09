@@ -546,6 +546,8 @@ BE 통합 API 스펙 수신(`api-spec-BE-adjust.md`, 2026-05-21). PDF #2(API Spe
       직렬화 단위 테스트 추가
     - 범위 밖: `accessToken`/`cloudId`(3단계 수신만), `extract_principal`은 acl.py에 보존
       (라우트만 사용 중단), spaceKey 검색 필터 반영은 후속
+    - ⚠ (2026-06-04 v2.4 정합으로 **superseded**) — `spaceKey`·`RagState.space_key`는 이후 제거됨
+      (cross-space 전환). 본 단계 기록은 이력이며 최신 계약은 위 line 31·`docs/api-spec.md` v2.5 참조.
 - **(PDF #3) Schema — user ACL + Confluence call 명세 정합**
   - 대기 (BE 확정 필요):
     - user ACL (권한) 관련 column 이 BE 에서 어떻게 전달되는지

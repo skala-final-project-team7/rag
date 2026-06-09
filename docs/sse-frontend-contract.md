@@ -4,7 +4,7 @@
 `POST /api/conversations/{conversationId}/chat` 으로 그대로 중계하며 `done` 에 `messageId` 를
 주입한다(api-spec v2.2.0 §1-1/§2-1). 근거 코드: `app/api/routes.py`, `app/schemas/response.py`,
 `app/schemas/enums.py`, `app/query/formatter.py`, `app/api/errors.py`. 정본 계약은
-`docs/api-spec.md` 및 LINA `api-spec.md` v2.2.0.
+`docs/api-spec.md`(현행 **v2.5.0**) — SSE 7종 이벤트 계약은 v2.2.0 이후 불변이다.
 
 ---
 
