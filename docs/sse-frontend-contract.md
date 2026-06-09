@@ -192,18 +192,20 @@ data: {"phase": "searching", "message": "관련 문서를 검색하고 있어요
 
 ## 7. 에러 (SSE `error` 이벤트)
 
-오류는 HTTP 에러가 아니라 **SSE `error` 이벤트**로 전달하고 스트림을 종료한다(api-spec v2.2.0).
+오류는 HTTP 에러가 아니라 **SSE `error` 이벤트**로 전달하고 스트림을 종료한다(api-spec §1-1/§2-1).
 
 ```
 event: error
-data: {"code": "UPSTREAM_LLM_ERROR", "message": "답변 생성 중 오류가 발생했습니다"}
+data: {"errorCode": "ML_SERVER_ERROR", "message": "답변 생성 중 오류가 발생했습니다"}
 ```
 
-| code | 상황 |
+| errorCode | 상황 |
 |---|---|
-| `UPSTREAM_LLM_ERROR` | LLM 호출 실패 / 타임아웃 / ACL 시스템 오류 |
-| `ML_SERVER_ERROR` | ML 서버 일반 오류 |
+| `ML_SERVER_ERROR` | ML 서버 5xx · 내부 처리 오류(ACL 시스템 오류 포함) |
+| `ML_TIMEOUT` | ML 응답 / 스트림 타임아웃 |
+| `ML_CONNECTION_ERROR` | ML 연결 실패 / 스트림 중단 |
 
+- payload 키는 단일 `errorCode` 다(RAG·BFF·FE passthrough — `code`→`errorCode` 매핑 없음).
 - 요청 본문 검증 실패(필수 필드 누락 등)는 FastAPI 기본 422 로 응답한다(SSE 진입 전).
 - `RETRIEVAL_EMPTY`, `LOW_CONFIDENCE`, `VERIFICATION_BLOCKED` 코드는 정의돼 있으나 현재
   구현에서는 **에러가 아니라 정상 200 SSE 내부 분기**로 처리된다(5번 표 참고).
