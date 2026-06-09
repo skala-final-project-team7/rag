@@ -31,7 +31,7 @@
 
 - **ACL Pre-filtering을 우회하지 않는다.** Qdrant 검색 호출은 `@enforce_acl` 데코레이터를 통과해야 하며, ACL 필터가 없는 호출은 `ACLViolationError`로 거부한다.
 - ACL 필터링을 LLM 프롬프트에 위임하지 않는다 (Prompt Injection 우회 방지).
-- ACL 필드 모델(`space_key` 기반 vs `allowed_groups`/`allowed_users` 기반)은 팀 결정 대기 중이다 (`docs/db-schema.md` §1.4 참조). 결정 전까지 `app/query/acl.py`의 필터 생성 로직만 교체 가능하도록 분리하고, `@enforce_acl` 강제 원칙 자체는 어떤 모델에서도 유지한다.
+- ACL 필드 모델은 **`allowed_groups`/`allowed_users` 기반으로 확정**되었다 (api-spec v2.5 / ADR 0003, `docs/db-schema.md` §1.4). 검색은 `app/query/acl.py`의 `build_acl_filter`가 사용자 `groups`에 `allow_authenticated` 공개 sentinel `"*"`(`PUBLIC_ACL_GROUP`)를 주입해 page-level ACL과 매칭한다. PoC fixture 경로는 `space:{key}` 합성을 fallback으로 유지한다. `@enforce_acl` 강제 원칙은 모든 경우에 유지한다.
 - 출처 없는 답변을 생성하는 방향으로 수정하지 않는다. 검색 결과 0건이면 LLM을 호출하지 않고 표준 분기 응답을 반환한다.
 - 답변 검증(1단계 규칙 + 2단계 LLM 평가자)을 우회하거나 비활성화하지 않는다.
 - ACL 정보가 전혀 없는 PageObject·청크는 색인하지 않는다 (`INVALID_ACL`).
